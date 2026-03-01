@@ -271,10 +271,18 @@ static int needs_more_input(char *buf, size_t *len) {
     int quote;
     int paren_depth;
     int brace_depth;
+    int if_depth;
+    int do_depth;
+    int case_depth;
+    bool command_position;
 
     quote = 0;
     paren_depth = 0;
     brace_depth = 0;
+    if_depth = 0;
+    do_depth = 0;
+    case_depth = 0;
+    command_position = true;
     i = 0;
     while (i < *len) {
         char ch;
@@ -301,26 +309,120 @@ static int needs_more_input(char *buf, size_t *len) {
                 i += 2;
                 continue;
             }
+            if (isspace((unsigned char)ch)) {
+                if (ch == '\n') {
+                    command_position = true;
+                }
+                i++;
+                continue;
+            }
+            if (ch == ';') {
+                command_position = true;
+                i++;
+                continue;
+            }
+            if ((ch == '|' || ch == '&') && i + 1 < *len && buf[i + 1] == ch) {
+                command_position = true;
+                i += 2;
+                continue;
+            }
+            if (ch == '|' || ch == '&') {
+                command_position = true;
+                i++;
+                continue;
+            }
             if (ch == '(') {
                 paren_depth++;
+                command_position = true;
                 i++;
                 continue;
             }
             if (ch == ')' && paren_depth > 0) {
                 paren_depth--;
+                command_position = false;
                 i++;
                 continue;
             }
             if (ch == '{') {
-                brace_depth++;
+                if (command_position) {
+                    brace_depth++;
+                    command_position = true;
+                } else {
+                    command_position = false;
+                }
                 i++;
                 continue;
             }
-            if (ch == '}' && brace_depth > 0) {
-                brace_depth--;
+            if (ch == '}') {
+                if (command_position && brace_depth > 0) {
+                    brace_depth--;
+                }
+                command_position = false;
                 i++;
                 continue;
             }
+            if (isalpha((unsigned char)ch) || ch == '_') {
+                size_t start;
+                size_t end;
+                size_t wlen;
+
+                start = i;
+                end = i + 1;
+                while (end < *len &&
+                       (isalnum((unsigned char)buf[end]) || buf[end] == '_')) {
+                    end++;
+                }
+                wlen = end - start;
+
+                if (command_position) {
+                    if (wlen == 2 && strncmp(buf + start, "if", 2) == 0) {
+                        if_depth++;
+                        command_position = true;
+                    } else if (wlen == 2 && strncmp(buf + start, "fi", 2) == 0) {
+                        if (if_depth > 0) {
+                            if_depth--;
+                        }
+                        command_position = false;
+                    } else if (wlen == 2 &&
+                               strncmp(buf + start, "do", 2) == 0) {
+                        do_depth++;
+                        command_position = true;
+                    } else if (wlen == 4 &&
+                               strncmp(buf + start, "done", 4) == 0) {
+                        if (do_depth > 0) {
+                            do_depth--;
+                        }
+                        command_position = false;
+                    } else if (wlen == 4 &&
+                               strncmp(buf + start, "case", 4) == 0) {
+                        case_depth++;
+                        command_position = true;
+                    } else if (wlen == 4 &&
+                               strncmp(buf + start, "esac", 4) == 0) {
+                        if (case_depth > 0) {
+                            case_depth--;
+                        }
+                        command_position = false;
+                    } else if ((wlen == 4 &&
+                                strncmp(buf + start, "then", 4) == 0) ||
+                               (wlen == 4 &&
+                                strncmp(buf + start, "else", 4) == 0) ||
+                               (wlen == 4 &&
+                                strncmp(buf + start, "elif", 4) == 0) ||
+                               (wlen == 2 &&
+                                strncmp(buf + start, "in", 2) == 0)) {
+                        command_position = true;
+                    } else {
+                        command_position = false;
+                    }
+                } else {
+                    command_position = false;
+                }
+
+                i = end;
+                continue;
+            }
+            command_position = false;
             i++;
             continue;
         }
@@ -346,6 +448,9 @@ static int needs_more_input(char *buf, size_t *len) {
         return 1;
     }
     if (paren_depth > 0 || brace_depth > 0) {
+        return 1;
+    }
+    if (if_depth > 0 || do_depth > 0 || case_depth > 0) {
         return 1;
     }
     {
@@ -426,6 +531,7 @@ void shell_state_init(struct shell_state *state) {
     state->nounset = false;
     state->verbose = false;
     state->xtrace = false;
+    state->pipefail = false;
     state->ignoreeof = false;
     state->in_async_context = false;
     state->main_context = true;
@@ -521,6 +627,7 @@ void shell_state_destroy(struct shell_state *state) {
     state->nounset = false;
     state->verbose = false;
     state->xtrace = false;
+    state->pipefail = false;
     state->ignoreeof = false;
     state->in_command_builtin = false;
     state->trap_entry_status_valid = false;
@@ -718,21 +825,41 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
 
         ran_command = false;
         /*
-         * Batch whole-script input whenever stdin is not a TTY.
-         * This keeps here-doc/compound syntax intact even for `-i` test runs
-         * that intentionally force interactive signal semantics on file input.
+         * Consume one complete top-level command at a time so child commands
+         * can continue reading from stdin between command boundaries.
          */
-        while ((nread = getline(&line, &cap, stream)) >= 0) {
+        (void)setvbuf(stream, NULL, _IONBF, 0);
+        while (!state->should_exit && (nread = getline(&line, &cap, stream)) >= 0) {
             (void)nread;
             if (state->verbose) {
                 fputs(line, stderr);
             }
             append_command(&command, &command_len, &command_cap, line);
+            if (needs_more_input(command, &command_len)) {
+                line_no++;
+                continue;
+            }
+
+            shell_run_command(state, command);
+            command_len = 0;
+            if (command != NULL) {
+                command[0] = '\0';
+            }
+            ran_command = true;
+            if (state->should_exit) {
+                break;
+            }
             line_no++;
         }
         if (command_len > 0) {
-            shell_run_command(state, command);
-            ran_command = true;
+            if (needs_more_input(command, &command_len)) {
+                posish_error_at("<input>", line_no, 1, "syntax",
+                                "unexpected EOF while looking for matching quote");
+                state->last_status = 2;
+            } else {
+                shell_run_command(state, command);
+                ran_command = true;
+            }
         }
         shell_run_pending_traps(state);
         if (!ran_command && !state->should_exit) {

@@ -37,6 +37,7 @@ struct shell_state {
     bool nounset;
     bool verbose;
     bool xtrace;
+    bool pipefail;
     bool ignoreeof;
     bool in_async_context;
     bool main_context;

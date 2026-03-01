@@ -2858,6 +2858,8 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
     pid_t *pids;
     pid_t pipeline_pgid;
     bool isolate_pipeline_pgid;
+    bool pipefail_snapshot;
+    int *command_statuses;
     int last_status;
     int in_fd;
 
@@ -2972,8 +2974,10 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
     }
 
     pids = arena_xmalloc(sizeof(*pids) * cmd_len);
+    command_statuses = arena_xmalloc(sizeof(*command_statuses) * cmd_len);
     pipeline_pgid = -1;
     isolate_pipeline_pgid = state->monitor_mode && state->main_context;
+    pipefail_snapshot = state->pipefail;
     in_fd = -1;
 
     for (i = 0; i < cmd_len; i++) {
@@ -2988,6 +2992,7 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
                 perror("pipe");
                 free_string_vec(commands, cmd_len);
                 free(pids);
+                free(command_statuses);
                 free(work);
                 return 1;
             }
@@ -3002,6 +3007,7 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
             }
             free_string_vec(commands, cmd_len);
             free(pids);
+            free(command_statuses);
             free(work);
             return 1;
         }
@@ -3075,6 +3081,7 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
     for (i = 0; i < cmd_len; i++) {
         int wstatus;
         pid_t w;
+        int command_status;
 
         for (;;) {
             w = waitpid(pids[i], &wstatus, WUNTRACED);
@@ -3087,26 +3094,40 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
 
         if (w < 0) {
             perror("waitpid");
-            last_status = 1;
+            command_statuses[i] = 1;
             continue;
         }
 
-        if (i + 1 == cmd_len) {
-            if (WIFEXITED(wstatus)) {
-                last_status = WEXITSTATUS(wstatus);
-            } else if (WIFSTOPPED(wstatus)) {
-                jobs_note_stopped_with_command(pids[i], pids[i], commands[i]);
-                last_status = 128 + WSTOPSIG(wstatus);
-            } else if (WIFSIGNALED(wstatus)) {
-                last_status = 128 + WTERMSIG(wstatus);
-            } else {
-                last_status = 1;
+        if (WIFEXITED(wstatus)) {
+            command_status = WEXITSTATUS(wstatus);
+        } else if (WIFSTOPPED(wstatus)) {
+            jobs_note_stopped_with_command(pids[i], pids[i], commands[i]);
+            command_status = 128 + WSTOPSIG(wstatus);
+        } else if (WIFSIGNALED(wstatus)) {
+            command_status = 128 + WTERMSIG(wstatus);
+        } else {
+            command_status = 1;
+        }
+        command_statuses[i] = command_status;
+    }
+
+    if (pipefail_snapshot) {
+        int last_non_zero;
+
+        last_non_zero = 0;
+        for (i = 0; i < cmd_len; i++) {
+            if (command_statuses[i] != 0) {
+                last_non_zero = command_statuses[i];
             }
         }
+        last_status = last_non_zero;
+    } else {
+        last_status = command_statuses[cmd_len - 1];
     }
 
     free_string_vec(commands, cmd_len);
     free(pids);
+    free(command_statuses);
     free(work);
 
     if (negate) {

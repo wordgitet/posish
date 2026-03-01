@@ -20,7 +20,7 @@ static const struct option_spec k_option_specs[] = {
     {'e', "errexit"},   {'f', "noglob"},  {'h', "hashondef"},
     {'i', "interactive"}, {'m', "monitor"},
     {'n', "noexec"},    {'u', "nounset"}, {'v', "verbose"},
-    {'x', "xtrace"},    {'\0', "ignoreeof"}};
+    {'x', "xtrace"},    {'\0', "pipefail"}, {'\0', "ignoreeof"}};
 
 static bool *option_slot(struct shell_state *state, char short_name,
                          const char *long_name, bool *is_signal_policy_option) {
@@ -70,6 +70,9 @@ static bool *option_slot(struct shell_state *state, char short_name,
     if (short_name == 'x' || (long_name != NULL && strcmp(long_name, "xtrace") == 0)) {
         return &state->xtrace;
     }
+    if (long_name != NULL && strcmp(long_name, "pipefail") == 0) {
+        return &state->pipefail;
+    }
     if (long_name != NULL && strcmp(long_name, "ignoreeof") == 0) {
         return &state->ignoreeof;
     }
@@ -113,6 +116,17 @@ static bool option_enabled_by_short(const struct shell_state *state, char short_
     }
     if (short_name == 'x') {
         return state->xtrace;
+    }
+    return false;
+}
+
+static bool option_enabled_by_long(const struct shell_state *state,
+                                   const char *long_name) {
+    if (strcmp(long_name, "pipefail") == 0) {
+        return state->pipefail;
+    }
+    if (strcmp(long_name, "ignoreeof") == 0) {
+        return state->ignoreeof;
     }
     return false;
 }
@@ -204,7 +218,7 @@ int options_print_set_o(FILE *out, const struct shell_state *state) {
         if (spec->short_name != '\0') {
             enabled = option_enabled_by_short(state, spec->short_name);
         } else {
-            enabled = state->ignoreeof;
+            enabled = option_enabled_by_long(state, spec->long_name);
         }
         if (fprintf(out, "%s\t%s\n", spec->long_name, enabled ? "on" : "off") < 0) {
             return 1;
@@ -224,7 +238,7 @@ int options_print_set_plus_o(FILE *out, const struct shell_state *state) {
         if (spec->short_name != '\0') {
             enabled = option_enabled_by_short(state, spec->short_name);
         } else {
-            enabled = state->ignoreeof;
+            enabled = option_enabled_by_long(state, spec->long_name);
         }
         if (fprintf(out, "set %co %s\n", enabled ? '-' : '+', spec->long_name) <
             0) {
