@@ -22,9 +22,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define QUOTED_IFS_SPACE '\x1f'
-#define QUOTED_IFS_TAB '\x1e'
-#define QUOTED_IFS_NEWLINE '\x1d'
+#define QUOTED_IFS_SPACE '\x81'
+#define QUOTED_IFS_TAB '\x82'
+#define QUOTED_IFS_NEWLINE '\x83'
 #define PATTERN_LIT_STAR '\x12'
 #define PATTERN_LIT_QMARK '\x13'
 #define PATTERN_LIT_LBRACK '\x14'
@@ -64,6 +64,172 @@ static void append_str(char **buf, size_t *len, size_t *cap, const char *str) {
   for (i = 0; str[i] != '\0'; i++) {
     append_char(buf, len, cap, str[i]);
   }
+}
+
+static char *collapse_line_continuations_copy(const char *in, size_t in_len,
+                                              size_t *out_len) {
+  size_t i;
+  size_t j;
+  char *out;
+
+  out = arena_xmalloc(in_len + 1);
+  i = 0;
+  j = 0;
+  while (i < in_len) {
+    if (in[i] == '\\' && i + 1 < in_len && in[i + 1] == '\n') {
+      i += 2;
+      continue;
+    }
+    out[j++] = in[i++];
+  }
+  out[j] = '\0';
+  *out_len = j;
+  return out;
+}
+
+static int hex_digit_value(char ch) {
+  if (ch >= '0' && ch <= '9') {
+    return ch - '0';
+  }
+  if (ch >= 'a' && ch <= 'f') {
+    return 10 + (ch - 'a');
+  }
+  if (ch >= 'A' && ch <= 'F') {
+    return 10 + (ch - 'A');
+  }
+  return -1;
+}
+
+static int append_dollar_single_quoted(const char *in, size_t *index, char **buf,
+                                       size_t *len, size_t *cap) {
+  size_t i;
+
+  i = *index + 2;
+  while (in[i] != '\0') {
+    char ch;
+
+    ch = in[i];
+    if (ch == '\'') {
+      *index = i + 1;
+      return 0;
+    }
+    if (ch != '\\') {
+      append_char(buf, len, cap, ch);
+      i++;
+      continue;
+    }
+
+    i++;
+    ch = in[i];
+    if (ch == '\0') {
+      break;
+    }
+    if (ch == '\n') {
+      i++;
+      continue;
+    }
+    if (ch >= '0' && ch <= '7') {
+      unsigned int value;
+      int digits;
+
+      value = (unsigned int)(ch - '0');
+      i++;
+      digits = 1;
+      while (digits < 3 && in[i] >= '0' && in[i] <= '7') {
+        value = value * 8u + (unsigned int)(in[i] - '0');
+        i++;
+        digits++;
+      }
+      append_char(buf, len, cap, (char)(value & 0xffu));
+      continue;
+    }
+    if (ch == 'x') {
+      unsigned int value;
+      int v;
+      bool have_hex;
+
+      i++;
+      value = 0;
+      have_hex = false;
+      while ((v = hex_digit_value(in[i])) >= 0) {
+        value = value * 16u + (unsigned int)v;
+        have_hex = true;
+        i++;
+      }
+      if (!have_hex) {
+        append_char(buf, len, cap, 'x');
+      } else {
+        append_char(buf, len, cap, (char)(value & 0xffu));
+      }
+      continue;
+    }
+    if (ch == 'c') {
+      unsigned char control;
+
+      i++;
+      if (in[i] == '\0') {
+        append_char(buf, len, cap, 'c');
+        break;
+      }
+      if (in[i] == '\\' && in[i + 1] != '\0') {
+        control = (unsigned char)in[i + 1];
+        i += 2;
+      } else {
+        control = (unsigned char)in[i];
+        i++;
+      }
+      if (control == '?') {
+        append_char(buf, len, cap, (char)0x7f);
+      } else {
+        if (islower(control)) {
+          control = (unsigned char)toupper(control);
+        }
+        append_char(buf, len, cap, (char)(control & 0x1f));
+      }
+      continue;
+    }
+
+    switch (ch) {
+    case 'a':
+      append_char(buf, len, cap, '\a');
+      break;
+    case 'b':
+      append_char(buf, len, cap, '\b');
+      break;
+    case 'e':
+      append_char(buf, len, cap, 0x1b);
+      break;
+    case 'f':
+      append_char(buf, len, cap, '\f');
+      break;
+    case 'n':
+      append_char(buf, len, cap, '\n');
+      break;
+    case 'r':
+      append_char(buf, len, cap, '\r');
+      break;
+    case 't':
+      append_char(buf, len, cap, '\t');
+      break;
+    case 'v':
+      append_char(buf, len, cap, '\v');
+      break;
+    default:
+      append_char(buf, len, cap, ch);
+      break;
+    }
+    i++;
+  }
+
+  posish_errorf("unterminated dollar-single-quoted string");
+  return -1;
+}
+
+static size_t skip_token_line_continuations(const char *in, size_t pos) {
+  while (in[pos] == '\\' && in[pos + 1] == '\n') {
+    pos += 2;
+  }
+  return pos;
 }
 
 static int expand_token(const char *in, struct shell_state *state, char **out,
@@ -352,6 +518,15 @@ static int append_parameter(const char *name, size_t nlen,
         return 0;
     }
 
+    if (strcmp(tmp, "0") == 0) {
+        val = getenv("0");
+        if (val != NULL) {
+            append_str(buf, len, cap, val);
+        }
+        free(tmp);
+        return 0;
+    }
+
     if (isdigit((unsigned char)tmp[0])) {
         char *end;
         unsigned long n;
@@ -632,6 +807,9 @@ static int append_braced_parameter(const char *expr, size_t elen,
     const char *value;
     bool is_set;
     bool is_nonempty;
+    bool name_is_special;
+    unsigned long positional_index;
+    char *endptr;
 
     op = BRACED_NONE;
     name_start = 0;
@@ -712,13 +890,46 @@ static int append_braced_parameter(const char *expr, size_t elen,
     memcpy(name, expr + name_start, name_len);
     name[name_len] = '\0';
 
-    if (!vars_is_name_valid(name)) {
+    name_is_special = false;
+    positional_index = 0;
+    if (name_len == 1 && name[0] == '0') {
+        name_is_special = true;
+    } else if (name_len == 1 && isdigit((unsigned char)name[0])) {
+        name_is_special = true;
+        positional_index = (unsigned long)(name[0] - '0');
+    }
+
+    if (!vars_is_name_valid(name) && !name_is_special) {
         free(name);
         return append_parameter(expr, elen, state, buf, len, cap);
     }
 
-    value = getenv(name);
-    is_set = value != NULL;
+    if (name_len == 1 && name[0] == '0') {
+        value = getenv("0");
+        is_set = value != NULL;
+    } else if (name_is_special && positional_index > 0) {
+        if (positional_index <= state->positional_count) {
+            value = state->positional_params[positional_index - 1];
+            is_set = true;
+        } else {
+            value = NULL;
+            is_set = false;
+        }
+    } else if (name_is_special) {
+        errno = 0;
+        positional_index = strtoul(name, &endptr, 10);
+        if (errno == 0 && endptr != name && *endptr == '\0' &&
+            positional_index > 0 && positional_index <= state->positional_count) {
+            value = state->positional_params[positional_index - 1];
+            is_set = true;
+        } else {
+            value = NULL;
+            is_set = false;
+        }
+    } else {
+        value = getenv(name);
+        is_set = value != NULL;
+    }
     is_nonempty = value != NULL && value[0] != '\0';
 
     if (op == BRACED_NONE) {
@@ -1151,13 +1362,27 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
     }
 
     if (in[i] == '$') {
-      if (in[i + 1] == '{') {
+      size_t next;
+
+      next = skip_token_line_continuations(in, i + 1);
+      if (!dquote_mode && in[next] == '\'') {
+        if (next != i + 1) {
+          i = next;
+        }
+        if (append_dollar_single_quoted(in, &i, &buf, &len, &cap) != 0) {
+          free(buf);
+          return -1;
+        }
+        continue;
+      }
+
+      if (in[next] == '{') {
         size_t j;
         int depth;
         char inner_quote;
         bool braced_dquote;
 
-        j = i + 2;
+        j = next + 1;
         depth = 1;
         inner_quote = '\0';
         braced_dquote = dquote_mode || quote == '"';
@@ -1209,27 +1434,33 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
           return -1;
         }
 
-        if (j > i + 2) {
-	          if (append_braced_parameter(in + i + 2, j - (i + 2), state, &buf,
-	                                      &len, &cap,
-	                                      dquote_mode || quote == '"') != 0) {
-	            free(buf);
-	            return -1;
-	          }
+        if (j > next + 1) {
+          size_t expr_len;
+          char *expr;
+
+          expr = collapse_line_continuations_copy(in + next + 1, j - (next + 1),
+                                                  &expr_len);
+          if (append_braced_parameter(expr, expr_len, state, &buf, &len, &cap,
+                                      dquote_mode || quote == '"') != 0) {
+            free(expr);
+            free(buf);
+            return -1;
+          }
+          free(expr);
         }
         i = j + 1;
         continue;
       }
 
-      if (in[i + 1] == '(') {
-        if (in[i + 2] == '(') {
+      if (in[next] == '(') {
+        if (in[next + 1] == '(') {
           size_t j;
           int depth;
           char *expr;
           char *value;
           int cmd_status;
 
-          j = i + 3;
+          j = next + 2;
           depth = 0;
           while (in[j] != '\0') {
             if (in[j] == '\\' && in[j + 1] != '\0') {
@@ -1259,9 +1490,9 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
             return -1;
           }
 
-          expr = arena_xmalloc((j - (i + 3)) + 1);
-          memcpy(expr, in + i + 3, j - (i + 3));
-          expr[j - (i + 3)] = '\0';
+          expr = arena_xmalloc((j - (next + 2)) + 1);
+          memcpy(expr, in + next + 2, j - (next + 2));
+          expr[j - (next + 2)] = '\0';
 
           if (run_arithmetic_expansion(expr, &value, &cmd_status, state) != 0) {
             free(expr);
@@ -1284,7 +1515,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
         char *value;
         int cmd_status;
 
-        j = i + 2;
+        j = next + 1;
         depth = 1;
         quote = '\0';
         while (in[j] != '\0' && depth > 0) {
@@ -1329,9 +1560,9 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
           return -1;
         }
 
-        cmd = arena_xmalloc((j - (i + 2)) + 1);
-        memcpy(cmd, in + i + 2, j - (i + 2));
-        cmd[j - (i + 2)] = '\0';
+        cmd = arena_xmalloc((j - (next + 1)) + 1);
+        memcpy(cmd, in + next + 1, j - (next + 1));
+        cmd[j - (next + 1)] = '\0';
 
         if (run_command_substitution(state, cmd, &value, &cmd_status) != 0) {
           free(cmd);
@@ -1348,29 +1579,29 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
         continue;
       }
 
-      if (in[i + 1] == '`') {
+      if (in[next] == '`') {
         append_char(&buf, &len, &cap, '$');
-        i++;
+        i = next;
         continue;
       }
 
-      if (is_short_parameter_char(in[i + 1])) {
-        if (append_parameter(in + i + 1, 1, state, &buf, &len, &cap) != 0) {
+      if (is_short_parameter_char(in[next])) {
+        if (append_parameter(in + next, 1, state, &buf, &len, &cap) != 0) {
           free(buf);
           return -1;
         }
-        i += 2;
+        i = next + 1;
         continue;
       }
 
-      if (isalpha((unsigned char)in[i + 1]) || in[i + 1] == '_') {
+      if (isalpha((unsigned char)in[next]) || in[next] == '_') {
         size_t j;
 
-        j = i + 1;
+        j = next;
         while (isalnum((unsigned char)in[j]) || in[j] == '_') {
           j++;
         }
-        if (append_parameter(in + i + 1, j - (i + 1), state, &buf, &len, &cap) !=
+        if (append_parameter(in + next, j - next, state, &buf, &len, &cap) !=
             0) {
           free(buf);
           return -1;
@@ -1526,11 +1757,18 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
         }
 
         if (j > i + 2) {
-          if (append_braced_parameter(in + i + 2, j - (i + 2), state, &buf,
-                                      &len, &cap, true) != 0) {
+          size_t expr_len;
+          char *expr;
+
+          expr = collapse_line_continuations_copy(in + i + 2, j - (i + 2),
+                                                  &expr_len);
+          if (append_braced_parameter(expr, expr_len, state, &buf, &len, &cap,
+                                      true) != 0) {
+            free(expr);
             free(buf);
             return -1;
           }
+          free(expr);
         }
         i = j + 1;
         continue;

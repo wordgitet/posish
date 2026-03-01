@@ -20,7 +20,7 @@ Legend:
 - [ ] cd-p.tst
 - [ ] cmdsub-p.tst
 - [x] command-p.tst
-- [x] comment-p.tst
+- [ ] comment-p.tst
 - [x] continue-p.tst
 - [ ] declutil-p.tst
 - [x] dot-p.tst
@@ -31,10 +31,10 @@ Legend:
 - [x] exit-p.tst
 - [x] export-p.tst
 - [x] fg-p.tst
-- [ ] fnmatch-p.tst
+- [x] fnmatch-p.tst
 - [x] for-p.tst
 - [ ] fsplit-p.tst
-- [ ] function-p.tst
+- [x] function-p.tst
 - [ ] getopts-p.tst
 - [x] grouping-p.tst
 - [x] if-p.tst
@@ -44,17 +44,17 @@ Legend:
 - [x] kill2-p.tst
 - [x] kill3-p.tst
 - [x] kill4-p.tst
-- [x] lineno-p.tst
+- [ ] lineno-p.tst
 - [x] nop-p.tst
 - [x] option-p.tst
 - [ ] param-p.tst
 - [x] path-p.tst
 - [ ] pipeline-p.tst
 - [x] ppid-p.tst
-- [ ] quote-p.tst
+- [x] quote-p.tst
 - [ ] read-p.tst
 - [x] readonly-p.tst
-- [x] redir-p.tst
+- [ ] redir-p.tst
 - [x] return-p.tst
 - [x] set-p.tst
 - [x] shift-p.tst

@@ -320,11 +320,13 @@ static char *strip_comments(const char *src) {
     size_t j;
     char quote;
     char prev;
+    int param_depth;
     char *out;
 
     out = arena_xmalloc(strlen(src) + 1);
     quote = '\0';
     prev = '\0';
+    param_depth = 0;
     i = 0;
     j = 0;
 
@@ -334,6 +336,40 @@ static char *strip_comments(const char *src) {
         ch = src[i];
 
         if (quote == '\0') {
+            if (ch == '$' && src[i + 1] == '\'') {
+                out[j++] = src[i++];
+                out[j++] = src[i++];
+                while (src[i] != '\0') {
+                    out[j++] = src[i];
+                    if (src[i] == '\\' && src[i + 1] != '\0') {
+                        i++;
+                        out[j++] = src[i];
+                        i++;
+                        continue;
+                    }
+                    if (src[i] == '\'') {
+                        i++;
+                        break;
+                    }
+                    i++;
+                }
+                prev = out[j - 1];
+                continue;
+            }
+            if (ch == '$' && src[i + 1] == '{') {
+                out[j++] = src[i++];
+                out[j++] = src[i++];
+                param_depth++;
+                prev = out[j - 1];
+                continue;
+            }
+            if (param_depth > 0) {
+                if (ch == '{') {
+                    param_depth++;
+                } else if (ch == '}') {
+                    param_depth--;
+                }
+            }
             if (ch == '\\' && src[i + 1] != '\0') {
                 out[j++] = src[i++];
                 out[j++] = src[i++];
@@ -346,7 +382,7 @@ static char *strip_comments(const char *src) {
                 prev = ch;
                 continue;
             }
-            if (ch == '#') {
+            if (ch == '#' && param_depth == 0) {
                 bool comment_start;
 
                 comment_start = prev == '\0' || isspace((unsigned char)prev) ||
@@ -752,6 +788,29 @@ static bool find_command_subst_end(const char *source, size_t start,
         i++;
     }
 
+    return false;
+}
+
+static bool find_dollar_single_quote_end(const char *source, size_t start,
+                                         size_t *end_out) {
+    size_t i;
+
+    if (source[start] != '$' || source[start + 1] != '\'') {
+        return false;
+    }
+
+    i = start + 2;
+    while (source[i] != '\0') {
+        if (source[i] == '\\' && source[i + 1] != '\0') {
+            i += 2;
+            continue;
+        }
+        if (source[i] == '\'') {
+            *end_out = i;
+            return true;
+        }
+        i++;
+    }
     return false;
 }
 
@@ -3121,6 +3180,14 @@ static int execute_andor(struct shell_state *state, const char *source) {
                     continue;
                 }
             }
+            if (ch == '$' && source[i + 1] == '\'') {
+                size_t end;
+
+                if (find_dollar_single_quote_end(source, i, &end)) {
+                    i = end;
+                    continue;
+                }
+            }
             if (ch == '\'' || ch == '"') {
                 quote = ch;
             } else if (paren_depth == 0 && brace_depth == 0 &&
@@ -3328,6 +3395,14 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                     continue;
                 }
             }
+            if (ch == '$' && source[i + 1] == '\'') {
+                size_t end;
+
+                if (find_dollar_single_quote_end(source, i, &end)) {
+                    i = end;
+                    continue;
+                }
+            }
             if (ch == '\'' || ch == '"') {
                 quote = ch;
             } else if (paren_depth == 0 && brace_depth == 0 &&
@@ -3474,12 +3549,33 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                     skip_next_done = true;
                     status = 0;
                 } else {
+                    char *fn_probe_name;
+                    char *fn_probe_body;
+                    bool snippet_is_function_def;
+                    bool preserve_heredoc_tempfiles;
+
+                    fn_probe_name = NULL;
+                    fn_probe_body = NULL;
+                    snippet_is_function_def =
+                        parse_function_definition(part, &fn_probe_name, &fn_probe_body);
+                    free(fn_probe_name);
+                    free(fn_probe_body);
+
+                    /*
+                     * Function definitions with here-doc redirections must keep
+                     * their captured input available for later function calls.
+                     */
+                    preserve_heredoc_tempfiles = snippet_is_function_def;
                     heredoc_runner = command_requires_program_runner(part)
                                          ? execute_program_text
                                          : execute_andor;
+                    if (snippet_is_function_def) {
+                        heredoc_runner = execute_program_text;
+                    }
                     heredoc_rc = maybe_execute_heredoc_command(
                         state, part, source, i + 1, &heredoc_new_pos,
-                        &heredoc_handled, &status, heredoc_runner);
+                        &heredoc_handled, &status, heredoc_runner,
+                        preserve_heredoc_tempfiles);
                     if (heredoc_rc != 0) {
                         status = 1;
                         state->last_status = status;
@@ -3501,7 +3597,9 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                         pending_heredoc = false;
                         i = start == 0 ? 0 : start - 1;
                         continue;
-                    } else if (ch == '&') {
+                    }
+
+                    if (ch == '&') {
                         status = run_async_list(state, part);
                         state->last_status = status;
                     } else {
@@ -3543,10 +3641,13 @@ static int execute_program_text(struct shell_state *state, const char *source) {
 }
 
 int exec_run_program(struct shell_state *state, const struct ast_program *program) {
+    char *normalized;
     char *cleaned;
     int status;
 
-    cleaned = strip_comments(program->source);
+    normalized = collapse_line_continuations(program->source);
+    cleaned = strip_comments(normalized);
+    free(normalized);
     status = execute_program_text(state, cleaned);
     free(cleaned);
     return status;

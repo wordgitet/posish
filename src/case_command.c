@@ -34,6 +34,77 @@ static char *dup_trimmed_slice(const char *src, size_t start, size_t end) {
   return out;
 }
 
+static bool is_fully_quoted_pattern(const char *raw) {
+  size_t len;
+  size_t i;
+  char q;
+
+  len = strlen(raw);
+  if (len < 2) {
+    return false;
+  }
+  if ((raw[0] != '\'' && raw[0] != '"') || raw[len - 1] != raw[0]) {
+    return false;
+  }
+
+  q = raw[0];
+  i = 1;
+  while (i + 1 < len) {
+    if (q == '"' && raw[i] == '\\' && i + 2 < len) {
+      i += 2;
+      continue;
+    }
+    if (raw[i] == q) {
+      return false;
+    }
+    i++;
+  }
+  return true;
+}
+
+static char *escape_pattern_metacharacters(const char *pat) {
+  size_t i;
+  size_t len;
+  size_t cap;
+  char *out;
+
+  len = strlen(pat);
+  cap = len * 2 + 1;
+  out = arena_xmalloc(cap);
+  len = 0;
+
+  for (i = 0; pat[i] != '\0'; i++) {
+    if (pat[i] == '*' || pat[i] == '?' || pat[i] == '[' || pat[i] == ']' ||
+        pat[i] == '\\') {
+      out[len++] = '\\';
+    }
+    out[len++] = pat[i];
+  }
+  out[len] = '\0';
+  return out;
+}
+
+static char *normalize_fnmatch_pattern(const char *pat) {
+  size_t len;
+  size_t trailing;
+  char *out;
+
+  len = strlen(pat);
+  trailing = 0;
+  while (trailing < len && pat[len - 1 - trailing] == '\\') {
+    trailing++;
+  }
+  if ((trailing % 2) == 0) {
+    return arena_xstrdup(pat);
+  }
+
+  out = arena_xmalloc(len + 2);
+  memcpy(out, pat, len);
+  out[len] = '\\';
+  out[len + 1] = '\0';
+  return out;
+}
+
 static bool keyword_boundary(char ch) {
   return ch == '\0' || isspace((unsigned char)ch) || ch == ';' || ch == '&' ||
          ch == '|' || ch == '(' || ch == ')' || ch == '{' || ch == '}';
@@ -188,6 +259,7 @@ static bool case_pattern_list_matches(struct shell_state *state,
     if (delim) {
       char *raw_pat;
       char *pat;
+      char *match_pat;
       int rc;
 
       raw_pat = dup_trimmed_slice(pattern_list, start, i);
@@ -195,10 +267,17 @@ static bool case_pattern_list_matches(struct shell_state *state,
         free(raw_pat);
         return false;
       }
+      if (is_fully_quoted_pattern(raw_pat)) {
+        match_pat = escape_pattern_metacharacters(pat);
+        free(pat);
+      } else {
+        match_pat = normalize_fnmatch_pattern(pat);
+        free(pat);
+      }
       free(raw_pat);
 
-      rc = fnmatch(pat, word, 0);
-      free(pat);
+      rc = fnmatch(match_pat, word, 0);
+      free(match_pat);
       if (rc == 0) {
         return true;
       }

@@ -52,6 +52,7 @@ int main(int argc, char **argv) {
     bool read_stdin_script;
     bool refresh_signal_policy;
     const char *command;
+    const char *special_0;
     const char *parent_interactive;
 
     shell_state_init(&state);
@@ -175,6 +176,19 @@ int main(int argc, char **argv) {
     } else {
         run_interactive = (command == NULL && i >= argc && isatty(STDIN_FILENO));
     }
+
+    /*
+     * Keep special parameter $0 available through expansion paths.
+     * -c may supply an explicit command name operand as $0.
+     */
+    special_0 = argv[0];
+    if (command != NULL && i < argc) {
+        special_0 = argv[i];
+    } else if (!read_stdin_script && i < argc) {
+        special_0 = argv[i];
+    }
+    (void)setenv("0", special_0, 1);
+
     state.interactive = run_interactive;
     (void)refresh_signal_policy;
     shell_refresh_signal_policy(&state);

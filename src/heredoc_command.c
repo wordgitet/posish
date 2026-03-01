@@ -57,14 +57,15 @@ static void append_char(char **buf, size_t *len, size_t *cap, char ch) {
     (*buf)[*len] = '\0';
 }
 
-static void heredoc_specs_free(struct heredoc_spec *specs, size_t count) {
+static void heredoc_specs_free(struct heredoc_spec *specs, size_t count,
+                               bool unlink_files) {
     size_t i;
 
     for (i = 0; i < count; i++) {
         free(specs[i].delimiter);
         free(specs[i].placeholder);
         free(specs[i].body);
-        if (specs[i].temp_path != NULL) {
+        if (unlink_files && specs[i].temp_path != NULL) {
             unlink(specs[i].temp_path);
         }
         free(specs[i].temp_path);
@@ -282,7 +283,7 @@ static int parse_command_heredocs(const char *command, char **base_command_out,
                     if (command[i] == '\0' || command[i] == '\n') {
                         posish_errorf("missing heredoc delimiter");
                         free(base_command);
-                        heredoc_specs_free(specs, spec_count);
+                        heredoc_specs_free(specs, spec_count, true);
                         return -1;
                     }
 
@@ -326,7 +327,7 @@ static int parse_command_heredocs(const char *command, char **base_command_out,
                     if (delim_quote != '\0') {
                         posish_errorf("unterminated heredoc delimiter quote");
                         free(base_command);
-                        heredoc_specs_free(specs, spec_count);
+                        heredoc_specs_free(specs, spec_count, true);
                         return -1;
                     }
 
@@ -334,7 +335,7 @@ static int parse_command_heredocs(const char *command, char **base_command_out,
                     if (word_end == word_start) {
                         posish_errorf("missing heredoc delimiter");
                         free(base_command);
-                        heredoc_specs_free(specs, spec_count);
+                        heredoc_specs_free(specs, spec_count, true);
                         return -1;
                     }
 
@@ -353,7 +354,7 @@ static int parse_command_heredocs(const char *command, char **base_command_out,
                     if (quote_remove_word(raw_delim, &spec.delimiter) != 0) {
                         free(raw_delim);
                         free(base_command);
-                        heredoc_specs_free(specs, spec_count);
+                        heredoc_specs_free(specs, spec_count, true);
                         return -1;
                     }
                     free(raw_delim);
@@ -727,7 +728,8 @@ int maybe_execute_heredoc_command(struct shell_state *state, const char *command
                                   const char *source, size_t body_pos,
                                   size_t *new_pos_out, bool *handled,
                                   int *status_out,
-                                  heredoc_command_runner_fn runner) {
+                                  heredoc_command_runner_fn runner,
+                                  bool preserve_tempfiles) {
     char *base_command;
     struct heredoc_spec *specs;
     size_t spec_count;
@@ -756,16 +758,16 @@ int maybe_execute_heredoc_command(struct shell_state *state, const char *command
                                new_pos_out, &incomplete) != 0) {
         if (incomplete) {
             *handled = false;
-            heredoc_specs_free(specs, spec_count);
+            heredoc_specs_free(specs, spec_count, true);
             free(base_command);
             return 0;
         }
-        heredoc_specs_free(specs, spec_count);
+        heredoc_specs_free(specs, spec_count, true);
         free(base_command);
         return -1;
     }
     if (write_heredoc_tempfiles(specs, spec_count) != 0) {
-        heredoc_specs_free(specs, spec_count);
+        heredoc_specs_free(specs, spec_count, true);
         free(base_command);
         return -1;
     }
@@ -774,7 +776,7 @@ int maybe_execute_heredoc_command(struct shell_state *state, const char *command
     status = runner(state, rewritten);
     *status_out = status;
 
-    heredoc_specs_free(specs, spec_count);
+    heredoc_specs_free(specs, spec_count, !preserve_tempfiles);
     free(base_command);
     free(rewritten);
     return 0;

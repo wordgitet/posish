@@ -85,6 +85,36 @@ static int append_backtick_subst(const char **p_ptr, char **buf, size_t *len,
     return -1;
 }
 
+static int append_dollar_single_quote(const char **p_ptr, char **buf,
+                                      size_t *len, size_t *cap) {
+    const char *p;
+
+    p = *p_ptr;
+    buf_push(buf, len, cap, *p++);
+    buf_push(buf, len, cap, *p++);
+    while (*p != '\0') {
+        char ch;
+
+        ch = *p;
+        buf_push(buf, len, cap, ch);
+        if (ch == '\\' && p[1] != '\0') {
+            p++;
+            buf_push(buf, len, cap, *p);
+            p++;
+            continue;
+        }
+        if (ch == '\'') {
+            p++;
+            *p_ptr = p;
+            return 0;
+        }
+        p++;
+    }
+
+    posish_errorf("unterminated dollar-single-quoted string");
+    return -1;
+}
+
 static int append_braced_param_subst(const char **p_ptr, char **buf, size_t *len,
                                      size_t *cap, bool dquote_context) {
     const char *p;
@@ -204,6 +234,15 @@ int lexer_split_words(const char *line, struct token_vec *out) {
 
             if (quote != '\'' && ch == '$' && p[1] == '(') {
                 if (append_command_subst(&p, &buf, &len, &cap) != 0) {
+                    free(buf);
+                    lexer_free_tokens(out);
+                    return -1;
+                }
+                started = true;
+                continue;
+            }
+            if (quote != '\'' && ch == '$' && p[1] == '\'') {
+                if (append_dollar_single_quote(&p, &buf, &len, &cap) != 0) {
                     free(buf);
                     lexer_free_tokens(out);
                     return -1;

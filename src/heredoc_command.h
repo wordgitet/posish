@@ -17,6 +17,7 @@ int maybe_execute_heredoc_command(struct shell_state *state, const char *command
                                   const char *source, size_t body_pos,
                                   size_t *new_pos_out, bool *handled,
                                   int *status_out,
-                                  heredoc_command_runner_fn runner);
+                                  heredoc_command_runner_fn runner,
+                                  bool preserve_tempfiles);
 
 #endif
