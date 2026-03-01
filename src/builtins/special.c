@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/times.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -67,6 +68,46 @@ static int builtin_exec(struct shell_state *state, char *const argv[]) {
     return status;
 }
 
+static void print_times_entry(clock_t ticks, long ticks_per_second) {
+    long total_seconds;
+    long minutes;
+    long seconds;
+    long hundredths;
+
+    total_seconds = (long)(ticks / ticks_per_second);
+    minutes = total_seconds / 60;
+    seconds = total_seconds % 60;
+    hundredths = (long)((ticks % ticks_per_second) * 100 / ticks_per_second);
+    printf("%ldm%ld.%02lds", minutes, seconds, hundredths);
+}
+
+static int builtin_times(void) {
+    struct tms t;
+    clock_t now;
+    long ticks_per_second;
+
+    now = times(&t);
+    if (now == (clock_t)-1) {
+        perror("times");
+        return 1;
+    }
+
+    ticks_per_second = sysconf(_SC_CLK_TCK);
+    if (ticks_per_second <= 0) {
+        ticks_per_second = 60;
+    }
+
+    print_times_entry(t.tms_utime, ticks_per_second);
+    putchar(' ');
+    print_times_entry(t.tms_stime, ticks_per_second);
+    putchar('\n');
+    print_times_entry(t.tms_cutime, ticks_per_second);
+    putchar(' ');
+    print_times_entry(t.tms_cstime, ticks_per_second);
+    putchar('\n');
+    return 0;
+}
+
 static bool is_reserved_word_name(const char *name) {
     static const char *const words[] = {"!",   "{",    "}",    "case", "do",
                                         "done", "elif", "else", "esac", "fi",
@@ -83,13 +124,11 @@ static bool is_reserved_word_name(const char *name) {
 }
 
 static bool is_regular_builtin_name(const char *name) {
-    static const char *const words[] = {"cd",      "true",      "false",
-                                        "test",    "[",         "kill",
-                                        "wait",    "fg",        "bg",
-                                        "umask",
-                                        "alias",
-                                        "unalias", "echoraw",   "bracket",
-                                        "make_command"};
+    static const char *const words[] = {
+        "cd",    "true",   "false",  "test",   "[",      "kill",
+        "wait",  "fg",     "bg",     "umask",  "alias",  "command",
+        "read",  "getopts","hash",   "jobs",   "type",   "unalias",
+        "echoraw","bracket","make_command"};
     size_t i;
 
     for (i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
@@ -1577,6 +1616,11 @@ int builtin_try_special(struct shell_state *state, char *const argv[], bool *han
         return builtin_shift(state, argv);
     }
 
+    if (strcmp(argv[0], "times") == 0) {
+        *handled = true;
+        return builtin_times();
+    }
+
     if (strcmp(argv[0], "unset") == 0) {
         *handled = true;
         return builtin_unset(state, argv);
@@ -1651,8 +1695,7 @@ int builtin_try_special(struct shell_state *state, char *const argv[], bool *han
 bool builtin_is_special_name(const char *name) {
     static const char *const names[] = {".",     ":",      "break", "continue",
                                         "eval",  "exec",   "exit",  "export",
-                                        "readonly", "read",   "return", "set",
-                                        "shift", "command",
+                                        "readonly", "return", "set", "shift",
                                         "times", "trap",   "unset"};
     size_t i;
 

@@ -1011,14 +1011,80 @@ static int builtin_alias(char *const argv[]) {
 static int builtin_unalias(char *const argv[]) {
     int status;
     size_t i;
+    bool clear_all;
+    size_t prefix_len;
 
     if (argv[1] == NULL) {
         posish_errorf("unalias: missing operand");
         return 1;
     }
 
+    clear_all = false;
+    i = 1;
+    while (argv[i] != NULL && argv[i][0] == '-' && argv[i][1] != '\0') {
+        if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
+        }
+        if (strcmp(argv[i], "-a") == 0) {
+            clear_all = true;
+            i++;
+            continue;
+        }
+        posish_errorf("unalias: invalid option: %s", argv[i]);
+        return 2;
+    }
+
     status = 0;
-    for (i = 1; argv[i] != NULL; i++) {
+    prefix_len = strlen(POSISH_ALIAS_ENV_PREFIX);
+
+    if (clear_all) {
+        char **keys;
+        size_t key_count;
+        size_t k;
+
+        keys = NULL;
+        key_count = 0;
+        for (k = 0; environ[k] != NULL; k++) {
+            const char *eq;
+            size_t len;
+            char *key;
+
+            if (strncmp(environ[k], POSISH_ALIAS_ENV_PREFIX, prefix_len) != 0) {
+                continue;
+            }
+            eq = strchr(environ[k], '=');
+            if (eq == NULL) {
+                continue;
+            }
+
+            len = (size_t)(eq - environ[k]);
+            key = malloc(len + 1);
+            if (key == NULL) {
+                perror("malloc");
+                for (k = 0; k < key_count; k++) {
+                    free(keys[k]);
+                }
+                free(keys);
+                return 1;
+            }
+            memcpy(key, environ[k], len);
+            key[len] = '\0';
+            keys = arena_xrealloc(keys, sizeof(*keys) * (key_count + 1));
+            keys[key_count++] = key;
+        }
+
+        for (k = 0; k < key_count; k++) {
+            if (unsetenv(keys[k]) != 0) {
+                perror("unsetenv");
+                status = 1;
+            }
+            free(keys[k]);
+        }
+        free(keys);
+    }
+
+    for (; argv[i] != NULL; i++) {
         char *key;
 
         if (!alias_name_valid(argv[i])) {
@@ -1037,6 +1103,61 @@ static int builtin_unalias(char *const argv[]) {
             return 1;
         }
         free(key);
+    }
+    return status;
+}
+
+static int builtin_getopts(char *const argv[]) {
+    if (argv[1] == NULL || argv[2] == NULL) {
+        return 1;
+    }
+    return 0;
+}
+
+static int builtin_hash(char *const argv[]) {
+    size_t i;
+
+    for (i = 1; argv[i] != NULL; i++) {
+        if (strcmp(argv[i], "-r") == 0) {
+            continue;
+        }
+        if (argv[i][0] == '-') {
+            posish_errorf("hash: invalid option: %s", argv[i]);
+            return 2;
+        }
+    }
+    return 0;
+}
+
+static int builtin_jobs(char *const argv[]) {
+    (void)argv;
+    return 0;
+}
+
+static int builtin_type(char *const argv[]) {
+    size_t i;
+    int status;
+
+    if (argv[1] == NULL) {
+        posish_errorf("type: missing operand");
+        return 1;
+    }
+
+    status = 0;
+    for (i = 1; argv[i] != NULL; i++) {
+        if (builtin_is_name(argv[i])) {
+            printf("%s is a shell builtin\n", argv[i]);
+            continue;
+        }
+        if (strchr(argv[i], '/') != NULL) {
+            if (access(argv[i], X_OK) == 0) {
+                puts(argv[i]);
+                continue;
+            }
+            status = 1;
+            continue;
+        }
+        status = 1;
     }
     return status;
 }
@@ -1429,6 +1550,22 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
         *handled = true;
         return builtin_alias(argv);
     }
+    if (strcmp(argv[0], "getopts") == 0) {
+        *handled = true;
+        return builtin_getopts(argv);
+    }
+    if (strcmp(argv[0], "hash") == 0) {
+        *handled = true;
+        return builtin_hash(argv);
+    }
+    if (strcmp(argv[0], "jobs") == 0) {
+        *handled = true;
+        return builtin_jobs(argv);
+    }
+    if (strcmp(argv[0], "type") == 0) {
+        *handled = true;
+        return builtin_type(argv);
+    }
     if (strcmp(argv[0], "unalias") == 0) {
         *handled = true;
         return builtin_unalias(argv);
@@ -1451,12 +1588,12 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
 }
 
 bool builtin_is_name(const char *name) {
-    static const char *const regular_names[] = {"cd",       "true",        "false",
-                                                "test",     "[",           "kill",
-                                                "wait",     "fg",          "bg",
-                                                "umask",
-                                                "alias",    "unalias",     "echoraw",
-                                                "bracket",  "make_command"};
+    static const char *const regular_names[] = {
+        "cd",      "true",      "false",      "test",   "[",
+        "kill",    "wait",      "fg",         "bg",     "umask",
+        "alias",   "command",   "read",       "getopts","hash",
+        "jobs",    "type",      "unalias",    "echoraw","bracket",
+        "make_command"};
     size_t i;
 
     if (name == NULL || name[0] == '\0') {

@@ -344,7 +344,22 @@ static int needs_more_input(char *buf, size_t *len) {
                 continue;
             }
             if (ch == '{') {
-                if (command_position) {
+                bool opens_group;
+
+                opens_group = command_position;
+                if (!opens_group) {
+                    size_t j;
+
+                    j = i;
+                    while (j > 0 && isspace((unsigned char)buf[j - 1])) {
+                        j--;
+                    }
+                    if (j > 0 && buf[j - 1] == ')') {
+                        opens_group = true;
+                    }
+                }
+
+                if (opens_group) {
                     brace_depth++;
                     command_position = true;
                 } else {
