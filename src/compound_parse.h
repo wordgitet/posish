@@ -8,11 +8,12 @@
 #include <stdbool.h>
 
 bool parse_simple_if(const char *source, char **cond_out, char **then_out,
-                     char **else_out);
+                     char **else_out, char **redir_out);
 bool parse_simple_while(const char *source, char **cond_out, char **body_out,
-                        bool *is_until_out);
+                        bool *is_until_out, char **redir_out);
 bool parse_simple_for(const char *source, char **name_out, char **words_out,
-                      char **body_out);
+                      char **body_out, bool *implicit_words_out,
+                      char **redir_out);
 bool compound_needs_single_atom(const char *source);
 
 #endif

@@ -6,15 +6,15 @@ non-green POSIX test buckets.
 ## Snapshot (2026-03-01)
 
 - Fulltruth baseline (`tests/posix/summary-fulltruth.csv`):
-  - `FULL_PASS 95`
-  - `PARTIAL_FAIL 27`
+  - `FULL_PASS 102`
+  - `PARTIAL_FAIL 20`
   - `FULL_FAIL 0`
   - `TIMEOUT 0`
   - `MISSING 0`
-  - `OK 10719`
-  - `ERROR 351`
+  - `OK 10758`
+  - `ERROR 312`
   - `SKIPPED 14`
-  - `RATIO_OK_OVER_OK_PLUS_ERROR 0.9683`
+  - `RATIO_OK_OVER_OK_PLUS_ERROR 0.9718`
 
 ## Accepted Scope Cuts
 
@@ -40,9 +40,9 @@ Top active non-green buckets by error count:
 - `case-p.tst` (13)
 - `fsplit-p.tst` (13)
 - `trap-p.tst` (13)
-- `for-p.tst` (12)
 - `builtins-p.tst` (10)
 - `cmdsub-p.tst` (10)
+- `startup-p.tst` (9)
 
 The complete non-green file list is sourced from
 `tests/posix/summary-fulltruth.csv`.

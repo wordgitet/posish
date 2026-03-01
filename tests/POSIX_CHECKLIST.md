@@ -14,14 +14,14 @@ Legend:
 - [x] arith-p.tst
 - [x] async-p.tst
 - [x] bg-p.tst
-- [ ] break-p.tst
+- [x] break-p.tst
 - [ ] builtins-p.tst
 - [ ] case-p.tst
 - [ ] cd-p.tst
 - [ ] cmdsub-p.tst
 - [x] command-p.tst
-- [ ] comment-p.tst
-- [ ] continue-p.tst
+- [x] comment-p.tst
+- [x] continue-p.tst
 - [ ] declutil-p.tst
 - [x] dot-p.tst
 - [ ] errexit-p.tst
@@ -32,12 +32,12 @@ Legend:
 - [x] export-p.tst
 - [x] fg-p.tst
 - [ ] fnmatch-p.tst
-- [ ] for-p.tst
+- [x] for-p.tst
 - [ ] fsplit-p.tst
 - [ ] function-p.tst
 - [ ] getopts-p.tst
 - [x] grouping-p.tst
-- [ ] if-p.tst
+- [x] if-p.tst
 - [ ] input-p.tst
 - [x] job-p.tst
 - [x] kill1-p.tst
@@ -128,6 +128,6 @@ Legend:
 - [ ] trap-p.tst
 - [x] umask-p.tst
 - [x] unset-p.tst
-- [ ] until-p.tst
+- [x] until-p.tst
 - [x] wait-p.tst
-- [ ] while-p.tst
+- [x] while-p.tst

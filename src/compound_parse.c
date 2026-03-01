@@ -54,7 +54,7 @@ static bool word_starts_command_position(const char *source, size_t pos) {
             continue;
         }
         if (ch == '\n' || ch == ';' || ch == '&' || ch == '|' || ch == '(' ||
-            ch == ')' || ch == '{') {
+            ch == ')' || ch == '{' || ch == '}') {
             return true;
         }
         break;
@@ -78,7 +78,9 @@ static bool word_starts_command_position(const char *source, size_t pos) {
         if ((len == 4 && strncmp(source + start, "then", 4) == 0) ||
             (len == 2 && strncmp(source + start, "do", 2) == 0) ||
             (len == 4 && strncmp(source + start, "else", 4) == 0) ||
-            (len == 4 && strncmp(source + start, "elif", 4) == 0)) {
+            (len == 4 && strncmp(source + start, "elif", 4) == 0) ||
+            (len == 2 && strncmp(source + start, "if", 2) == 0) ||
+            (len == 2 && strncmp(source + start, "fi", 2) == 0)) {
             return true;
         }
     }
@@ -86,8 +88,34 @@ static bool word_starts_command_position(const char *source, size_t pos) {
     return false;
 }
 
+static bool looks_like_redirection_suffix(const char *source, size_t pos) {
+    size_t i;
+
+    while (isspace((unsigned char)source[pos])) {
+        pos++;
+    }
+    if (source[pos] == '\0') {
+        return true;
+    }
+
+    i = pos;
+    while (isdigit((unsigned char)source[i])) {
+        i++;
+    }
+    if (source[i] != '<' && source[i] != '>') {
+        return false;
+    }
+
+    for (; source[i] != '\0'; i++) {
+        if (source[i] == '|' || source[i] == ';') {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool parse_simple_if(const char *source, char **cond_out, char **then_out,
-                     char **else_out) {
+                     char **else_out, char **redir_out) {
     size_t i;
     size_t cond_start;
     size_t cond_end;
@@ -99,6 +127,8 @@ bool parse_simple_if(const char *source, char **cond_out, char **then_out,
     int paren_depth;
     int brace_depth;
     int if_depth;
+    int case_depth;
+    int loop_depth;
 
     i = 0;
     while (isspace((unsigned char)source[i])) {
@@ -118,6 +148,9 @@ bool parse_simple_if(const char *source, char **cond_out, char **then_out,
     quote = '\0';
     paren_depth = 0;
     brace_depth = 0;
+    if_depth = 0;
+    case_depth = 0;
+    loop_depth = 0;
     for (; source[i] != '\0'; i++) {
         char ch;
 
@@ -147,20 +180,60 @@ bool parse_simple_if(const char *source, char **cond_out, char **then_out,
                 brace_depth--;
                 continue;
             }
+            if (paren_depth == 0 && brace_depth == 0 && if_depth == 0 &&
+                case_depth == 0 && loop_depth == 0 &&
+                strncmp(source + i, "then", 4) == 0 &&
+                keyword_boundary(source[i + 4])) {
+                cond_end = i;
+                then_start = i + 4;
+                break;
+            }
             if (paren_depth == 0 && brace_depth == 0 &&
-                (ch == ';' || ch == '\n')) {
+                (isalpha((unsigned char)ch) || ch == '_') &&
+                word_starts_command_position(source, i)) {
                 size_t j;
+                size_t wlen;
 
-                j = i + 1;
-                while (isspace((unsigned char)source[j])) {
+                j = i;
+                while (isalnum((unsigned char)source[j]) || source[j] == '_') {
                     j++;
                 }
-                if (strncmp(source + j, "then", 4) == 0 &&
-                    keyword_boundary(source[j + 4])) {
-                    cond_end = i;
-                    then_start = j + 4;
-                    break;
+                if (keyword_boundary(source[j])) {
+                    wlen = j - i;
+                    if (wlen == 2 && strncmp(source + i, "if", 2) == 0) {
+                        if_depth++;
+                    } else if (wlen == 2 && strncmp(source + i, "fi", 2) == 0 &&
+                               if_depth > 0) {
+                        if_depth--;
+                    } else if (wlen == 4 &&
+                               strncmp(source + i, "case", 4) == 0) {
+                        case_depth++;
+                    } else if (wlen == 4 &&
+                               strncmp(source + i, "esac", 4) == 0 &&
+                               case_depth > 0) {
+                        case_depth--;
+                    } else if (case_depth == 0) {
+                        if ((wlen == 5 &&
+                             strncmp(source + i, "while", 5) == 0) ||
+                            (wlen == 5 &&
+                             strncmp(source + i, "until", 5) == 0) ||
+                            (wlen == 3 && strncmp(source + i, "for", 3) == 0)) {
+                            loop_depth++;
+                        } else if (wlen == 4 &&
+                                   strncmp(source + i, "done", 4) == 0 &&
+                                   loop_depth > 0) {
+                            loop_depth--;
+                        } else if (wlen == 4 &&
+                                   strncmp(source + i, "then", 4) == 0 &&
+                                   if_depth == 0 && loop_depth == 0) {
+                            cond_end = i;
+                            then_start = j;
+                            break;
+                        }
+                    }
                 }
+                i = j - 1;
+                continue;
             }
         } else if (quote == '\'' && ch == '\'') {
             quote = '\0';
@@ -188,6 +261,8 @@ bool parse_simple_if(const char *source, char **cond_out, char **then_out,
     paren_depth = 0;
     brace_depth = 0;
     if_depth = 1;
+    case_depth = 0;
+    loop_depth = 0;
     for (i = then_start; source[i] != '\0'; i++) {
         char ch;
 
@@ -231,6 +306,25 @@ bool parse_simple_if(const char *source, char **cond_out, char **then_out,
                     wlen = j - i;
                     if (wlen == 2 && strncmp(source + i, "if", 2) == 0) {
                         if_depth++;
+                    } else if (wlen == 4 &&
+                               strncmp(source + i, "case", 4) == 0) {
+                        case_depth++;
+                    } else if (wlen == 4 &&
+                               strncmp(source + i, "esac", 4) == 0 &&
+                               case_depth > 0) {
+                        case_depth--;
+                    } else if (case_depth == 0 &&
+                               ((wlen == 5 &&
+                                 strncmp(source + i, "while", 5) == 0) ||
+                                (wlen == 5 &&
+                                 strncmp(source + i, "until", 5) == 0) ||
+                                (wlen == 3 &&
+                                 strncmp(source + i, "for", 3) == 0))) {
+                        loop_depth++;
+                    } else if (case_depth == 0 && wlen == 4 &&
+                               strncmp(source + i, "done", 4) == 0 &&
+                               loop_depth > 0) {
+                        loop_depth--;
                     } else if (wlen == 2 && strncmp(source + i, "fi", 2) == 0) {
                         if_depth--;
                         if (if_depth == 0) {
@@ -244,12 +338,17 @@ bool parse_simple_if(const char *source, char **cond_out, char **then_out,
                             while (isspace((unsigned char)source[tail])) {
                                 tail++;
                             }
-                            if (source[tail] != '\0') {
+                            if (!looks_like_redirection_suffix(source, tail)) {
                                 return false;
+                            }
+                            if (redir_out != NULL) {
+                                *redir_out =
+                                    dup_trimmed_slice(source, tail, strlen(source));
                             }
                             break;
                         }
-                    } else if (if_depth == 1 && then_end == 0 &&
+                    } else if (if_depth == 1 && then_end == 0 && case_depth == 0 &&
+                               loop_depth == 0 &&
                                ((wlen == 4 && strncmp(source + i, "else", 4) == 0) ||
                                 (wlen == 4 && strncmp(source + i, "elif", 4) == 0))) {
                         then_end = i;
@@ -319,7 +418,7 @@ bool parse_simple_if(const char *source, char **cond_out, char **then_out,
 }
 
 bool parse_simple_while(const char *source, char **cond_out, char **body_out,
-                        bool *is_until_out) {
+                        bool *is_until_out, char **redir_out) {
     size_t i;
     size_t cond_start;
     size_t cond_end;
@@ -413,6 +512,12 @@ bool parse_simple_while(const char *source, char **cond_out, char **body_out,
                              strncmp(source + i, "until", 5) == 0) ||
                             (wlen == 3 && strncmp(source + i, "for", 3) == 0)) {
                             loop_depth++;
+                        } else if (wlen == 2 &&
+                                   strncmp(source + i, "do", 2) == 0 &&
+                                   loop_depth == 0) {
+                            cond_end = i;
+                            body_start = j;
+                            break;
                         } else if (wlen == 4 &&
                                    strncmp(source + i, "done", 4) == 0 &&
                                    loop_depth > 0) {
@@ -531,7 +636,7 @@ bool parse_simple_while(const char *source, char **cond_out, char **body_out,
                                 while (isspace((unsigned char)source[tail])) {
                                     tail++;
                                 }
-                                if (source[tail] != '\0') {
+                                if (!looks_like_redirection_suffix(source, tail)) {
                                     return false;
                                 }
 
@@ -540,6 +645,10 @@ bool parse_simple_while(const char *source, char **cond_out, char **body_out,
                                 *body_out =
                                     dup_trimmed_slice(source, body_start, body_end);
                                 *is_until_out = is_until;
+                                if (redir_out != NULL) {
+                                    *redir_out =
+                                        dup_trimmed_slice(source, tail, strlen(source));
+                                }
                                 return true;
                             }
                         }
@@ -565,7 +674,8 @@ bool parse_simple_while(const char *source, char **cond_out, char **body_out,
 }
 
 bool parse_simple_for(const char *source, char **name_out, char **words_out,
-                      char **body_out) {
+                      char **body_out, bool *implicit_words_out,
+                      char **redir_out) {
     size_t i;
     size_t name_start;
     size_t name_end;
@@ -578,6 +688,7 @@ bool parse_simple_for(const char *source, char **name_out, char **words_out,
     int brace_depth;
     int case_depth;
     int loop_depth;
+    bool implicit_words;
 
     i = 0;
     while (isspace((unsigned char)source[i])) {
@@ -604,16 +715,35 @@ bool parse_simple_for(const char *source, char **name_out, char **words_out,
     while (isspace((unsigned char)source[i])) {
         i++;
     }
-    if (strncmp(source + i, "in", 2) != 0 || !keyword_boundary(source[i + 2])) {
-        return false;
-    }
-    i += 2;
-    while (isspace((unsigned char)source[i])) {
-        i++;
+    implicit_words = true;
+    words_start = i;
+    words_end = i;
+    if (strncmp(source + i, "in", 2) == 0 && keyword_boundary(source[i + 2])) {
+        implicit_words = false;
+        i += 2;
+        while (isspace((unsigned char)source[i])) {
+            i++;
+        }
+        words_start = i;
+        words_end = 0;
+    } else {
+        while (isspace((unsigned char)source[i])) {
+            i++;
+        }
+        if (source[i] == ';') {
+            i++;
+        }
+        while (isspace((unsigned char)source[i])) {
+            i++;
+        }
+        if (strncmp(source + i, "do", 2) != 0 || !keyword_boundary(source[i + 2])) {
+            return false;
+        }
+        words_end = words_start;
+        body_start = i + 2;
+        goto have_body_start;
     }
 
-    words_start = i;
-    words_end = 0;
     body_start = 0;
     quote = '\0';
     paren_depth = 0;
@@ -675,6 +805,12 @@ bool parse_simple_for(const char *source, char **name_out, char **words_out,
                              strncmp(source + i, "until", 5) == 0) ||
                             (wlen == 3 && strncmp(source + i, "for", 3) == 0)) {
                             loop_depth++;
+                        } else if (wlen == 2 &&
+                                   strncmp(source + i, "do", 2) == 0 &&
+                                   loop_depth == 0) {
+                            words_end = i;
+                            body_start = j;
+                            break;
                         } else if (wlen == 4 &&
                                    strncmp(source + i, "done", 4) == 0 &&
                                    loop_depth > 0) {
@@ -713,9 +849,11 @@ bool parse_simple_for(const char *source, char **name_out, char **words_out,
         }
     }
 
-    if (words_end == 0) {
+    if (words_end == 0 && !implicit_words) {
         return false;
     }
+
+have_body_start:
     while (isspace((unsigned char)source[body_start])) {
         body_start++;
     }
@@ -792,7 +930,7 @@ bool parse_simple_for(const char *source, char **name_out, char **words_out,
                                 while (isspace((unsigned char)source[tail])) {
                                     tail++;
                                 }
-                                if (source[tail] != '\0') {
+                                if (!looks_like_redirection_suffix(source, tail)) {
                                     return false;
                                 }
 
@@ -802,6 +940,13 @@ bool parse_simple_for(const char *source, char **name_out, char **words_out,
                                     dup_trimmed_slice(source, words_start, words_end);
                                 *body_out =
                                     dup_trimmed_slice(source, body_start, body_end);
+                                if (implicit_words_out != NULL) {
+                                    *implicit_words_out = implicit_words;
+                                }
+                                if (redir_out != NULL) {
+                                    *redir_out =
+                                        dup_trimmed_slice(source, tail, strlen(source));
+                                }
                                 return true;
                             }
                         }
@@ -843,9 +988,9 @@ bool compound_needs_single_atom(const char *source) {
     is_until = false;
     matched = false;
 
-    if (parse_simple_while(trimmed, &cond, &body, &is_until)) {
+    if (parse_simple_while(trimmed, &cond, &body, &is_until, NULL)) {
         matched = true;
-    } else if (parse_simple_for(trimmed, &name, &words, &body)) {
+    } else if (parse_simple_for(trimmed, &name, &words, &body, NULL, NULL)) {
         matched = true;
     }
 

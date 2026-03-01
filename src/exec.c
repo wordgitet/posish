@@ -539,7 +539,7 @@ static bool word_starts_command_position(const char *source, size_t pos) {
             continue;
         }
         if (ch == '\n' || ch == ';' || ch == '&' || ch == '|' || ch == '(' ||
-            ch == ')' || ch == '{') {
+            ch == ')' || ch == '{' || ch == '}') {
             return true;
         }
         break;
@@ -563,12 +563,31 @@ static bool word_starts_command_position(const char *source, size_t pos) {
         if ((len == 4 && strncmp(source + start, "then", 4) == 0) ||
             (len == 2 && strncmp(source + start, "do", 2) == 0) ||
             (len == 4 && strncmp(source + start, "else", 4) == 0) ||
-            (len == 4 && strncmp(source + start, "elif", 4) == 0)) {
+            (len == 4 && strncmp(source + start, "elif", 4) == 0) ||
+            (len == 2 && strncmp(source + start, "if", 2) == 0) ||
+            (len == 2 && strncmp(source + start, "fi", 2) == 0)) {
             return true;
         }
     }
 
     return false;
+}
+
+static bool keyword_preceded_by_list_separator(const char *source, size_t pos) {
+    size_t i;
+    char ch;
+
+    i = pos;
+    while (i > 0 && (source[i - 1] == ' ' || source[i - 1] == '\t')) {
+        i--;
+    }
+    if (i == 0) {
+        return true;
+    }
+
+    ch = source[i - 1];
+    return ch == '\n' || ch == ';' || ch == '&' || ch == '|' || ch == '(' ||
+           ch == ')' || ch == '{' || ch == '}';
 }
 
 static bool newline_continues_command(const char *source, size_t pos) {
@@ -2411,12 +2430,16 @@ static int execute_command_atom(struct shell_state *state, const char *source,
     char *if_cond;
     char *if_then;
     char *if_else;
+    char *if_redirs;
     char *while_cond;
     char *while_body;
+    char *while_redirs;
     char *for_name;
     char *for_words;
     char *for_body;
+    char *for_redir_suffix;
     bool while_is_until;
+    bool for_implicit_words;
     int status;
 
     trimmed = dup_slice(source, 0, strlen(source));
@@ -2443,12 +2466,16 @@ static int execute_command_atom(struct shell_state *state, const char *source,
     if_cond = NULL;
     if_then = NULL;
     if_else = NULL;
+    if_redirs = NULL;
     while_cond = NULL;
     while_body = NULL;
+    while_redirs = NULL;
     for_name = NULL;
     for_words = NULL;
     for_body = NULL;
+    for_redir_suffix = NULL;
     while_is_until = false;
+    for_implicit_words = false;
     inner = NULL;
     subshell_redirs = NULL;
     brace_inner = NULL;
@@ -2467,21 +2494,54 @@ static int execute_command_atom(struct shell_state *state, const char *source,
         return 0;
     }
 
-    if (parse_simple_if(trimmed, &if_cond, &if_then, &if_else)) {
+    if (parse_simple_if(trimmed, &if_cond, &if_then, &if_else, &if_redirs)) {
+        struct redir_vec if_redir_vec;
+        struct fd_backup_vec if_backups;
+        bool if_redir_applied;
         bool saved_errexit;
+
+        if_redir_vec.items = NULL;
+        if_redir_vec.len = 0;
+        if_backups.items = NULL;
+        if_backups.len = 0;
+        if_redir_applied = false;
+
+        if (if_redirs != NULL && if_redirs[0] != '\0') {
+            if (parse_redirections_from_source(if_redirs, state, &if_redir_vec) !=
+                0) {
+                status = 2;
+                goto if_done;
+            }
+            if (apply_redirections(&if_redir_vec, true, state->noclobber,
+                                   &if_backups) != 0) {
+                fd_backup_restore(&if_backups);
+                status = 1;
+                goto if_done;
+            }
+            if_redir_applied = true;
+        }
 
         /* POSIX: -e does not trigger on commands used as if-conditions. */
         saved_errexit = state->errexit;
         state->errexit = false;
         status = execute_program_text(state, if_cond);
         state->errexit = saved_errexit;
-        if (!state->should_exit && !state->return_requested) {
+        if (!state->should_exit && !state->return_requested &&
+            !has_pending_flow_control(state)) {
             if (status == 0) {
                 status = execute_program_text(state, if_then);
             } else if (if_else != NULL) {
                 status = execute_program_text(state, if_else);
+            } else {
+                status = 0;
             }
         }
+if_done:
+        if (if_redir_applied) {
+            fd_backup_restore(&if_backups);
+        }
+        redir_vec_free(&if_redir_vec);
+        free(if_redirs);
         free(if_cond);
         free(if_then);
         free(if_else);
@@ -2489,8 +2549,34 @@ static int execute_command_atom(struct shell_state *state, const char *source,
         return status;
     }
 
-    if (parse_simple_while(trimmed, &while_cond, &while_body, &while_is_until)) {
+    if (parse_simple_while(trimmed, &while_cond, &while_body, &while_is_until,
+                           &while_redirs)) {
+        struct redir_vec while_redir_vec;
+        struct fd_backup_vec while_backups;
+        bool while_redir_applied;
+
         status = 0;
+        while_redir_vec.items = NULL;
+        while_redir_vec.len = 0;
+        while_backups.items = NULL;
+        while_backups.len = 0;
+        while_redir_applied = false;
+
+        if (while_redirs != NULL && while_redirs[0] != '\0') {
+            if (parse_redirections_from_source(while_redirs, state,
+                                               &while_redir_vec) != 0) {
+                status = 2;
+                goto while_done;
+            }
+            if (apply_redirections(&while_redir_vec, true, state->noclobber,
+                                   &while_backups) != 0) {
+                fd_backup_restore(&while_backups);
+                status = 1;
+                goto while_done;
+            }
+            while_redir_applied = true;
+        }
+
         state->loop_depth++;
         while (!state->should_exit) {
             int cond_status;
@@ -2527,18 +2613,28 @@ static int execute_command_atom(struct shell_state *state, const char *source,
             }
         }
         state->loop_depth--;
+        if (while_redir_applied) {
+            fd_backup_restore(&while_backups);
+        }
+        redir_vec_free(&while_redir_vec);
+while_done:
+        free(while_redirs);
         free(while_cond);
         free(while_body);
         free(trimmed);
         return status;
     }
 
-    if (parse_simple_for(trimmed, &for_name, &for_words, &for_body)) {
+    if (parse_simple_for(trimmed, &for_name, &for_words, &for_body,
+                         &for_implicit_words, &for_redir_suffix)) {
         struct token_vec for_lexed;
         struct word_vec for_raw_words;
         struct redir_vec for_redirs;
         struct token_vec for_expanded;
         struct token_vec for_in;
+        struct redir_vec for_loop_redirs;
+        struct fd_backup_vec for_backups;
+        bool for_redir_applied;
         size_t i;
 
         for_lexed.items = NULL;
@@ -2549,9 +2645,36 @@ static int execute_command_atom(struct shell_state *state, const char *source,
         for_redirs.len = 0;
         for_expanded.items = NULL;
         for_expanded.len = 0;
+        for_loop_redirs.items = NULL;
+        for_loop_redirs.len = 0;
+        for_backups.items = NULL;
+        for_backups.len = 0;
+        for_redir_applied = false;
         status = 0;
 
-        if (for_words[0] != '\0') {
+        if (for_redir_suffix != NULL && for_redir_suffix[0] != '\0') {
+            if (parse_redirections_from_source(for_redir_suffix, state,
+                                               &for_loop_redirs) != 0) {
+                status = 2;
+                goto for_done;
+            }
+            if (apply_redirections(&for_loop_redirs, true, state->noclobber,
+                                   &for_backups) != 0) {
+                fd_backup_restore(&for_backups);
+                status = 1;
+                goto for_done;
+            }
+            for_redir_applied = true;
+        }
+
+        if (for_implicit_words) {
+            for_expanded.items = arena_xmalloc(sizeof(*for_expanded.items) *
+                                               state->positional_count);
+            for_expanded.len = state->positional_count;
+            for (i = 0; i < state->positional_count; i++) {
+                for_expanded.items[i] = arena_xstrdup(state->positional_params[i]);
+            }
+        } else if (for_words[0] != '\0') {
             if (lexer_split_words(for_words, &for_lexed) != 0) {
                 status = 2;
                 goto for_done;
@@ -2568,7 +2691,7 @@ static int execute_command_atom(struct shell_state *state, const char *source,
 
             for_in.items = for_raw_words.items;
             for_in.len = for_raw_words.len;
-            if (expand_words(&for_in, &for_expanded, state, false) != 0) {
+            if (expand_words(&for_in, &for_expanded, state, true) != 0) {
                 status = 2;
                 goto for_done;
             }
@@ -2600,12 +2723,17 @@ static int execute_command_atom(struct shell_state *state, const char *source,
             }
         }
         state->loop_depth--;
+        if (for_redir_applied) {
+            fd_backup_restore(&for_backups);
+        }
 
 for_done:
         lexer_free_tokens(&for_lexed);
         word_vec_free(&for_raw_words);
         redir_vec_free(&for_redirs);
         lexer_free_tokens(&for_expanded);
+        redir_vec_free(&for_loop_redirs);
+        free(for_redir_suffix);
         free(for_name);
         free(for_words);
         free(for_body);
@@ -2729,6 +2857,7 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
                 brace_depth--;
             } else if (paren_depth == 0 && brace_depth == 0 && ch == '|' &&
                        cursor[i + 1] != '|' &&
+                       !(i > 0 && cursor[i - 1] == '|') &&
                        !(i > 0 && cursor[i - 1] == '>')) {
                 delim = true;
             }
@@ -3037,7 +3166,8 @@ static int execute_andor(struct shell_state *state, const char *source) {
                             loop_depth++;
                         } else if (kwlen == 4 &&
                                    strncmp(keyword, "done", 4) == 0 &&
-                                   loop_depth > 0) {
+                                   loop_depth > 0 &&
+                                   keyword_preceded_by_list_separator(source, i)) {
                             loop_depth--;
                         }
                     }
@@ -3243,7 +3373,8 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                             loop_depth++;
                         } else if (kwlen == 4 &&
                                    strncmp(keyword, "done", 4) == 0 &&
-                                   loop_depth > 0) {
+                                   loop_depth > 0 &&
+                                   keyword_preceded_by_list_separator(source, i)) {
                             loop_depth--;
                         }
                     }
