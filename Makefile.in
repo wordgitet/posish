@@ -23,6 +23,7 @@ SRC = \
 	src/arith.c \
 	src/case_command.c \
 	src/compound_parse.c \
+	src/heredoc_command.c \
 	src/expand.c \
 	src/exec.c \
 	src/redir.c \
@@ -46,6 +47,7 @@ OBJ = \
 	src/arith.o \
 	src/case_command.o \
 	src/compound_parse.o \
+	src/heredoc_command.o \
 	src/expand.o \
 	src/exec.o \
 	src/redir.o \
