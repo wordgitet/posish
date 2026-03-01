@@ -11,20 +11,16 @@ non-green POSIX test buckets.
   - `FULL_FAIL 0`
   - `TIMEOUT 0`
   - `MISSING 0`
-  - `OK 10758`
-  - `ERROR 312`
+  - `OK 10767`
+  - `ERROR 303`
   - `SKIPPED 14`
-  - `RATIO_OK_OVER_OK_PLUS_ERROR 0.9718`
+  - `RATIO_OK_OVER_OK_PLUS_ERROR 0.9726`
 
 ## Accepted Scope Cuts
 
 - `set -C` / noclobber behavior:
   - Current policy: option parses, behavior not fully enforced yet.
   - Impacted area: redirection semantics and related POSIX tests.
-- Dollar-single-quote syntax (`$'...'`):
-  - Current policy: parser recognizes and rejects with clear "not implemented"
-    diagnostic.
-  - Impacted area: quoting tests that require full escape processing.
 
 ## Current Blockers / Regressions
 
@@ -36,13 +32,13 @@ Top active non-green buckets by error count:
 - `read-p.tst` (29)
 - `getopts-p.tst` (26)
 - `tilde-p.tst` (21)
-- `param-p.tst` (19)
-- `case-p.tst` (13)
+- `param-p.tst` (17)
 - `fsplit-p.tst` (13)
-- `trap-p.tst` (13)
+- `trap-p.tst` (12)
+- `case-p.tst` (11)
 - `builtins-p.tst` (10)
 - `cmdsub-p.tst` (10)
-- `startup-p.tst` (9)
+- `startup-p.tst` (8)
 
 The complete non-green file list is sourced from
 `tests/posix/summary-fulltruth.csv`.
