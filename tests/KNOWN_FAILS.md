@@ -15,25 +15,18 @@ misclassified as regressions.
 
 ## Signal status (updated 2026-02-28)
 
-- Signal suites are currently green in the verified baseline.
-- For signal-semantic truth runs, use `make test-signal`
-  (`TESTCASE_TIMEOUT_SIGNAL=0`).
-- For bounded execution with explicit timeout classification, use
-  `make test-signal-contained`.
-- Signal behavior remains active implementation work, but it is no longer an
-  accepted broad-fail bucket in this tracker.
+- Signal semantics use truth mode by default.
+- Use `make test-signal` (`TESTCASE_TIMEOUT_SIGNAL=0`).
+- Use `make test-signal-contained` for bounded per-file runs.
 
-## Current active blockers (2026-02-28, builtins/params lane)
+## Current active blockers (2026-02-28 fulltruth)
 
-- Async/job-control edge cases:
-  - `async-p.tst:27` (`asynchronous commands run asynchronously`)
-  - `job-p.tst:21` (`stdin of asynchronous list is not modified with job control`)
-  - `grouping-p.tst:34` and `grouping-p.tst:75` (async-list endings in grouped commands)
-- Wait builtin gaps:
-  - `wait-p.tst:76` (jobspec operands like `%echo`, `%exit`)
-  - `wait-p.tst:101` (`while ... do ... done` control-flow coverage in trap-interrupt scenario)
-- Kill-cluster blocker:
-  - `kill4-p.tst` currently aborts (`make ... kill4-p.trs` exits with `Error 129`).
+- `command-p.tst:12` (`dot script not found does not kill shell`):
+  - Symptom: expected output line `reached` is missing.
+  - Repro: `make -B -C tests/posix command-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=10`
+- `kill4-p.tst` abort path:
+  - Symptom: harness aborts early at testcase line 13 (`sending signal to process 0`).
+  - Repro: `make -B -C tests/posix kill4-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=10`
 
 ## Maintenance
 

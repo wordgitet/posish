@@ -9,7 +9,6 @@ Status: `active runbook guidance`
 Notes:
 
 - For signal-semantic validation, run with `TESTCASE_TIMEOUT=0`.
-  Non-zero testcase timeout can distort outcomes in `sigint*` / `sigquit*`.
 - Use `make test-signal` for truthful signal semantics.
 - Use `make test-signal-contained` when you need guaranteed completion with
   explicit PASS/FAIL/TIMEOUT classification per file.
@@ -20,14 +19,8 @@ Status: `active`
 
 Notes:
 
-- Green confirmations retained:
-  - `sigtstp4-p.tst`
-  - `sigttin4-p.tst`
-  - `sigttou4-p.tst`
-  - `command-p.tst:253` (`describing alias (-V)`)
-- Remaining blockers in current lane:
-  - `async-p.tst:27`
-  - `job-p.tst:21`
-  - `grouping-p.tst:34`, `grouping-p.tst:75`
-  - `wait-p.tst:76`, `wait-p.tst:101`
-  - `kill4-p.tst` (`Error 129` abort path)
+- Active blockers (from 2026-02-28 fulltruth rebaseline):
+  - `command-p.tst:12` (`dot script not found does not kill shell`)
+  - `kill4-p.tst` (abort path near testcase line 13, `sending signal to process 0`)
+- Previously tracked async/grouping/wait blocker lines are now green in current
+  reruns and were removed from this file.
