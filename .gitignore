@@ -1,0 +1,35 @@
+autom4te.cache/
+build-aux/
+build/
+config.h
+config.log
+config.status
+config.mk
+Makefile
+tests/posix/Makefile
+tests/posix/*.trs
+tests/posix/summary.log
+tests/posix/summary-smoke.log
+tests/posix/summary-signal.log
+tests/posix/checkfg
+tests/posix/ptwrap
+tests/posix/resetsig
+tests/posix/tmp.*
+tests/posix/tmp.queue/
+tmp/metrics/
+
+# C/build byproducts
+*.o
+*.a
+*.so
+*.dylib
+*.dSYM/
+
+# Local editor/backup noise
+*~
+*.swp
+*.swo
+.DS_Store
+
+# Local scratch
+f1

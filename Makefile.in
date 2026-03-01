@@ -1,0 +1,142 @@
+.POSIX:
+.SUFFIXES: .c .o
+
+SHELL = /bin/sh
+
+CC = @CC@
+CPPFLAGS = @CPPFLAGS@ -D_POSIX_C_SOURCE=200809L -Iinclude -Isrc -include config.h
+CFLAGS = @CFLAGS@ -Wall -Wextra -Wpedantic
+LDFLAGS = @LDFLAGS@
+LIBS = @LIBS@
+YASH_RUNNER = @YASH_RUNNER@
+
+BUILD_DIR = build
+TARGET = $(BUILD_DIR)/posish
+METRICS_CSV = tmp/metrics/posix.csv
+
+SRC = \
+	src/main.c \
+	src/shell.c \
+	src/input.c \
+	src/lexer.c \
+	src/parser.c \
+	src/arith.c \
+	src/expand.c \
+	src/exec.c \
+	src/redir.c \
+	src/jobs.c \
+	src/signals.c \
+	src/trace.c \
+	src/vars.c \
+	src/options.c \
+	src/path.c \
+	src/error.c \
+	src/arena.c \
+	src/builtins/special.c \
+	src/builtins/regular.c
+
+OBJ = \
+	src/main.o \
+	src/shell.o \
+	src/input.o \
+	src/lexer.o \
+	src/parser.o \
+	src/arith.o \
+	src/expand.o \
+	src/exec.o \
+	src/redir.o \
+	src/jobs.o \
+	src/signals.o \
+	src/trace.o \
+	src/vars.o \
+	src/options.o \
+	src/path.o \
+	src/error.o \
+	src/arena.o \
+	src/builtins/special.o \
+	src/builtins/regular.o
+
+SMOKE_TEST_SOURCES = \
+	nop-p.tst \
+	andor-p.tst \
+	exec-p.tst \
+	simple-p.tst \
+	sigstop3-p.tst
+TESTCASE_TIMEOUT ?= 0
+TESTCASE_TIMEOUT_STOP ?= 90
+TESTCASE_TIMEOUT_SIGNAL ?= 0
+SIGNAL_FILE_TIMEOUT ?= 180
+SIGNAL_FILE_TIMEOUT_KILL ?= 5
+
+all: $(TARGET)
+
+$(TARGET): $(OBJ)
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJ) $(LIBS)
+
+.c.o:
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+test-posix: $(TARGET)
+	@if [ -n "$(TESTEE)" ]; then testee="$(TESTEE)"; else testee="`pwd`/$(TARGET)"; fi; \
+	$(MAKE) -C tests/posix test-posix \
+		YASH_RUNNER="$(YASH_RUNNER)" \
+		TESTEE="$$testee" \
+		TESTCASE_TIMEOUT="$(TESTCASE_TIMEOUT)"
+
+test-smoke: $(TARGET)
+	@if [ -n "$(TESTEE)" ]; then testee="$(TESTEE)"; else testee="`pwd`/$(TARGET)"; fi; \
+	$(MAKE) -C tests/posix test-smoke \
+		YASH_RUNNER="$(YASH_RUNNER)" \
+		TESTEE="$$testee" \
+		SMOKE_TEST_SOURCES="$(SMOKE_TEST_SOURCES)" \
+		TESTCASE_TIMEOUT="$(TESTCASE_TIMEOUT)"
+
+test-stop: $(TARGET)
+	@if [ -n "$(TESTEE)" ]; then testee="$(TESTEE)"; else testee="`pwd`/$(TARGET)"; fi; \
+	$(MAKE) -C tests/posix test-stop \
+		YASH_RUNNER="$(YASH_RUNNER)" \
+		TESTEE="$$testee" \
+		TESTCASE_TIMEOUT_STOP="$(TESTCASE_TIMEOUT_STOP)"
+
+test-signal: $(TARGET)
+	@if [ -n "$(TESTEE)" ]; then testee="$(TESTEE)"; else testee="`pwd`/$(TARGET)"; fi; \
+	$(MAKE) -C tests/posix test-signal \
+		YASH_RUNNER="$(YASH_RUNNER)" \
+		TESTEE="$$testee" \
+		TESTCASE_TIMEOUT_SIGNAL="$(TESTCASE_TIMEOUT_SIGNAL)"
+
+test-signal-contained: $(TARGET)
+	@if [ -n "$(TESTEE)" ]; then testee="$(TESTEE)"; else testee="`pwd`/$(TARGET)"; fi; \
+	$(MAKE) -C tests/posix test-signal-contained \
+		YASH_RUNNER="$(YASH_RUNNER)" \
+		TESTEE="$$testee" \
+		TESTCASE_TIMEOUT_SIGNAL="$(TESTCASE_TIMEOUT_SIGNAL)" \
+		SIGNAL_FILE_TIMEOUT="$(SIGNAL_FILE_TIMEOUT)" \
+		SIGNAL_FILE_TIMEOUT_KILL="$(SIGNAL_FILE_TIMEOUT_KILL)"
+
+test-regressions: $(TARGET)
+	@if [ -n "$(TESTEE)" ]; then testee="$(TESTEE)"; else testee="`pwd`/$(TARGET)"; fi; \
+	$(MAKE) -C tests/posix test-regressions \
+		YASH_RUNNER="$(YASH_RUNNER)" \
+		TESTEE="$$testee" \
+		TESTCASE_TIMEOUT_SIGNAL="$(TESTCASE_TIMEOUT_SIGNAL)"
+
+metrics: $(TARGET)
+	mkdir -p tmp/metrics
+	@if [ -n "$(METRICS_TEST_SOURCES)" ]; then \
+		$(MAKE) -C tests/posix test \
+			YASH_RUNNER="$(YASH_RUNNER)" \
+			TESTEE="`pwd`/$(TARGET)" \
+			TEST_SOURCES="$(METRICS_TEST_SOURCES)" || true; \
+	else \
+		$(MAKE) test-posix || true; \
+	fi
+	$(SHELL) scripts/append-metrics.sh tests/posix/summary.log $(METRICS_CSV)
+
+clean:
+	rm -f $(OBJ)
+	rm -rf $(BUILD_DIR)
+	$(MAKE) -C tests/posix clean
+
+.PHONY: all clean test-posix test-smoke test-stop test-signal test-signal-contained test-regressions metrics

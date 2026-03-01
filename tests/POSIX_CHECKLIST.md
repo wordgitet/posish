@@ -1,0 +1,132 @@
+# POSIX Test Checklist
+
+Last verified: 2026-02-28 (smoke + regressions + targeted signal truth subset + builtins/params Phase A quick-win subset).
+
+Track progress per POSIX test file (`*-p.tst`).
+
+Legend:
+- [ ] not yet green
+- [x] green
+
+- [ ] alias-p.tst
+- [x] andor-p.tst
+- [ ] arith-p.tst
+- [ ] async-p.tst
+- [ ] bg-p.tst
+- [ ] break-p.tst
+- [ ] builtins-p.tst
+- [ ] case-p.tst
+- [ ] cd-p.tst
+- [ ] cmdsub-p.tst
+- [x] command-p.tst
+- [ ] comment-p.tst
+- [ ] continue-p.tst
+- [ ] declutil-p.tst
+- [ ] dot-p.tst
+- [ ] errexit-p.tst
+- [ ] error-p.tst
+- [x] eval-p.tst
+- [x] exec-p.tst
+- [ ] exit-p.tst
+- [x] export-p.tst
+- [ ] fg-p.tst
+- [ ] fnmatch-p.tst
+- [ ] for-p.tst
+- [ ] fsplit-p.tst
+- [ ] function-p.tst
+- [ ] getopts-p.tst
+- [ ] grouping-p.tst
+- [ ] if-p.tst
+- [ ] input-p.tst
+- [ ] job-p.tst
+- [ ] kill1-p.tst
+- [ ] kill2-p.tst
+- [ ] kill3-p.tst
+- [ ] kill4-p.tst
+- [x] lineno-p.tst
+- [x] nop-p.tst
+- [ ] option-p.tst
+- [ ] param-p.tst
+- [ ] path-p.tst
+- [ ] pipeline-p.tst
+- [x] ppid-p.tst
+- [ ] quote-p.tst
+- [ ] read-p.tst
+- [x] readonly-p.tst
+- [ ] redir-p.tst
+- [ ] return-p.tst
+- [ ] set-p.tst
+- [ ] shift-p.tst
+- [x] sigcont1-p.tst
+- [x] sigcont2-p.tst
+- [x] sigcont3-p.tst
+- [x] sigcont4-p.tst
+- [x] sigcont5-p.tst
+- [x] sigcont6-p.tst
+- [x] sigcont7-p.tst
+- [x] sigcont8-p.tst
+- [x] sighup1-p.tst
+- [x] sighup2-p.tst
+- [x] sighup3-p.tst
+- [x] sighup4-p.tst
+- [x] sighup5-p.tst
+- [x] sighup6-p.tst
+- [x] sighup7-p.tst
+- [x] sighup8-p.tst
+- [x] sigint1-p.tst
+- [x] sigint2-p.tst
+- [x] sigint3-p.tst
+- [x] sigint4-p.tst
+- [x] sigint5-p.tst
+- [x] sigint6-p.tst
+- [x] sigint7-p.tst
+- [x] sigint8-p.tst
+- [x] sigquit1-p.tst
+- [x] sigquit2-p.tst
+- [x] sigquit3-p.tst
+- [x] sigquit4-p.tst
+- [x] sigquit5-p.tst
+- [x] sigquit6-p.tst
+- [x] sigquit7-p.tst
+- [x] sigquit8-p.tst
+- [x] sigstop3-p.tst
+- [x] sigstop7-p.tst
+- [x] sigterm1-p.tst
+- [x] sigterm2-p.tst
+- [x] sigterm3-p.tst
+- [x] sigterm4-p.tst
+- [x] sigterm5-p.tst
+- [x] sigterm6-p.tst
+- [x] sigterm7-p.tst
+- [x] sigterm8-p.tst
+- [x] sigtstp3-p.tst
+- [x] sigtstp4-p.tst
+- [x] sigtstp7-p.tst
+- [x] sigtstp8-p.tst
+- [x] sigttin3-p.tst
+- [x] sigttin4-p.tst
+- [x] sigttin7-p.tst
+- [x] sigttin8-p.tst
+- [x] sigttou3-p.tst
+- [x] sigttou4-p.tst
+- [x] sigttou7-p.tst
+- [x] sigttou8-p.tst
+- [x] sigurg1-p.tst
+- [x] sigurg2-p.tst
+- [x] sigurg3-p.tst
+- [x] sigurg4-p.tst
+- [x] sigurg5-p.tst
+- [x] sigurg6-p.tst
+- [x] sigurg7-p.tst
+- [x] sigurg8-p.tst
+- [x] simple-p.tst
+- [ ] startup-p.tst
+- [ ] test-p.tst
+- [ ] testtty-p.tst
+- [ ] tilde-p.tst
+- [ ] trap-p.tst
+- [ ] umask-p.tst
+- [ ] unset-p.tst
+- [ ] until-p.tst
+- [ ] wait-p.tst
+- [ ] while-p.tst
