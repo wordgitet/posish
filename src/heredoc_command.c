@@ -20,7 +20,9 @@
 struct heredoc_spec {
     int target_fd;
     bool strip_tabs;
+    bool expand_body;
     char *delimiter;
+    char *placeholder;
     char *body;
     char *temp_path;
 };
@@ -66,6 +68,7 @@ static void heredoc_specs_free(struct heredoc_spec *specs, size_t count) {
 
     for (i = 0; i < count; i++) {
         free(specs[i].delimiter);
+        free(specs[i].placeholder);
         free(specs[i].body);
         if (specs[i].temp_path != NULL) {
             unlink(specs[i].temp_path);
@@ -256,6 +259,8 @@ static int parse_command_heredocs(const char *command, char **base_command_out,
         bool needs_word;
         const char *raw_delim;
         struct heredoc_spec spec;
+        char placeholder_name[64];
+        char redir_token[96];
 
         if (!parse_heredoc_token(tokens.items[i], &target_fd, &strip_tabs,
                                  &inline_delim, &needs_word)) {
@@ -279,14 +284,26 @@ static int parse_command_heredocs(const char *command, char **base_command_out,
 
         spec.target_fd = target_fd;
         spec.strip_tabs = strip_tabs;
+        spec.expand_body = strpbrk(raw_delim, "'\"\\") == NULL;
         spec.body = NULL;
         spec.temp_path = NULL;
+        snprintf(placeholder_name, sizeof(placeholder_name),
+                 "__POSISH_HEREDOC_%zu__", spec_count);
+        spec.placeholder = arena_xstrdup(placeholder_name);
         if (quote_remove_word(raw_delim, &spec.delimiter) != 0) {
             free_string_vec(kept_tokens, kept_count);
             heredoc_specs_free(specs, spec_count);
             lexer_free_tokens(&tokens);
             return -1;
         }
+
+        if (spec.target_fd == STDIN_FILENO) {
+            snprintf(redir_token, sizeof(redir_token), "<%s", spec.placeholder);
+        } else {
+            snprintf(redir_token, sizeof(redir_token), "%d<%s", spec.target_fd,
+                     spec.placeholder);
+        }
+        push_token_copy(&kept_tokens, &kept_count, redir_token);
         heredoc_specs_push(&specs, &spec_count, &spec);
     }
 
@@ -432,44 +449,72 @@ static int write_heredoc_tempfiles(struct heredoc_spec *specs, size_t spec_count
     return 0;
 }
 
+static char *replace_all(const char *in, const char *needle,
+                         const char *replacement) {
+    const char *p;
+    size_t in_len;
+    size_t needle_len;
+    size_t repl_len;
+    size_t count;
+    char *out;
+    size_t out_len;
+    char *dst;
+
+    in_len = strlen(in);
+    needle_len = strlen(needle);
+    repl_len = strlen(replacement);
+    if (needle_len == 0) {
+        return arena_xstrdup(in);
+    }
+
+    count = 0;
+    p = in;
+    while ((p = strstr(p, needle)) != NULL) {
+        count++;
+        p += needle_len;
+    }
+    if (count == 0) {
+        return arena_xstrdup(in);
+    }
+
+    out_len = in_len + count * (repl_len - needle_len);
+    out = arena_xmalloc(out_len + 1);
+    dst = out;
+    p = in;
+    while (*p != '\0') {
+        const char *hit;
+        size_t chunk;
+
+        hit = strstr(p, needle);
+        if (hit == NULL) {
+            strcpy(dst, p);
+            break;
+        }
+        chunk = (size_t)(hit - p);
+        memcpy(dst, p, chunk);
+        dst += chunk;
+        memcpy(dst, replacement, repl_len);
+        dst += repl_len;
+        p = hit + needle_len;
+    }
+    out[out_len] = '\0';
+    return out;
+}
+
 static char *build_heredoc_command(const char *base_command,
                                    const struct heredoc_spec *specs,
                                    size_t spec_count) {
     size_t i;
-    size_t len;
     char *out;
-    size_t pos;
 
-    len = strlen(base_command) + 1;
+    out = arena_xstrdup(base_command);
     for (i = 0; i < spec_count; i++) {
-        len += strlen(specs[i].temp_path) + 20;
+        char *replaced;
+
+        replaced = replace_all(out, specs[i].placeholder, specs[i].temp_path);
+        free(out);
+        out = replaced;
     }
-
-    out = arena_xmalloc(len);
-    pos = 0;
-    out[0] = '\0';
-    memcpy(out + pos, base_command, strlen(base_command));
-    pos += strlen(base_command);
-
-    for (i = 0; i < spec_count; i++) {
-        int n;
-
-        if (pos > 0 && out[pos - 1] != ' ') {
-            out[pos++] = ' ';
-        }
-        if (specs[i].target_fd == STDIN_FILENO) {
-            n = snprintf(out + pos, len - pos, "<%s", specs[i].temp_path);
-        } else {
-            n = snprintf(out + pos, len - pos, "%d<%s", specs[i].target_fd,
-                         specs[i].temp_path);
-        }
-        pos += (size_t)n;
-        if (i + 1 < spec_count) {
-            out[pos++] = ' ';
-        }
-    }
-
-    out[pos] = '\0';
     return out;
 }
 
@@ -487,15 +532,6 @@ int maybe_execute_heredoc_command(struct shell_state *state, const char *command
     *handled = false;
     *status_out = 0;
     *new_pos_out = body_pos;
-
-    /*
-     * Heredoc extraction here expects a single command line whose body starts
-     * after the current delimiter. Multiline grouped fragments (e.g. subshell
-     * wrappers) are handled by the regular executor path.
-     */
-    if (strchr(command, '\n') != NULL) {
-        return 0;
-    }
 
     if (parse_command_heredocs(command, &base_command, &specs, &spec_count) != 0) {
         return -1;

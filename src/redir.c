@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 void redir_vec_free(struct redir_vec *redirs) {
@@ -130,6 +131,7 @@ int parse_redir_token(const char *token, struct redir_spec *spec, bool *needs_wo
     spec->kind = REDIR_OPEN_READ;
     spec->target_fd = 0;
     spec->source_fd = -1;
+    spec->force_clobber = false;
     spec->path = NULL;
     *needs_word = false;
 
@@ -162,8 +164,8 @@ int parse_redir_token(const char *token, struct redir_spec *spec, bool *needs_wo
             spec->kind = REDIR_OPEN_APPEND;
             pos += 2;
         } else if (token[pos + 1] == '|') {
-            /* Treat >| as truncate for now; noclobber policy is deferred. */
             spec->kind = REDIR_OPEN_WRITE;
+            spec->force_clobber = true;
             pos += 2;
         } else if (token[pos + 1] == '&') {
             spec->kind = REDIR_DUP_OUT;
@@ -189,10 +191,7 @@ int parse_redir_token(const char *token, struct redir_spec *spec, bool *needs_wo
             *needs_word = true;
             return 1;
         }
-        if (parse_dup_operand(rest, spec) != 0) {
-            posish_errorf("invalid file descriptor redirection: %s", token);
-            return -1;
-        }
+        spec->path = arena_xstrdup(rest);
         return 1;
     }
 
@@ -205,7 +204,7 @@ int parse_redir_token(const char *token, struct redir_spec *spec, bool *needs_wo
     return 1;
 }
 
-int apply_one_redirection(const struct redir_spec *redir) {
+int apply_one_redirection(const struct redir_spec *redir, bool noclobber) {
     int opened_fd;
 
     opened_fd = -1;
@@ -214,7 +213,18 @@ int apply_one_redirection(const struct redir_spec *redir) {
     } else if (redir->kind == REDIR_OPEN_RDWR) {
         opened_fd = open(redir->path, O_RDWR | O_CREAT, 0666);
     } else if (redir->kind == REDIR_OPEN_WRITE) {
-        opened_fd = open(redir->path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (noclobber && !redir->force_clobber) {
+            struct stat st;
+
+            if (stat(redir->path, &st) == 0 && S_ISREG(st.st_mode)) {
+                errno = EEXIST;
+                opened_fd = -1;
+            } else {
+                opened_fd = open(redir->path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            }
+        } else {
+            opened_fd = open(redir->path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        }
     } else if (redir->kind == REDIR_OPEN_APPEND) {
         opened_fd = open(redir->path, O_WRONLY | O_CREAT | O_APPEND, 0666);
     }
@@ -238,6 +248,23 @@ int apply_one_redirection(const struct redir_spec *redir) {
     }
 
     if (redir->kind == REDIR_DUP_IN || redir->kind == REDIR_DUP_OUT) {
+        int flags;
+
+        flags = fcntl(redir->source_fd, F_GETFL);
+        if (flags < 0) {
+            perror("fcntl");
+            return 1;
+        }
+        if (redir->kind == REDIR_DUP_IN && (flags & O_ACCMODE) == O_WRONLY) {
+            errno = EBADF;
+            perror("dup2");
+            return 1;
+        }
+        if (redir->kind == REDIR_DUP_OUT && (flags & O_ACCMODE) == O_RDONLY) {
+            errno = EBADF;
+            perror("dup2");
+            return 1;
+        }
         if (dup2(redir->source_fd, redir->target_fd) < 0) {
             perror("dup2");
             return 1;
@@ -253,6 +280,7 @@ int apply_one_redirection(const struct redir_spec *redir) {
 }
 
 int apply_redirections(const struct redir_vec *redirs, bool save_restore,
+                       bool noclobber,
                        struct fd_backup_vec *backups) {
     size_t i;
 
@@ -263,7 +291,7 @@ int apply_redirections(const struct redir_vec *redirs, bool save_restore,
             }
         }
 
-        if (apply_one_redirection(&redirs->items[i]) != 0) {
+        if (apply_one_redirection(&redirs->items[i], noclobber) != 0) {
             return 1;
         }
     }

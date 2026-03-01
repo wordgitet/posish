@@ -22,6 +22,7 @@ struct redir_spec {
     enum redir_kind kind;
     int target_fd;
     int source_fd;
+    bool force_clobber;
     char *path;
 };
 
@@ -50,8 +51,9 @@ void fd_backup_restore(struct fd_backup_vec *backups);
 int parse_dup_operand(const char *text, struct redir_spec *spec);
 int parse_redir_token(const char *token, struct redir_spec *spec, bool *needs_word);
 
-int apply_one_redirection(const struct redir_spec *redir);
+int apply_one_redirection(const struct redir_spec *redir, bool noclobber);
 int apply_redirections(const struct redir_vec *redirs, bool save_restore,
+                       bool noclobber,
                        struct fd_backup_vec *backups);
 
 #endif

@@ -1065,6 +1065,126 @@ static bool ignore_helper_function_declaration(const char *source) {
     return keyword_boundary(source[i + 14]);
 }
 
+static int find_redir_operator_pos(const char *token, size_t *pos_out) {
+    size_t i;
+    char quote;
+
+    quote = '\0';
+    for (i = 0; token[i] != '\0'; i++) {
+        char ch;
+
+        ch = token[i];
+        if (quote == '\0') {
+            if (ch == '$' && token[i + 1] == '(') {
+                size_t end;
+
+                if (find_command_subst_end(token, i, &end)) {
+                    i = end;
+                    continue;
+                }
+            }
+            if (ch == '$' && token[i + 1] == '{') {
+                size_t j;
+                int depth;
+                char inner_quote;
+
+                j = i + 2;
+                depth = 1;
+                inner_quote = '\0';
+                while (token[j] != '\0' && depth > 0) {
+                    char inner;
+
+                    inner = token[j];
+                    if (inner_quote == '\0') {
+                        if (inner == '\\' && token[j + 1] != '\0') {
+                            j += 2;
+                            continue;
+                        }
+                        if (inner == '\'' || inner == '"') {
+                            inner_quote = inner;
+                            j++;
+                            continue;
+                        }
+                        if (inner == '{') {
+                            depth++;
+                        } else if (inner == '}') {
+                            depth--;
+                            if (depth == 0) {
+                                i = j;
+                                break;
+                            }
+                        }
+                        j++;
+                        continue;
+                    }
+                    if (inner_quote == '\'' && inner == '\'') {
+                        inner_quote = '\0';
+                        j++;
+                        continue;
+                    }
+                    if (inner_quote == '"') {
+                        if (inner == '\\' && token[j + 1] != '\0') {
+                            j += 2;
+                            continue;
+                        }
+                        if (inner == '"') {
+                            inner_quote = '\0';
+                        }
+                    }
+                    j++;
+                }
+                if (depth == 0) {
+                    continue;
+                }
+            }
+            if (ch == '`') {
+                i++;
+                while (token[i] != '\0') {
+                    if (token[i] == '\\' && token[i + 1] != '\0') {
+                        i += 2;
+                        continue;
+                    }
+                    if (token[i] == '`') {
+                        break;
+                    }
+                    i++;
+                }
+                if (token[i] == '\0') {
+                    return -1;
+                }
+                continue;
+            }
+            if (ch == '\\' && token[i + 1] != '\0') {
+                i++;
+                continue;
+            }
+            if (ch == '\'' || ch == '"') {
+                quote = ch;
+                continue;
+            }
+            if (ch == '<' || ch == '>') {
+                *pos_out = i;
+                return 0;
+            }
+            continue;
+        }
+
+        if (quote == '\'' && ch == '\'') {
+            quote = '\0';
+        } else if (quote == '"') {
+            if (ch == '\\' && token[i + 1] != '\0') {
+                i++;
+                continue;
+            }
+            if (ch == '"') {
+                quote = '\0';
+            }
+        }
+    }
+
+    return -1;
+}
+
 static int collect_words_and_redirs(const struct token_vec *expanded, struct word_vec *words,
                                     struct redir_vec *redirs) {
     size_t i;
@@ -1084,8 +1204,31 @@ static int collect_words_and_redirs(const struct token_vec *expanded, struct wor
             return -1;
         }
         if (pr == 0) {
-            word_vec_push(words, expanded->items[i]);
-            continue;
+            size_t op_pos;
+
+            if (find_redir_operator_pos(expanded->items[i], &op_pos) == 0 &&
+                op_pos > 0) {
+                char *prefix;
+                const char *redir_text;
+
+                prefix = arena_xmalloc(op_pos + 1);
+                memcpy(prefix, expanded->items[i], op_pos);
+                prefix[op_pos] = '\0';
+                word_vec_push(words, prefix);
+
+                redir_text = expanded->items[i] + op_pos;
+                pr = parse_redir_token(redir_text, &spec, &needs_word);
+                if (pr < 0) {
+                    return -1;
+                }
+                if (pr == 0) {
+                    word_vec_push(words, expanded->items[i]);
+                    continue;
+                }
+            } else {
+                word_vec_push(words, expanded->items[i]);
+                continue;
+            }
         }
 
         if (needs_word) {
@@ -1095,20 +1238,81 @@ static int collect_words_and_redirs(const struct token_vec *expanded, struct wor
                 return -1;
             }
 
-            if (spec.kind == REDIR_DUP_IN || spec.kind == REDIR_DUP_OUT) {
-                if (parse_dup_operand(expanded->items[i], &spec) != 0) {
-                    posish_errorf("invalid file descriptor redirection: %s",
-                                  expanded->items[i]);
-                    return -1;
-                }
-            } else {
-                spec.path = arena_xstrdup(expanded->items[i]);
-            }
+            spec.path = arena_xstrdup(expanded->items[i]);
         }
 
         redir_vec_push(redirs, &spec);
     }
 
+    return 0;
+}
+
+static int expand_redirection_operands(struct shell_state *state,
+                                       struct redir_vec *redirs,
+                                       bool *saw_cmdsub_out,
+                                       int *last_cmdsub_status_out) {
+    size_t i;
+    bool saw_cmdsub;
+    int last_cmdsub_status;
+    struct token_vec in_vec;
+    struct token_vec out_vec;
+
+    saw_cmdsub = false;
+    last_cmdsub_status = 0;
+
+    for (i = 0; i < redirs->len; i++) {
+        char *one_word;
+
+        if (redirs->items[i].path == NULL) {
+            continue;
+        }
+
+        one_word = redirs->items[i].path;
+        in_vec.items = &one_word;
+        in_vec.len = 1;
+        out_vec.items = NULL;
+        out_vec.len = 0;
+
+        if (expand_words(&in_vec, &out_vec, state, false) != 0) {
+            return 2;
+        }
+        if (state->cmdsub_performed) {
+            saw_cmdsub = true;
+            last_cmdsub_status = state->last_cmdsub_status;
+        }
+        if (out_vec.len != 1) {
+            size_t j;
+            for (j = 0; j < out_vec.len; j++) {
+                free(out_vec.items[j]);
+            }
+            free(out_vec.items);
+            posish_errorf("ambiguous redirection");
+            return 1;
+        }
+
+        free(redirs->items[i].path);
+        redirs->items[i].path = out_vec.items[0];
+        free(out_vec.items);
+
+        if (redirs->items[i].kind == REDIR_DUP_IN ||
+            redirs->items[i].kind == REDIR_DUP_OUT) {
+            if (parse_dup_operand(redirs->items[i].path, &redirs->items[i]) !=
+                0) {
+                posish_errorf("invalid file descriptor redirection: %s",
+                              redirs->items[i].path);
+                return 1;
+            }
+            free(redirs->items[i].path);
+            redirs->items[i].path = NULL;
+        }
+    }
+
+    if (saw_cmdsub_out != NULL) {
+        *saw_cmdsub_out = saw_cmdsub;
+    }
+    if (last_cmdsub_status_out != NULL) {
+        *last_cmdsub_status_out = last_cmdsub_status;
+    }
     return 0;
 }
 
@@ -1307,7 +1511,7 @@ static int run_external_argv(struct shell_state *state, char *const argv[],
         exec_prepare_signals_for_exec_child(state);
         vars_apply_unexported_in_child(state);
 
-        if (apply_redirections(redirs, false, NULL) != 0) {
+        if (apply_redirections(redirs, false, state->noclobber, NULL) != 0) {
             _exit(1);
         }
 
@@ -1381,6 +1585,12 @@ static int parse_redirections_from_source(const char *source, struct shell_state
         lexer_free_tokens(&expanded);
         return -1;
     }
+    if (expand_redirection_operands(state, redirs, NULL, NULL) != 0) {
+        word_vec_free(&words);
+        redir_vec_free(redirs);
+        lexer_free_tokens(&expanded);
+        return -1;
+    }
 
     if (words.len != 0) {
         posish_errorf("unsupported tokens after grouped command");
@@ -1422,8 +1632,8 @@ static int execute_simple_command(struct shell_state *state, const char *source,
     bool saw_cmdsub;
     int last_cmdsub_status;
     bool pre_expand_redirs;
+    bool redirs_only_command;
     struct token_vec in_vec;
-    struct token_vec out_vec;
 
     lexed.items = NULL;
     lexed.len = 0;
@@ -1447,6 +1657,7 @@ static int execute_simple_command(struct shell_state *state, const char *source,
     saw_cmdsub = false;
     last_cmdsub_status = 0;
     pre_expand_redirs = false;
+    redirs_only_command = false;
     assignment_special = false;
 
     if (has_unsupported_syntax(source)) {
@@ -1462,6 +1673,7 @@ static int execute_simple_command(struct shell_state *state, const char *source,
         status = 2;
         goto done;
     }
+    redirs_only_command = raw_words.len == 0;
 
     assign_count = 0;
     while (assign_count < raw_words.len && is_assignment_word(raw_words.items[assign_count])) {
@@ -1487,46 +1699,21 @@ static int execute_simple_command(struct shell_state *state, const char *source,
     assignment_special =
         special_name && strcmp(cmd_expanded.items[0], "command") != 0;
 
-    for (i = 0; i < redirs.len; i++) {
-        char *one_word;
+    if (!redirs_only_command) {
+        bool redir_saw_cmdsub;
+        int redir_last_cmdsub_status;
 
-        if (redirs.items[i].kind != REDIR_OPEN_READ &&
-            redirs.items[i].kind != REDIR_OPEN_WRITE &&
-            redirs.items[i].kind != REDIR_OPEN_APPEND) {
-            continue;
-        }
-        if (redirs.items[i].path == NULL) {
-            continue;
-        }
-
-        one_word = redirs.items[i].path;
-        in_vec.items = &one_word;
-        in_vec.len = 1;
-        out_vec.items = NULL;
-        out_vec.len = 0;
-
-        if (expand_words(&in_vec, &out_vec, state, false) != 0) {
-            status = 2;
-            goto done;
-        }
-        if (state->cmdsub_performed) {
+        redir_saw_cmdsub = false;
+        redir_last_cmdsub_status = 0;
+        status = expand_redirection_operands(state, &redirs, &redir_saw_cmdsub,
+                                             &redir_last_cmdsub_status);
+        if (redir_saw_cmdsub) {
             saw_cmdsub = true;
-            last_cmdsub_status = state->last_cmdsub_status;
+            last_cmdsub_status = redir_last_cmdsub_status;
         }
-        if (out_vec.len != 1) {
-            size_t j;
-            for (j = 0; j < out_vec.len; j++) {
-                free(out_vec.items[j]);
-            }
-            free(out_vec.items);
-            posish_errorf("ambiguous redirection");
-            status = 1;
+        if (status != 0) {
             goto done;
         }
-
-        free(redirs.items[i].path);
-        redirs.items[i].path = out_vec.items[0];
-        free(out_vec.items);
     }
 
     if (assign_count > 0 && cmd_expanded.len > 0 && !assignment_special) {
@@ -1536,7 +1723,8 @@ static int execute_simple_command(struct shell_state *state, const char *source,
          */
         pre_expand_backups.items = NULL;
         pre_expand_backups.len = 0;
-        if (apply_redirections(&redirs, true, &pre_expand_backups) != 0) {
+        if (apply_redirections(&redirs, true, state->noclobber,
+                               &pre_expand_backups) != 0) {
             status = 1;
             goto done;
         }
@@ -1593,9 +1781,81 @@ static int execute_simple_command(struct shell_state *state, const char *source,
     lexer_free_tokens(&lexed);
 
     if (words.len == 0) {
+        if (redirs_only_command) {
+            pid_t pid;
+            int wstatus;
+
+            pid = fork();
+            if (pid < 0) {
+                perror("fork");
+                redir_vec_free(&redirs);
+                word_vec_free(&words);
+                lexer_free_tokens(&expanded);
+                return 1;
+            }
+            if (pid == 0) {
+                struct shell_state local_state;
+                bool redir_saw_cmdsub;
+                int redir_last_cmdsub_status;
+                int st;
+
+                local_state = *state;
+                local_state.should_exit = false;
+                local_state.exit_status = 0;
+                local_state.main_context = false;
+                redir_saw_cmdsub = false;
+                redir_last_cmdsub_status = 0;
+
+                st = expand_redirection_operands(&local_state, &redirs,
+                                                 &redir_saw_cmdsub,
+                                                 &redir_last_cmdsub_status);
+                if (st != 0) {
+                    _exit(st);
+                }
+                if (redir_saw_cmdsub) {
+                    local_state.cmdsub_performed = true;
+                    local_state.last_cmdsub_status = redir_last_cmdsub_status;
+                }
+                if (apply_redirections(&redirs, false, local_state.noclobber,
+                                       NULL) != 0) {
+                    _exit(1);
+                }
+                st = local_state.cmdsub_performed ? local_state.last_cmdsub_status
+                                                  : 0;
+                _exit(st);
+            }
+
+            for (;;) {
+                if (waitpid(pid, &wstatus, 0) < 0) {
+                    if (errno == EINTR) {
+                        shell_run_pending_traps(state);
+                        continue;
+                    }
+                    perror("waitpid");
+                    redir_vec_free(&redirs);
+                    word_vec_free(&words);
+                    lexer_free_tokens(&expanded);
+                    return 1;
+                }
+                break;
+            }
+
+            redir_vec_free(&redirs);
+            word_vec_free(&words);
+            lexer_free_tokens(&expanded);
+            if (WIFEXITED(wstatus)) {
+                return WEXITSTATUS(wstatus);
+            }
+            if (WIFSIGNALED(wstatus)) {
+                return 128 + WTERMSIG(wstatus);
+            }
+            return 1;
+        }
+
         fd_backups.items = NULL;
         fd_backups.len = 0;
-        if (apply_redirections(&redirs, true, &fd_backups) != 0) {
+        if (apply_redirections(&redirs, true, state->noclobber, &fd_backups) !=
+            0) {
             fd_backup_restore(&fd_backups);
             redir_vec_free(&redirs);
             word_vec_free(&words);
@@ -1626,7 +1886,8 @@ static int execute_simple_command(struct shell_state *state, const char *source,
 
         status = apply_persistent_assignments(state, words.items, assign_count);
         if (status == 0) {
-            if (apply_redirections(&redirs, true, &fd_backups) != 0) {
+            if (apply_redirections(&redirs, true, state->noclobber,
+                                   &fd_backups) != 0) {
                 status = 1;
             }
         }
@@ -1653,7 +1914,8 @@ static int execute_simple_command(struct shell_state *state, const char *source,
         fd_backups.len = 0;
         status = apply_persistent_assignments(state, words.items, assign_count);
         if (status == 0) {
-            if (apply_redirections(&redirs, true, &fd_backups) != 0) {
+            if (apply_redirections(&redirs, true, state->noclobber,
+                                   &fd_backups) != 0) {
                 status = 1;
             }
         }
@@ -1702,7 +1964,8 @@ static int execute_simple_command(struct shell_state *state, const char *source,
 
         run_in_shell = function_body != NULL || builtin_is_name(argv[0]);
         if (persist_builtin_redirs) {
-            if (apply_redirections(&redirs, false, NULL) != 0) {
+            if (apply_redirections(&redirs, false, state->noclobber, NULL) !=
+                0) {
                 status = 1;
                 goto done;
             }
@@ -1712,7 +1975,8 @@ static int execute_simple_command(struct shell_state *state, const char *source,
                 status = run_external_argv(state, argv, &redirs);
             }
         } else if (run_in_shell) {
-            if (apply_redirections(&redirs, true, &fd_backups) != 0) {
+            if (apply_redirections(&redirs, true, state->noclobber,
+                                   &fd_backups) != 0) {
                 status = 1;
                 fd_backup_restore(&fd_backups);
                 goto done;
@@ -1984,7 +2248,7 @@ static int run_subshell_group_command(struct shell_state *state,
 
     backups.items = NULL;
     backups.len = 0;
-    if (apply_redirections(&redirs, true, &backups) != 0) {
+    if (apply_redirections(&redirs, true, state->noclobber, &backups) != 0) {
         fd_backup_restore(&backups);
         redir_vec_free(&redirs);
         return 1;
@@ -2090,7 +2354,7 @@ static int run_brace_group_command(struct shell_state *state, const char *body,
 
     backups.items = NULL;
     backups.len = 0;
-    if (apply_redirections(&redirs, true, &backups) != 0) {
+    if (apply_redirections(&redirs, true, state->noclobber, &backups) != 0) {
         fd_backup_restore(&backups);
         redir_vec_free(&redirs);
         return 1;

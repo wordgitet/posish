@@ -1059,6 +1059,17 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
   cap = 0;
   quote = '\0';
 
+  /* Basic tilde expansion at the start of an unquoted word. */
+  if (!dquote_mode && in[0] == '~' && (in[1] == '\0' || in[1] == '/')) {
+    const char *home;
+
+    home = getenv("HOME");
+    if (home != NULL) {
+      append_str(&buf, &len, &cap, home);
+      i = 1;
+    }
+  }
+
   while (in[i] != '\0') {
     if (quote == '\'') {
       if (in[i] == '\'') {
