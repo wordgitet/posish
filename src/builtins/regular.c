@@ -5,9 +5,11 @@
 #include "builtins/builtin.h"
 #include "builtins/netbsd_test.h"
 
+#include "arena.h"
 #include "error.h"
 #include "jobs.h"
 #include "path.h"
+#include "vars.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -36,42 +38,363 @@ static int wait_status_to_shell_status(int status) {
     return 1;
 }
 
-static int builtin_cd(char *const argv[]) {
+static bool cd_operand_ignores_cdpath(const char *operand) {
+    if (operand == NULL || operand[0] == '\0') {
+        return true;
+    }
+    if (operand[0] == '/') {
+        return true;
+    }
+    if (operand[0] == '.' &&
+        (operand[1] == '\0' || operand[1] == '/' ||
+         (operand[1] == '.' && (operand[2] == '\0' || operand[2] == '/')))) {
+        return true;
+    }
+    return false;
+}
+
+static char *cd_join_path(const char *left, const char *right) {
+    size_t llen;
+    size_t rlen;
+    bool need_slash;
+    char *out;
+
+    llen = strlen(left);
+    rlen = strlen(right);
+    need_slash = llen > 0 && left[llen - 1] != '/';
+
+    out = malloc(llen + (need_slash ? 1 : 0) + rlen + 1);
+    if (out == NULL) {
+        perror("malloc");
+        return NULL;
+    }
+
+    memcpy(out, left, llen);
+    if (need_slash) {
+        out[llen++] = '/';
+    }
+    memcpy(out + llen, right, rlen + 1);
+    return out;
+}
+
+static char *cd_canonicalize_logical(const char *base, const char *path) {
+    char *joined;
+    size_t i;
+    size_t seg_count;
+    char **segments;
+    char *cursor;
+    char *out;
+    size_t out_len;
+
+    if (path[0] == '/') {
+        joined = arena_xstrdup(path);
+    } else {
+        joined = cd_join_path(base, path);
+    }
+    if (joined == NULL) {
+        return NULL;
+    }
+
+    seg_count = 0;
+    segments = NULL;
+    cursor = joined;
+    while (*cursor != '\0') {
+        char *start;
+        char *end;
+        size_t len;
+        char *segment;
+
+        while (*cursor == '/') {
+            cursor++;
+        }
+        if (*cursor == '\0') {
+            break;
+        }
+
+        start = cursor;
+        end = start;
+        while (*end != '\0' && *end != '/') {
+            end++;
+        }
+        len = (size_t)(end - start);
+
+        if (len == 1 && start[0] == '.') {
+            cursor = end;
+            continue;
+        }
+        if (len == 2 && start[0] == '.' && start[1] == '.') {
+            if (seg_count > 0) {
+                free(segments[seg_count - 1]);
+                seg_count--;
+            }
+            cursor = end;
+            continue;
+        }
+
+        segment = malloc(len + 1);
+        if (segment == NULL) {
+            perror("malloc");
+            for (i = 0; i < seg_count; i++) {
+                free(segments[i]);
+            }
+            free(segments);
+            free(joined);
+            return NULL;
+        }
+        memcpy(segment, start, len);
+        segment[len] = '\0';
+
+        segments = arena_xrealloc(segments, sizeof(*segments) * (seg_count + 1));
+        segments[seg_count++] = segment;
+        cursor = end;
+    }
+
+    out_len = 1;
+    for (i = 0; i < seg_count; i++) {
+        out_len += strlen(segments[i]) + 1;
+    }
+    out = arena_xmalloc(out_len + 1);
+    out[0] = '/';
+    out[1] = '\0';
+    out_len = 1;
+    for (i = 0; i < seg_count; i++) {
+        size_t len;
+
+        len = strlen(segments[i]);
+        memcpy(out + out_len, segments[i], len);
+        out_len += len;
+        if (i + 1 < seg_count) {
+            out[out_len++] = '/';
+        }
+        out[out_len] = '\0';
+    }
+
+    for (i = 0; i < seg_count; i++) {
+        free(segments[i]);
+    }
+    free(segments);
+    free(joined);
+    return out;
+}
+
+static int builtin_cd(struct shell_state *state, char *const argv[]) {
+    size_t i;
+    bool physical;
+    bool opt_e;
+    const char *operand;
     const char *target;
     char *old_pwd;
+    char *resolved_path;
+    bool print_path;
+    bool used_cdpath;
+    int failure_status;
     char *new_pwd;
+    char *logical_target;
 
-    if (argv[2] != NULL) {
+    i = 1;
+    physical = false;
+    opt_e = false;
+    while (argv[i] != NULL) {
+        size_t j;
+
+        if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
+        }
+        if (argv[i][0] != '-' || argv[i][1] == '\0' ||
+            (argv[i][1] == '-' && argv[i][2] == '\0')) {
+            break;
+        }
+
+        for (j = 1; argv[i][j] != '\0'; j++) {
+            if (argv[i][j] == 'L') {
+                physical = false;
+                continue;
+            }
+            if (argv[i][j] == 'P') {
+                physical = true;
+                continue;
+            }
+            if (argv[i][j] == 'e') {
+                opt_e = true;
+                continue;
+            }
+            posish_errorf("cd: invalid option: -%c", argv[i][j]);
+            return 2;
+        }
+        i++;
+    }
+
+    if (argv[i] != NULL && argv[i + 1] != NULL) {
         posish_errorf("cd: too many arguments");
         return 1;
     }
 
-    target = argv[1];
-    if (target == NULL) {
+    operand = argv[i];
+    print_path = false;
+    if (operand == NULL) {
         target = getenv("HOME");
-        if (target == NULL) {
+        if (target == NULL || target[0] == '\0') {
             posish_errorf("cd: HOME is not set");
             return 1;
         }
+    } else if (strcmp(operand, "-") == 0) {
+        target = getenv("OLDPWD");
+        if (target == NULL || target[0] == '\0') {
+            posish_errorf("cd: OLDPWD is not set");
+            return 1;
+        }
+        print_path = true;
+    } else {
+        target = operand;
     }
 
-    old_pwd = path_getcwd_alloc();
-    if (chdir(target) != 0) {
+    old_pwd = getenv("PWD") != NULL ? arena_xstrdup(getenv("PWD"))
+                                     : path_getcwd_alloc();
+    if (old_pwd == NULL) {
+        old_pwd = arena_xstrdup("/");
+    }
+
+    resolved_path = arena_xstrdup(target);
+    used_cdpath = false;
+    if (!cd_operand_ignores_cdpath(target)) {
+        const char *cdpath;
+
+        cdpath = getenv("CDPATH");
+        if (cdpath != NULL) {
+            const char *p;
+            bool found_path;
+
+            p = cdpath;
+            found_path = false;
+            while (!found_path) {
+                const char *end;
+                size_t len;
+                char *prefix;
+                char *candidate;
+                struct stat st;
+
+                end = strchr(p, ':');
+                if (end == NULL) {
+                    end = p + strlen(p);
+                }
+                len = (size_t)(end - p);
+                prefix = malloc(len + 1);
+                if (prefix == NULL) {
+                    perror("malloc");
+                    free(old_pwd);
+                    free(resolved_path);
+                    return 1;
+                }
+                memcpy(prefix, p, len);
+                prefix[len] = '\0';
+
+                if (len == 0) {
+                    candidate = arena_xstrdup(target);
+                } else {
+                    candidate = cd_join_path(prefix, target);
+                }
+                if (candidate == NULL) {
+                    free(prefix);
+                    free(old_pwd);
+                    free(resolved_path);
+                    return 1;
+                }
+
+                if (stat(candidate, &st) == 0 && S_ISDIR(st.st_mode)) {
+                    free(resolved_path);
+                    resolved_path = candidate;
+                    if (len > 0) {
+                        print_path = true;
+                    }
+                    used_cdpath = true;
+                    found_path = true;
+                } else {
+                    free(candidate);
+                }
+
+                free(prefix);
+                if (found_path || *end == '\0') {
+                    break;
+                }
+                p = end + 1;
+            }
+        }
+    }
+
+    failure_status = opt_e ? 2 : 1;
+    logical_target = NULL;
+    if (physical) {
+        if (chdir(used_cdpath ? resolved_path : target) != 0) {
+            perror("cd");
+            free(old_pwd);
+            free(resolved_path);
+            return failure_status;
+        }
+        new_pwd = path_getcwd_alloc();
+        if (new_pwd == NULL) {
+            posish_errorf("cd: failed to determine current directory");
+            free(old_pwd);
+            free(resolved_path);
+            return failure_status;
+        }
+    } else {
+        const char *raw_target;
+
+        raw_target = used_cdpath ? resolved_path : target;
+        logical_target = cd_canonicalize_logical(
+            old_pwd, raw_target);
+        if (logical_target == NULL) {
+            posish_errorf("cd: failed to build logical path");
+            free(old_pwd);
+            free(resolved_path);
+            return failure_status;
+        }
+        /*
+         * Validate component traversal on the raw operand first. This keeps
+         * `file/../dir` failures visible in -L mode before logical rewrite.
+         */
+        if (chdir(raw_target) != 0) {
+            perror("cd");
+            free(old_pwd);
+            free(resolved_path);
+            free(logical_target);
+            return failure_status;
+        }
+        if (strcmp(logical_target, raw_target) != 0 &&
+            chdir(logical_target) != 0) {
+            perror("cd");
+            free(old_pwd);
+            free(resolved_path);
+            free(logical_target);
+            return failure_status;
+        }
+        new_pwd = logical_target;
+        logical_target = NULL;
+    }
+
+    if (vars_set(state, "OLDPWD", old_pwd, true) != 0) {
         free(old_pwd);
-        perror("cd");
+        free(resolved_path);
+        free(logical_target);
+        free(new_pwd);
+        return 1;
+    }
+    if (vars_set(state, "PWD", new_pwd, true) != 0) {
+        free(old_pwd);
+        free(resolved_path);
+        free(logical_target);
+        free(new_pwd);
         return 1;
     }
 
-    if (old_pwd != NULL) {
-        (void)setenv("OLDPWD", old_pwd, 1);
-    }
-
-    new_pwd = path_getcwd_alloc();
-    if (new_pwd != NULL) {
-        (void)setenv("PWD", new_pwd, 1);
+    if (print_path) {
+        puts(new_pwd);
     }
 
     free(old_pwd);
+    free(resolved_path);
+    free(logical_target);
     free(new_pwd);
     return 0;
 }
@@ -1068,7 +1391,7 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
 
     if (strcmp(argv[0], "cd") == 0) {
         *handled = true;
-        return builtin_cd(argv);
+        return builtin_cd(state, argv);
     }
     if (strcmp(argv[0], "true") == 0) {
         *handled = true;
