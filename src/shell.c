@@ -23,6 +23,204 @@ struct heredoc_marker {
     bool strip_tabs;
 };
 
+static size_t skip_braced_param(const char *buf, size_t i, size_t len,
+                                bool dquote_context);
+
+static size_t skip_backtick_subst(const char *buf, size_t i, size_t len) {
+    i++;
+    while (i < len) {
+        if (buf[i] == '\\' && i + 1 < len) {
+            i += 2;
+            continue;
+        }
+        if (buf[i] == '`') {
+            return i + 1;
+        }
+        i++;
+    }
+    return len;
+}
+
+static size_t skip_dollar_single_quote(const char *buf, size_t i, size_t len) {
+    if (i + 1 >= len || buf[i] != '$' || buf[i + 1] != '\'') {
+        return i + 1;
+    }
+
+    i += 2;
+    while (i < len) {
+        if (buf[i] == '\\' && i + 1 < len) {
+            i += 2;
+            continue;
+        }
+        if (buf[i] == '\'') {
+            return i + 1;
+        }
+        i++;
+    }
+    return len + 1;
+}
+
+static size_t skip_balanced_parens(const char *buf, size_t i, size_t len) {
+    int depth;
+    char quote;
+
+    depth = 1;
+    quote = '\0';
+    while (i < len) {
+        char ch;
+
+        ch = buf[i];
+        if (quote == '\0') {
+            if (ch == '\\' && i + 1 < len) {
+                i += 2;
+                continue;
+            }
+            if (ch == '$' && i + 1 < len && buf[i + 1] == '(') {
+                i += 2;
+                if (i < len && buf[i] == '(') {
+                    i++;
+                }
+                i = skip_balanced_parens(buf, i, len);
+                continue;
+            }
+            if (ch == '$' && i + 1 < len && buf[i + 1] == '{') {
+                i += 2;
+                i = skip_braced_param(buf, i, len, false);
+                continue;
+            }
+            if (ch == '$' && i + 1 < len && buf[i + 1] == '\'') {
+                i = skip_dollar_single_quote(buf, i, len);
+                if (i > len) {
+                    return len;
+                }
+                continue;
+            }
+            if (ch == '`') {
+                i = skip_backtick_subst(buf, i, len);
+                continue;
+            }
+            if (ch == '\'' || ch == '"') {
+                quote = ch;
+                i++;
+                continue;
+            }
+            if (ch == '`') {
+                i = skip_backtick_subst(buf, i, len);
+                continue;
+            }
+            if (ch == '(') {
+                depth++;
+                i++;
+                continue;
+            }
+            if (ch == ')') {
+                depth--;
+                i++;
+                if (depth == 0) {
+                    return i;
+                }
+                continue;
+            }
+            i++;
+            continue;
+        }
+
+        if (quote == '\'' && ch == '\'') {
+            quote = '\0';
+            i++;
+            continue;
+        }
+        if (quote == '"' && ch == '\\' && i + 1 < len) {
+            i += 2;
+            continue;
+        }
+        if (quote == '"' && ch == '"') {
+            quote = '\0';
+        }
+        i++;
+    }
+    return len;
+}
+
+static size_t skip_braced_param(const char *buf, size_t i, size_t len,
+                                bool dquote_context) {
+    int depth;
+    char quote;
+
+    depth = 1;
+    quote = '\0';
+    while (i < len) {
+        char ch;
+
+        ch = buf[i];
+        if (quote == '\0') {
+            if (ch == '\\' && i + 1 < len) {
+                i += 2;
+                continue;
+            }
+            if (ch == '$' && i + 1 < len && buf[i + 1] == '(') {
+                i += 2;
+                if (i < len && buf[i] == '(') {
+                    i++;
+                }
+                i = skip_balanced_parens(buf, i, len);
+                continue;
+            }
+            if (ch == '$' && i + 1 < len && buf[i + 1] == '{') {
+                i += 2;
+                i = skip_braced_param(buf, i, len, dquote_context);
+                continue;
+            }
+            if (ch == '$' && i + 1 < len && buf[i + 1] == '\'') {
+                i = skip_dollar_single_quote(buf, i, len);
+                if (i > len) {
+                    return len;
+                }
+                continue;
+            }
+            if (ch == '`') {
+                i = skip_backtick_subst(buf, i, len);
+                continue;
+            }
+            if (ch == '"' || (!dquote_context && ch == '\'')) {
+                quote = ch;
+                i++;
+                continue;
+            }
+            if (ch == '{') {
+                depth++;
+                i++;
+                continue;
+            }
+            if (ch == '}') {
+                depth--;
+                i++;
+                if (depth == 0) {
+                    return i;
+                }
+                continue;
+            }
+            i++;
+            continue;
+        }
+
+        if (quote == '\'' && ch == '\'') {
+            quote = '\0';
+            i++;
+            continue;
+        }
+        if (quote == '"' && ch == '\\' && i + 1 < len) {
+            i += 2;
+            continue;
+        }
+        if (quote == '"' && ch == '"') {
+            quote = '\0';
+        }
+        i++;
+    }
+    return len;
+}
+
 static void free_heredoc_markers(struct heredoc_marker *markers, size_t count) {
     size_t i;
 
@@ -49,6 +247,10 @@ static char *unquote_heredoc_delimiter(const char *raw, size_t len) {
 
         ch = raw[i];
         if (ch == '\\' && i + 1 < len) {
+            if (raw[i + 1] == '\n') {
+                i += 2;
+                continue;
+            }
             out[out_len++] = raw[i + 1];
             i += 2;
             continue;
@@ -80,6 +282,14 @@ static char *unquote_heredoc_delimiter(const char *raw, size_t len) {
     return out;
 }
 
+static size_t skip_line_continuations_limited(const char *buf, size_t pos,
+                                              size_t len) {
+    while (pos + 1 < len && buf[pos] == '\\' && buf[pos + 1] == '\n') {
+        pos += 2;
+    }
+    return pos;
+}
+
 static bool collect_heredoc_markers(const char *buf, size_t len,
                                     struct heredoc_marker **markers_out,
                                     size_t *count_out) {
@@ -102,31 +312,77 @@ static bool collect_heredoc_markers(const char *buf, size_t len,
                 i += 2;
                 continue;
             }
+            if (ch == '$' && i + 1 < len && buf[i + 1] == '(') {
+                i += 2;
+                if (i < len && buf[i] == '(') {
+                    i++;
+                }
+                i = skip_balanced_parens(buf, i, len);
+                continue;
+            }
+            if (ch == '$' && i + 1 < len && buf[i + 1] == '{') {
+                i += 2;
+                i = skip_braced_param(buf, i, len, false);
+                continue;
+            }
+            if (ch == '$' && i + 1 < len && buf[i + 1] == '\'') {
+                i = skip_dollar_single_quote(buf, i, len);
+                if (i > len) {
+                    free_heredoc_markers(markers, count);
+                    return false;
+                }
+                continue;
+            }
+            if (ch == '`') {
+                i = skip_backtick_subst(buf, i, len);
+                continue;
+            }
             if (ch == '\'' || ch == '"') {
                 quote = ch;
                 i++;
                 continue;
             }
-            if (ch == '<' && i + 1 < len && buf[i + 1] == '<') {
+            if (ch == '<') {
+                size_t op_pos;
                 bool strip_tabs;
                 size_t start;
                 size_t end;
                 char *delim;
                 struct heredoc_marker *grown;
 
-                i += 2;
+                op_pos = skip_line_continuations_limited(buf, i + 1, len);
+                if (op_pos >= len || buf[op_pos] != '<') {
+                    i++;
+                    continue;
+                }
+
+                i = op_pos + 1;
+                i = skip_line_continuations_limited(buf, i, len);
                 strip_tabs = false;
                 if (i < len && buf[i] == '-') {
                     strip_tabs = true;
                     i++;
                 }
-                while (i < len && (buf[i] == ' ' || buf[i] == '\t')) {
-                    i++;
+                while (i < len) {
+                    i = skip_line_continuations_limited(buf, i, len);
+                    if (i < len && (buf[i] == ' ' || buf[i] == '\t')) {
+                        i++;
+                        continue;
+                    }
+                    break;
                 }
+
                 start = i;
-                while (i < len && !isspace((unsigned char)buf[i]) &&
-                       buf[i] != ';' && buf[i] != '&' && buf[i] != '|' &&
-                       buf[i] != '<' && buf[i] != '>') {
+                while (i < len) {
+                    i = skip_line_continuations_limited(buf, i, len);
+                    if (i >= len) {
+                        break;
+                    }
+                    if (isspace((unsigned char)buf[i]) || buf[i] == ';' ||
+                        buf[i] == '&' || buf[i] == '|' || buf[i] == '<' ||
+                        buf[i] == '>') {
+                        break;
+                    }
                     if (buf[i] == '\\' && i + 1 < len) {
                         i += 2;
                         continue;
@@ -266,6 +522,208 @@ static bool heredoc_needs_more_input(const char *buf, size_t len) {
     return false;
 }
 
+static bool keyword_boundary(char ch) {
+    return ch == '\0' || isspace((unsigned char)ch) || ch == ';' ||
+           ch == '&' || ch == '|' || ch == '(' || ch == ')' || ch == '{' ||
+           ch == '}';
+}
+
+static bool hash_starts_comment(const char *source, size_t pos) {
+    long i;
+
+    if (source[pos] != '#') {
+        return false;
+    }
+
+    i = (long)pos - 1;
+    while (i >= 0 && (source[i] == ' ' || source[i] == '\t')) {
+        i--;
+    }
+    if (i < 0) {
+        return true;
+    }
+    return source[i] == '\n' || source[i] == ';' || source[i] == '&' ||
+           source[i] == '|' || source[i] == '(' || source[i] == ')' ||
+           source[i] == '{' || source[i] == '}';
+}
+
+static bool looks_like_function_header_only_input(const char *buf, size_t len) {
+    size_t i;
+    size_t out_len;
+    char *collapsed;
+    int quote;
+    bool result;
+
+    collapsed = malloc(len + 1);
+    if (collapsed == NULL) {
+        return false;
+    }
+
+    i = 0;
+    out_len = 0;
+    quote = 0;
+    while (i < len) {
+        char ch;
+
+        ch = buf[i];
+        if (quote == 0) {
+            if (ch == '\\' && i + 1 < len && buf[i + 1] == '\n') {
+                i += 2;
+                continue;
+            }
+            if (ch == '\\' && i + 1 < len) {
+                collapsed[out_len++] = ch;
+                collapsed[out_len++] = buf[i + 1];
+                i += 2;
+                continue;
+            }
+            if (ch == '#') {
+                if (hash_starts_comment(buf, i)) {
+                    while (i < len && buf[i] != '\n') {
+                        i++;
+                    }
+                    continue;
+                }
+            }
+            if (ch == '\'' || ch == '"') {
+                quote = ch;
+            }
+            collapsed[out_len++] = ch;
+            i++;
+            continue;
+        }
+
+        if (quote == '\'' && ch == '\'') {
+            quote = 0;
+            collapsed[out_len++] = ch;
+            i++;
+            continue;
+        }
+        if (quote == '"' && ch == '\\' && i + 1 < len) {
+            collapsed[out_len++] = ch;
+            collapsed[out_len++] = buf[i + 1];
+            i += 2;
+            continue;
+        }
+        if (quote == '"' && ch == '"') {
+            quote = 0;
+        }
+        collapsed[out_len++] = ch;
+        i++;
+    }
+    collapsed[out_len] = '\0';
+
+    i = 0;
+    while (collapsed[i] != '\0' && isspace((unsigned char)collapsed[i])) {
+        i++;
+    }
+    if (!(isalpha((unsigned char)collapsed[i]) || collapsed[i] == '_')) {
+        free(collapsed);
+        return false;
+    }
+    i++;
+    while (isalnum((unsigned char)collapsed[i]) || collapsed[i] == '_') {
+        i++;
+    }
+    while (isspace((unsigned char)collapsed[i])) {
+        i++;
+    }
+    if (collapsed[i] != '(') {
+        free(collapsed);
+        return false;
+    }
+    i++;
+    while (isspace((unsigned char)collapsed[i])) {
+        i++;
+    }
+    if (collapsed[i] != ')') {
+        free(collapsed);
+        return false;
+    }
+    i++;
+    while (isspace((unsigned char)collapsed[i])) {
+        i++;
+    }
+    result = collapsed[i] == '\0';
+    free(collapsed);
+    return result;
+}
+
+static bool word_starts_command_position(const char *source, size_t pos) {
+    size_t i;
+
+    if (pos == 0) {
+        return true;
+    }
+
+    i = pos;
+    while (i > 0) {
+        char ch;
+
+        ch = source[i - 1];
+        if (ch == ' ' || ch == '\t') {
+            i--;
+            continue;
+        }
+        if (ch == '\n' || ch == ';' || ch == '&' || ch == '|' || ch == '(' ||
+            ch == ')' || ch == '{' || ch == '}') {
+            return true;
+        }
+        break;
+    }
+
+    if (i == 0) {
+        return true;
+    }
+
+    if (isalnum((unsigned char)source[i - 1]) || source[i - 1] == '_') {
+        size_t start;
+        size_t len;
+
+        start = i - 1;
+        while (start > 0 &&
+               (isalnum((unsigned char)source[start - 1]) ||
+                source[start - 1] == '_')) {
+            start--;
+        }
+        len = i - start;
+        if ((len == 4 && strncmp(source + start, "then", 4) == 0) ||
+            (len == 2 && strncmp(source + start, "do", 2) == 0) ||
+            (len == 4 && strncmp(source + start, "else", 4) == 0) ||
+            (len == 4 && strncmp(source + start, "elif", 4) == 0) ||
+            (len == 2 && strncmp(source + start, "if", 2) == 0) ||
+            (len == 2 && strncmp(source + start, "fi", 2) == 0)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool keyword_preceded_by_list_separator(const char *source, size_t pos) {
+    size_t i;
+    char ch;
+
+    i = pos;
+    while (i > 0 && (source[i - 1] == ' ' || source[i - 1] == '\t')) {
+        i--;
+    }
+    if (i == 0) {
+        return true;
+    }
+
+    ch = source[i - 1];
+    return ch == '\n' || ch == ';' || ch == '&' || ch == '|' || ch == '(' ||
+           ch == ')' || ch == '{' || ch == '}';
+}
+
+static size_t skip_continuations_forward(const char *source, size_t pos) {
+    while (source[pos] == '\\' && source[pos + 1] == '\n') {
+        pos += 2;
+    }
+    return pos;
+}
+
 static int needs_more_input(char *buf, size_t *len) {
     size_t i;
     int quote;
@@ -273,8 +731,8 @@ static int needs_more_input(char *buf, size_t *len) {
     int brace_depth;
     int param_depth;
     int if_depth;
-    int do_depth;
     int case_depth;
+    int loop_depth;
     bool command_position;
 
     quote = 0;
@@ -282,8 +740,8 @@ static int needs_more_input(char *buf, size_t *len) {
     brace_depth = 0;
     param_depth = 0;
     if_depth = 0;
-    do_depth = 0;
     case_depth = 0;
+    loop_depth = 0;
     command_position = true;
     i = 0;
     while (i < *len) {
@@ -302,13 +760,19 @@ static int needs_more_input(char *buf, size_t *len) {
                 continue;
             }
             if (ch == '\\' && i + 1 < *len && buf[i + 1] == '\n') {
-                memmove(&buf[i], &buf[i + 2], *len - (i + 1));
-                *len -= 2;
-                buf[*len] = '\0';
-                return 1;
+                i += 2;
+                continue;
             }
             if (ch == '\\' && i + 1 < *len) {
                 i += 2;
+                continue;
+            }
+            if (ch == '$' && i + 1 < *len && buf[i + 1] == '\'') {
+                i = skip_dollar_single_quote(buf, i, *len);
+                if (i > *len) {
+                    return 1;
+                }
+                command_position = false;
                 continue;
             }
             if (ch == '$' && i + 1 < *len && buf[i + 1] == '{') {
@@ -321,6 +785,17 @@ static int needs_more_input(char *buf, size_t *len) {
                 param_depth--;
                 command_position = false;
                 i++;
+                continue;
+            }
+            if (ch == '`') {
+                i = skip_backtick_subst(buf, i, *len);
+                command_position = false;
+                continue;
+            }
+            if (ch == '#' && hash_starts_comment(buf, i)) {
+                while (i < *len && buf[i] != '\n') {
+                    i++;
+                }
                 continue;
             }
             if (isspace((unsigned char)ch)) {
@@ -392,63 +867,62 @@ static int needs_more_input(char *buf, size_t *len) {
             }
             if (isalpha((unsigned char)ch) || ch == '_') {
                 size_t start;
-                size_t end;
-                size_t wlen;
+                size_t j;
+                size_t boundary;
+                char keyword[16];
+                size_t kwlen;
 
                 start = i;
-                end = i + 1;
-                while (end < *len &&
-                       (isalnum((unsigned char)buf[end]) || buf[end] == '_')) {
-                    end++;
-                }
-                wlen = end - start;
-
-                if (command_position) {
-                    if (wlen == 2 && strncmp(buf + start, "if", 2) == 0) {
-                        if_depth++;
-                        command_position = true;
-                    } else if (wlen == 2 && strncmp(buf + start, "fi", 2) == 0) {
-                        if (if_depth > 0) {
-                            if_depth--;
-                        }
-                        command_position = false;
-                    } else if (wlen == 2 &&
-                               strncmp(buf + start, "do", 2) == 0) {
-                        do_depth++;
-                        command_position = true;
-                    } else if (wlen == 4 &&
-                               strncmp(buf + start, "done", 4) == 0) {
-                        if (do_depth > 0) {
-                            do_depth--;
-                        }
-                        command_position = false;
-                    } else if (wlen == 4 &&
-                               strncmp(buf + start, "case", 4) == 0) {
-                        case_depth++;
-                        command_position = true;
-                    } else if (wlen == 4 &&
-                               strncmp(buf + start, "esac", 4) == 0) {
-                        if (case_depth > 0) {
-                            case_depth--;
-                        }
-                        command_position = false;
-                    } else if ((wlen == 4 &&
-                                strncmp(buf + start, "then", 4) == 0) ||
-                               (wlen == 4 &&
-                                strncmp(buf + start, "else", 4) == 0) ||
-                               (wlen == 4 &&
-                                strncmp(buf + start, "elif", 4) == 0) ||
-                               (wlen == 2 &&
-                                strncmp(buf + start, "in", 2) == 0)) {
-                        command_position = true;
-                    } else {
-                        command_position = false;
+                j = i;
+                kwlen = 0;
+                while (j < *len) {
+                    if (buf[j] == '\\' && j + 1 < *len && buf[j + 1] == '\n') {
+                        j += 2;
+                        continue;
                     }
-                } else {
-                    command_position = false;
+                    if (!isalnum((unsigned char)buf[j]) && buf[j] != '_') {
+                        break;
+                    }
+                    if (kwlen + 1 < sizeof(keyword)) {
+                        keyword[kwlen] = buf[j];
+                    }
+                    kwlen++;
+                    j++;
+                }
+                boundary = skip_continuations_forward(buf, j);
+                if (word_starts_command_position(buf, start) &&
+                    keyword_boundary(buf[boundary])) {
+                    if (kwlen == 2 && strncmp(keyword, "if", 2) == 0) {
+                        if_depth++;
+                    } else if (kwlen == 2 && strncmp(keyword, "fi", 2) == 0 &&
+                               if_depth > 0) {
+                        if_depth--;
+                    } else if (kwlen == 4 &&
+                               strncmp(keyword, "case", 4) == 0) {
+                        case_depth++;
+                    } else if (kwlen == 4 &&
+                               strncmp(keyword, "esac", 4) == 0 &&
+                               case_depth > 0) {
+                        case_depth--;
+                    } else if (case_depth == 0) {
+                        if ((kwlen == 5 &&
+                             strncmp(keyword, "while", 5) == 0) ||
+                            (kwlen == 5 &&
+                             strncmp(keyword, "until", 5) == 0) ||
+                            (kwlen == 3 &&
+                             strncmp(keyword, "for", 3) == 0)) {
+                            loop_depth++;
+                        } else if (kwlen == 4 &&
+                                   strncmp(keyword, "done", 4) == 0 &&
+                                   loop_depth > 0 &&
+                                   keyword_preceded_by_list_separator(buf, start)) {
+                            loop_depth--;
+                        }
+                    }
                 }
 
-                i = end;
+                command_position = false;
+                i = j;
                 continue;
             }
             command_position = false;
@@ -459,6 +933,23 @@ static int needs_more_input(char *buf, size_t *len) {
         if (quote == '\'' && ch == '\'') {
             quote = 0;
             i++;
+            continue;
+        }
+        if (quote == '"' && ch == '$' && i + 1 < *len && buf[i + 1] == '(') {
+            i += 2;
+            if (i < *len && buf[i] == '(') {
+                i++;
+            }
+            i = skip_balanced_parens(buf, i, *len);
+            continue;
+        }
+        if (quote == '"' && ch == '$' && i + 1 < *len && buf[i + 1] == '{') {
+            i += 2;
+            i = skip_braced_param(buf, i, *len, true);
+            continue;
+        }
+        if (quote == '"' && ch == '`') {
+            i = skip_backtick_subst(buf, i, *len);
             continue;
         }
         if (quote == '"' && ch == '\\' && i + 1 < *len) {
@@ -482,7 +973,13 @@ static int needs_more_input(char *buf, size_t *len) {
     if (param_depth > 0) {
         return 1;
     }
-    if (if_depth > 0 || do_depth > 0 || case_depth > 0) {
+    if (if_depth > 0 || case_depth > 0 || loop_depth > 0) {
+        return 1;
+    }
+    if (looks_like_function_header_only_input(buf, *len)) {
+        return 1;
+    }
+    if (*len >= 2 && buf[*len - 2] == '\\' && buf[*len - 1] == '\n') {
         return 1;
     }
     {
@@ -887,6 +1384,9 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
                 command[0] = '\0';
             }
             ran_command = true;
+            if (state->return_requested && state->dot_depth > 0) {
+                break;
+            }
             if (state->should_exit) {
                 break;
             }
@@ -963,6 +1463,9 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
             command[0] = '\0';
         }
         secondary_prompt = false;
+        if (state->return_requested && state->dot_depth > 0) {
+            break;
+        }
         line_no++;
     }
 
