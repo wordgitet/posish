@@ -6,15 +6,15 @@ non-green POSIX test buckets.
 ## Snapshot (2026-03-01)
 
 - Fulltruth baseline (`tests/posix/summary-fulltruth.csv`):
-  - `FULL_PASS 88`
-  - `PARTIAL_FAIL 34`
+  - `FULL_PASS 95`
+  - `PARTIAL_FAIL 27`
   - `FULL_FAIL 0`
   - `TIMEOUT 0`
   - `MISSING 0`
-  - `OK 10504`
-  - `ERROR 566`
+  - `OK 10719`
+  - `ERROR 351`
   - `SKIPPED 14`
-  - `RATIO_OK_OVER_OK_PLUS_ERROR 0.9489`
+  - `RATIO_OK_OVER_OK_PLUS_ERROR 0.9683`
 
 ## Accepted Scope Cuts
 
@@ -31,16 +31,18 @@ non-green POSIX test buckets.
 Top active non-green buckets by error count:
 
 - `alias-p.tst` (58)
-- `option-p.tst` (53)
-- `param-p.tst` (45)
-- `error-p.tst` (37)
-- `quote-p.tst` (32)
-- `read-p.tst` (31)
-- `if-p.tst` (31)
-- `set-p.tst` (25)
+- `error-p.tst` (34)
+- `cd-p.tst` (31)
+- `read-p.tst` (29)
 - `getopts-p.tst` (26)
-- `redir-p.tst` (21)
-- `ppid-p.tst` (1)
+- `tilde-p.tst` (21)
+- `param-p.tst` (19)
+- `case-p.tst` (13)
+- `fsplit-p.tst` (13)
+- `trap-p.tst` (13)
+- `for-p.tst` (12)
+- `builtins-p.tst` (10)
+- `cmdsub-p.tst` (10)
 
 The complete non-green file list is sourced from
 `tests/posix/summary-fulltruth.csv`.
@@ -50,10 +52,11 @@ The complete non-green file list is sourced from
 Use truth mode (`TESTCASE_TIMEOUT=0`) for semantic reruns.
 
 ```sh
-make -B -C tests/posix option-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
-make -B -C tests/posix set-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
-make -B -C tests/posix shift-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
-make -B -C tests/posix redir-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
+make -B -C tests/posix alias-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
+make -B -C tests/posix error-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
+make -B -C tests/posix cd-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
+make -B -C tests/posix read-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
+make -B -C tests/posix getopts-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
+make -B -C tests/posix tilde-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
 make -B -C tests/posix param-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
-make -B -C tests/posix ppid-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
 ```

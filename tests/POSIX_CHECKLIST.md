@@ -44,7 +44,7 @@ Legend:
 - [x] kill2-p.tst
 - [x] kill3-p.tst
 - [x] kill4-p.tst
-- [ ] lineno-p.tst
+- [x] lineno-p.tst
 - [x] nop-p.tst
 - [x] option-p.tst
 - [ ] param-p.tst
@@ -54,7 +54,7 @@ Legend:
 - [ ] quote-p.tst
 - [ ] read-p.tst
 - [x] readonly-p.tst
-- [ ] redir-p.tst
+- [x] redir-p.tst
 - [x] return-p.tst
 - [x] set-p.tst
 - [x] shift-p.tst

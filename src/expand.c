@@ -1441,6 +1441,314 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
   return 0;
 }
 
+int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
+  size_t i;
+  char *buf;
+  size_t len;
+  size_t cap;
+
+  i = 0;
+  buf = NULL;
+  len = 0;
+  cap = 0;
+
+  while (in[i] != '\0') {
+    if (in[i] == '\\') {
+      if (in[i + 1] == '\n') {
+        i += 2;
+        continue;
+      }
+      if (in[i + 1] == '$' || in[i + 1] == '`' || in[i + 1] == '\\') {
+        append_char(&buf, &len, &cap, in[i + 1]);
+        i += 2;
+        continue;
+      }
+      append_char(&buf, &len, &cap, '\\');
+      i++;
+      continue;
+    }
+
+    if (in[i] == '$') {
+      if (in[i + 1] == '{') {
+        size_t j;
+        int depth;
+        char inner_quote;
+
+        j = i + 2;
+        depth = 1;
+        inner_quote = '\0';
+        while (in[j] != '\0' && depth > 0) {
+          char ch;
+
+          ch = in[j];
+          if (inner_quote == '\0') {
+            if (ch == '\\' && in[j + 1] != '\0') {
+              j += 2;
+              continue;
+            }
+            if (ch == '"' || ch == '\'') {
+              inner_quote = ch;
+              j++;
+              continue;
+            }
+            if (ch == '{') {
+              depth++;
+            } else if (ch == '}') {
+              depth--;
+              if (depth == 0) {
+                break;
+              }
+            }
+            j++;
+            continue;
+          }
+
+          if (inner_quote == '\'' && ch == '\'') {
+            inner_quote = '\0';
+            j++;
+            continue;
+          }
+          if (inner_quote == '"') {
+            if (ch == '\\' && in[j + 1] != '\0') {
+              j += 2;
+              continue;
+            }
+            if (ch == '"') {
+              inner_quote = '\0';
+            }
+          }
+          j++;
+        }
+        if (depth != 0 || in[j] != '}') {
+          posish_errorf("unterminated parameter expansion");
+          free(buf);
+          return -1;
+        }
+
+        if (j > i + 2) {
+          if (append_braced_parameter(in + i + 2, j - (i + 2), state, &buf,
+                                      &len, &cap, true) != 0) {
+            free(buf);
+            return -1;
+          }
+        }
+        i = j + 1;
+        continue;
+      }
+
+      if (in[i + 1] == '(') {
+        if (in[i + 2] == '(') {
+          size_t j;
+          int depth;
+          char *expr;
+          char *value;
+          int cmd_status;
+
+          j = i + 3;
+          depth = 0;
+          while (in[j] != '\0') {
+            if (in[j] == '\\' && in[j + 1] != '\0') {
+              j += 2;
+              continue;
+            }
+            if (in[j] == '(') {
+              depth++;
+              j++;
+              continue;
+            }
+            if (in[j] == ')') {
+              if (depth > 0) {
+                depth--;
+                j++;
+                continue;
+              }
+              if (in[j + 1] == ')') {
+                break;
+              }
+            }
+            j++;
+          }
+          if (in[j] == '\0' || in[j + 1] != ')') {
+            posish_errorf("unterminated arithmetic expansion");
+            free(buf);
+            return -1;
+          }
+
+          expr = arena_xmalloc((j - (i + 3)) + 1);
+          memcpy(expr, in + i + 3, j - (i + 3));
+          expr[j - (i + 3)] = '\0';
+
+          if (run_arithmetic_expansion(expr, &value, &cmd_status, state) != 0) {
+            free(expr);
+            free(buf);
+            return -1;
+          }
+          append_str(&buf, &len, &cap, value);
+          state->last_cmdsub_status = cmd_status;
+          state->cmdsub_performed = true;
+          free(value);
+          free(expr);
+          i = j + 2;
+          continue;
+        }
+
+        size_t j;
+        int depth;
+        char quote;
+        char *cmd;
+        char *value;
+        int cmd_status;
+
+        j = i + 2;
+        depth = 1;
+        quote = '\0';
+        while (in[j] != '\0' && depth > 0) {
+          char ch;
+
+          ch = in[j];
+          if (quote == '\0') {
+            if (ch == '\\' && in[j + 1] != '\0') {
+              j += 2;
+              continue;
+            }
+            if (ch == '\'' || ch == '"') {
+              quote = ch;
+              j++;
+              continue;
+            }
+            if (ch == '(') {
+              depth++;
+            } else if (ch == ')') {
+              depth--;
+              if (depth == 0) {
+                break;
+              }
+            }
+          } else if (quote == '\'' && ch == '\'') {
+            quote = '\0';
+          } else if (quote == '"') {
+            if (ch == '\\' && in[j + 1] != '\0') {
+              j += 2;
+              continue;
+            }
+            if (ch == '"') {
+              quote = '\0';
+            }
+          }
+          j++;
+        }
+
+        if (in[j] != ')' || depth != 0) {
+          posish_errorf("unterminated command substitution");
+          free(buf);
+          return -1;
+        }
+
+        cmd = arena_xmalloc((j - (i + 2)) + 1);
+        memcpy(cmd, in + i + 2, j - (i + 2));
+        cmd[j - (i + 2)] = '\0';
+
+        if (run_command_substitution(state, cmd, &value, &cmd_status) != 0) {
+          free(cmd);
+          free(buf);
+          return -1;
+        }
+
+        append_str(&buf, &len, &cap, value);
+        state->last_cmdsub_status = cmd_status;
+        state->cmdsub_performed = true;
+        free(value);
+        free(cmd);
+        i = j + 1;
+        continue;
+      }
+
+      if (in[i + 1] == '`') {
+        append_char(&buf, &len, &cap, '$');
+        i++;
+        continue;
+      }
+
+      if (is_short_parameter_char(in[i + 1])) {
+        if (append_parameter(in + i + 1, 1, state, &buf, &len, &cap) != 0) {
+          free(buf);
+          return -1;
+        }
+        i += 2;
+        continue;
+      }
+
+      if (isalpha((unsigned char)in[i + 1]) || in[i + 1] == '_') {
+        size_t j;
+
+        j = i + 1;
+        while (isalnum((unsigned char)in[j]) || in[j] == '_') {
+          j++;
+        }
+        if (append_parameter(in + i + 1, j - (i + 1), state, &buf, &len, &cap) !=
+            0) {
+          free(buf);
+          return -1;
+        }
+        i = j;
+        continue;
+      }
+    }
+
+    if (in[i] == '`') {
+      size_t j;
+      char *cmd;
+      char *value;
+      int cmd_status;
+
+      j = i + 1;
+      while (in[j] != '\0') {
+        if (in[j] == '\\' && in[j + 1] != '\0') {
+          j += 2;
+          continue;
+        }
+        if (in[j] == '`') {
+          break;
+        }
+        j++;
+      }
+
+      if (in[j] != '`') {
+        posish_errorf("unterminated backtick command substitution");
+        free(buf);
+        return -1;
+      }
+
+      cmd = arena_xmalloc((j - (i + 1)) + 1);
+      memcpy(cmd, in + i + 1, j - (i + 1));
+      cmd[j - (i + 1)] = '\0';
+
+      if (run_command_substitution(state, cmd, &value, &cmd_status) != 0) {
+        free(cmd);
+        free(buf);
+        return -1;
+      }
+
+      append_str(&buf, &len, &cap, value);
+      state->last_cmdsub_status = cmd_status;
+      state->cmdsub_performed = true;
+      free(value);
+      free(cmd);
+      i = j + 1;
+      continue;
+    }
+
+    append_char(&buf, &len, &cap, in[i]);
+    i++;
+  }
+
+  if (buf == NULL) {
+    buf = arena_xstrdup("");
+  }
+  *out = buf;
+  return 0;
+}
+
 int expand_words(const struct token_vec *in, struct token_vec *out,
                  struct shell_state *state, bool split_fields) {
   size_t i;

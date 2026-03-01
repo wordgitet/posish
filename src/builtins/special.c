@@ -1162,9 +1162,31 @@ static int builtin_read(struct shell_state *state, char *const argv[]) {
     size_t cap;
     ssize_t nread;
     int status;
+    size_t i;
 
     line = NULL;
     cap = 0;
+    i = 1;
+    while (argv[i] != NULL) {
+        size_t j;
+
+        if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
+        }
+        if (argv[i][0] != '-' || argv[i][1] == '\0') {
+            break;
+        }
+
+        for (j = 1; argv[i][j] != '\0'; j++) {
+            if (argv[i][j] != 'r') {
+                posish_errorf("read: invalid option: -%c", argv[i][j]);
+                return 2;
+            }
+        }
+        i++;
+    }
+
     clearerr(stdin);
     nread = getline(&line, &cap, stdin);
     if (nread < 0) {
@@ -1175,12 +1197,12 @@ static int builtin_read(struct shell_state *state, char *const argv[]) {
         line[nread - 1] = '\0';
     }
 
-    if (argv[1] == NULL) {
+    if (argv[i] == NULL) {
         free(line);
         return 0;
     }
 
-    status = vars_set(state, argv[1], line, true);
+    status = vars_set(state, argv[i], line, true);
     free(line);
     return status;
 }
@@ -1629,8 +1651,8 @@ int builtin_try_special(struct shell_state *state, char *const argv[], bool *han
 bool builtin_is_special_name(const char *name) {
     static const char *const names[] = {".",     ":",      "break", "continue",
                                         "eval",  "exec",   "exit",  "export",
-                                        "readonly", "return", "set",   "shift",
-                                        "command",
+                                        "readonly", "read",   "return", "set",
+                                        "shift", "command",
                                         "times", "trap",   "unset"};
     size_t i;
 

@@ -335,10 +335,6 @@ static char *strip_comments(const char *src) {
 
         if (quote == '\0') {
             if (ch == '\\' && src[i + 1] != '\0') {
-                if (src[i + 1] == '\n') {
-                    i += 2;
-                    continue;
-                }
                 out[j++] = src[i++];
                 out[j++] = src[i++];
                 prev = out[j - 1];
@@ -366,10 +362,6 @@ static char *strip_comments(const char *src) {
             quote = '\0';
         } else if (quote == '"') {
             if (ch == '\\' && src[i + 1] != '\0') {
-                if (src[i + 1] == '\n') {
-                    i += 2;
-                    continue;
-                }
                 out[j++] = src[i++];
                 out[j++] = src[i++];
                 prev = out[j - 1];
@@ -600,6 +592,46 @@ static bool newline_continues_command(const char *source, size_t pos) {
     if (source[i - 1] == '&' && i >= 2 && source[i - 2] == '&') {
         return true;
     }
+    return false;
+}
+
+static bool command_requires_program_runner(const char *source) {
+    size_t i;
+    char quote;
+
+    quote = '\0';
+    for (i = 0; source[i] != '\0'; i++) {
+        char ch;
+
+        ch = source[i];
+        if (quote == '\0') {
+            if (ch == '\\' && source[i + 1] != '\0') {
+                i++;
+                continue;
+            }
+            if (ch == '\'' || ch == '"') {
+                quote = ch;
+                continue;
+            }
+            if (ch == ';' || ch == '\n') {
+                return true;
+            }
+            continue;
+        }
+
+        if (quote == '\'' && ch == '\'') {
+            quote = '\0';
+        } else if (quote == '"') {
+            if (ch == '\\' && source[i + 1] != '\0') {
+                i++;
+                continue;
+            }
+            if (ch == '"') {
+                quote = '\0';
+            }
+        }
+    }
+
     return false;
 }
 
@@ -2436,7 +2468,13 @@ static int execute_command_atom(struct shell_state *state, const char *source,
     }
 
     if (parse_simple_if(trimmed, &if_cond, &if_then, &if_else)) {
+        bool saved_errexit;
+
+        /* POSIX: -e does not trigger on commands used as if-conditions. */
+        saved_errexit = state->errexit;
+        state->errexit = false;
         status = execute_program_text(state, if_cond);
+        state->errexit = saved_errexit;
         if (!state->should_exit && !state->return_requested) {
             if (status == 0) {
                 status = execute_program_text(state, if_then);
@@ -2456,8 +2494,13 @@ static int execute_command_atom(struct shell_state *state, const char *source,
         state->loop_depth++;
         while (!state->should_exit) {
             int cond_status;
+            bool saved_errexit;
 
+            /* POSIX: -e does not trigger on while/until condition commands. */
+            saved_errexit = state->errexit;
+            state->errexit = false;
             cond_status = execute_program_text(state, while_cond);
+            state->errexit = saved_errexit;
             if (state->should_exit || state->return_requested) {
                 break;
             }
@@ -3118,6 +3161,7 @@ static int execute_program_text(struct shell_state *state, const char *source) {
     int loop_depth;
     int status;
     bool skip_next_done;
+    bool pending_heredoc;
     char *pending_function_head;
 
     quote = '\0';
@@ -3129,6 +3173,7 @@ static int execute_program_text(struct shell_state *state, const char *source) {
     start = 0;
     status = 0;
     skip_next_done = false;
+    pending_heredoc = false;
     pending_function_head = NULL;
 
     for (i = 0;; i++) {
@@ -3213,17 +3258,22 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                 brace_depth++;
             } else if (ch == '}' && brace_depth > 0) {
                 brace_depth--;
+            } else if (paren_depth == 0 && brace_depth == 0 && ch == '<' &&
+                       source[i + 1] == '<') {
+                pending_heredoc = true;
             } else if (paren_depth == 0 && brace_depth == 0 &&
                        if_depth == 0 && case_depth == 0 && loop_depth == 0 &&
-                       (ch == ';' ||
+                       ((ch == ';' && !pending_heredoc) ||
                         (ch == '\n' &&
-                         !newline_continues_command(source, i)) ||
+                         (!newline_continues_command(source, i) ||
+                          pending_heredoc)) ||
                         /*
                          * Treat only a control-operator '&' as async
                          * separator. Exclude '&&' and redirection forms
                          * like '<&' / '>&'.
                          */
-                        is_async_separator_amp(source, i))) {
+                        (is_async_separator_amp(source, i) &&
+                         !pending_heredoc))) {
                 delim = true;
             }
         } else if (quote == '\'' && ch == '\'') {
@@ -3251,6 +3301,8 @@ static int execute_program_text(struct shell_state *state, const char *source) {
             char *logical_part;
             bool heredoc_handled;
             size_t heredoc_new_pos;
+            int heredoc_rc;
+            heredoc_command_runner_fn heredoc_runner;
 
             part = dup_slice(source, start, i);
             logical_part = collapse_line_continuations(part);
@@ -3278,6 +3330,7 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                 if (looks_like_function_header_only(part) && ch != '\0') {
                     pending_function_head = part;
                     start = i + 1;
+                    pending_heredoc = false;
                     continue;
                 }
 
@@ -3289,32 +3342,44 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                 } else if (ignore_helper_function_declaration(part)) {
                     skip_next_done = true;
                     status = 0;
-                } else if (ch == '&') {
-                    status = run_async_list(state, part);
-                    state->last_status = status;
-                } else if (ch == '\n' &&
-                           maybe_execute_heredoc_command(
-                               state, part, source, i + 1, &heredoc_new_pos,
-                               &heredoc_handled, &status, execute_andor) == 0 &&
-                           heredoc_handled) {
-                    state->last_status = status;
-                    if (status != 0 && state->errexit && !state->interactive) {
-                        state->should_exit = true;
-                        state->exit_status = status;
-                    }
-                    free(part);
-                    if (state->should_exit) {
-                        break;
-                    }
-                    start = heredoc_new_pos;
-                    i = start == 0 ? 0 : start - 1;
-                    continue;
                 } else {
-                    status = execute_andor(state, part);
-                    state->last_status = status;
-                    if (status != 0 && state->errexit && !state->interactive) {
-                        state->should_exit = true;
-                        state->exit_status = status;
+                    heredoc_runner = command_requires_program_runner(part)
+                                         ? execute_program_text
+                                         : execute_andor;
+                    heredoc_rc = maybe_execute_heredoc_command(
+                        state, part, source, i + 1, &heredoc_new_pos,
+                        &heredoc_handled, &status, heredoc_runner);
+                    if (heredoc_rc != 0) {
+                        status = 1;
+                        state->last_status = status;
+                        if (status != 0 && state->errexit && !state->interactive) {
+                            state->should_exit = true;
+                            state->exit_status = status;
+                        }
+                    } else if (heredoc_handled) {
+                        state->last_status = status;
+                        if (status != 0 && state->errexit && !state->interactive) {
+                            state->should_exit = true;
+                            state->exit_status = status;
+                        }
+                        free(part);
+                        if (state->should_exit) {
+                            break;
+                        }
+                        start = heredoc_new_pos;
+                        pending_heredoc = false;
+                        i = start == 0 ? 0 : start - 1;
+                        continue;
+                    } else if (ch == '&') {
+                        status = run_async_list(state, part);
+                        state->last_status = status;
+                    } else {
+                        status = execute_andor(state, part);
+                        state->last_status = status;
+                        if (status != 0 && state->errexit && !state->interactive) {
+                            state->should_exit = true;
+                            state->exit_status = status;
+                        }
                     }
                 }
                 shell_run_pending_traps(state);
@@ -3334,6 +3399,7 @@ static int execute_program_text(struct shell_state *state, const char *source) {
             }
 
             start = i + 1;
+            pending_heredoc = false;
         }
     }
 
