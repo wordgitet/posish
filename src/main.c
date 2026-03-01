@@ -103,7 +103,7 @@ int main(int argc, char **argv) {
         run_interactive = (command == NULL && i >= argc && isatty(STDIN_FILENO));
     }
     state.interactive = run_interactive;
-    signals_apply_policy(run_interactive, state.monitor_mode);
+    shell_refresh_signal_policy(&state);
 
     if (command != NULL) {
         status = shell_run_command(&state, command);

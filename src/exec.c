@@ -933,16 +933,7 @@ static bool inherited_ignore_locked(const struct shell_state *state, int signo) 
 }
 
 static bool trap_clear_keeps_ignore(const struct shell_state *state, int signo) {
-    if (signals_inherited_ignored(signo)) {
-        return true;
-    }
-
-    /*
-     * In non-interactive contexts, `trap -` restores startup policy. For
-     * startup-ignored job-control signals, clearing should keep SIG_IGN.
-     */
-    return !state->interactive && signals_policy_ignored(signo) &&
-           !state->parent_was_interactive;
+    return inherited_ignore_locked(state, signo);
 }
 
 static bool trace_signal_of_interest(int signo) {
@@ -979,6 +970,53 @@ static bool trace_signal_of_interest(int signo) {
     return false;
 }
 
+static void apply_child_signal_disposition(const struct shell_state *state,
+                                           char **trap_slot, int signo,
+                                           bool reset_policy_ignore) {
+    const char *trap_value;
+
+    trap_value = trap_slot != NULL ? *trap_slot : state->signal_traps[signo];
+    if (trap_value != NULL) {
+        if (trap_value[0] == '\0') {
+            (void)signals_set_ignored(signo);
+        } else if (inherited_ignore_locked(state, signo)) {
+            if (trap_slot != NULL) {
+                *trap_slot = NULL;
+            }
+            (void)signals_set_ignored(signo);
+        } else {
+            if (trap_slot != NULL) {
+                *trap_slot = NULL;
+            }
+            /* Child contexts do not execute command traps from the parent. */
+            (void)signals_set_default(signo);
+        }
+        signals_clear_pending(signo);
+        return;
+    }
+
+    if (state->signal_cleared[signo]) {
+        if (trap_clear_keeps_ignore(state, signo)) {
+            (void)signals_set_ignored(signo);
+        } else {
+            (void)signals_set_default(signo);
+        }
+        signals_clear_pending(signo);
+        return;
+    }
+
+    if (reset_policy_ignore && signals_policy_ignored(signo) &&
+        !inherited_ignore_locked(state, signo) &&
+        !(state->interactive && signals_inherited_ignored(signo))) {
+        /*
+         * Startup policy ignores from the main shell do not carry into child
+         * shells or foreground utility children.
+         */
+        (void)signals_set_default(signo);
+    }
+    signals_clear_pending(signo);
+}
+
 static void reset_signal_traps_for_child(struct shell_state *state) {
     int signo;
 
@@ -1001,47 +1039,8 @@ static void reset_signal_traps_for_child(struct shell_state *state) {
                       signals_inherited_ignored(signo) ? 1 : 0,
                       signals_policy_ignored(signo) ? 1 : 0);
         }
-
-        if (state->signal_traps[signo] != NULL) {
-            if (state->signal_traps[signo][0] == '\0') {
-                /*
-                 * An explicit `trap '' SIG` should remain ignored in child
-                 * shell contexts.
-                 */
-                (void)signals_set_ignored(signo);
-            } else {
-                /*
-                 * Command traps are not inherited by child shell contexts.
-                 */
-                state->signal_traps[signo] = NULL;
-                if (inherited_ignore_locked(state, signo)) {
-                    (void)signals_set_ignored(signo);
-                } else {
-                    (void)signals_set_default(signo);
-                }
-            }
-        } else if (state->signal_cleared[signo]) {
-            /* Preserve `trap -` startup restoration semantics for child shells. */
-            if (trap_clear_keeps_ignore(state, signo)) {
-                (void)signals_set_ignored(signo);
-            } else {
-                (void)signals_set_default(signo);
-            }
-        } else {
-            struct sigaction sa;
-
-            if (sigaction(signo, NULL, &sa) == 0 &&
-                sa.sa_handler == SIG_IGN &&
-                signals_policy_ignored(signo) &&
-                !signals_inherited_ignored(signo)) {
-                /*
-                 * Interactive/main-shell startup policy does not carry into
-                 * subshell/cmdsub/async shell contexts.
-                 */
-                (void)signals_set_default(signo);
-            }
-        }
-        signals_clear_pending(signo);
+        apply_child_signal_disposition(state, &state->signal_traps[signo], signo,
+                                       true);
     }
 }
 
@@ -1072,11 +1071,13 @@ void exec_prepare_signals_for_exec_child(const struct shell_state *state) {
         if (signo == SIGINT && state->in_async_context && !state->monitor_mode) {
             if (state->signal_traps[signo] == NULL && !state->signal_cleared[signo]) {
                 (void)signals_set_ignored(signo);
+                signals_clear_pending(signo);
                 continue;
             }
             if (state->signal_traps[signo] != NULL &&
                 state->signal_traps[signo][0] == '\0') {
                 (void)signals_set_ignored(signo);
+                signals_clear_pending(signo);
                 continue;
             }
         }
@@ -1085,43 +1086,18 @@ void exec_prepare_signals_for_exec_child(const struct shell_state *state) {
         if (signo == SIGQUIT && state->in_async_context && !state->monitor_mode) {
             if (state->signal_traps[signo] == NULL && !state->signal_cleared[signo]) {
                 (void)signals_set_ignored(signo);
+                signals_clear_pending(signo);
                 continue;
             }
             if (state->signal_traps[signo] != NULL &&
                 state->signal_traps[signo][0] == '\0') {
                 (void)signals_set_ignored(signo);
+                signals_clear_pending(signo);
                 continue;
             }
         }
 #endif
-
-        if (state->signal_traps[signo] != NULL) {
-            if (state->signal_traps[signo][0] == '\0') {
-                (void)signals_set_ignored(signo);
-            } else if (inherited_ignore_locked(state, signo)) {
-                (void)signals_set_ignored(signo);
-            } else {
-                /* Child processes do not run trap handlers from the parent shell. */
-                (void)signals_set_default(signo);
-            }
-            continue;
-        }
-
-        if (state->signal_cleared[signo]) {
-            if (trap_clear_keeps_ignore(state, signo)) {
-                (void)signals_set_ignored(signo);
-            } else {
-                (void)signals_set_default(signo);
-            }
-            continue;
-        }
-
-        if (state->main_context && signals_policy_ignored(signo) &&
-            !inherited_ignore_locked(state, signo) &&
-            !(state->interactive && signals_inherited_ignored(signo))) {
-            /* Foreground children from the main interactive shell use defaults. */
-            (void)signals_set_default(signo);
-        }
+        apply_child_signal_disposition(state, NULL, signo, state->main_context);
     }
 }
 

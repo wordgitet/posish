@@ -413,8 +413,10 @@ done:
 
 static int builtin_set(struct shell_state *state, char *const argv[]) {
     size_t i;
+    bool refresh_signal_policy;
 
     i = 1;
+    refresh_signal_policy = false;
     while (argv[i] != NULL) {
         const char *opt;
         size_t j;
@@ -434,12 +436,28 @@ static int builtin_set(struct shell_state *state, char *const argv[]) {
             if (opt[j] == 'e') {
                 state->errexit = opt[0] == '-';
             } else if (opt[j] == 'i') {
-                state->interactive = opt[0] == '-';
+                bool new_interactive;
+
+                new_interactive = opt[0] == '-';
+                if (state->interactive != new_interactive) {
+                    refresh_signal_policy = true;
+                }
+                state->interactive = new_interactive;
             } else if (opt[j] == 'm') {
-                state->monitor_mode = opt[0] == '-';
+                bool new_monitor_mode;
+
+                new_monitor_mode = opt[0] == '-';
+                if (state->monitor_mode != new_monitor_mode) {
+                    refresh_signal_policy = true;
+                }
+                state->monitor_mode = new_monitor_mode;
             }
         }
         i++;
+    }
+
+    if (refresh_signal_policy) {
+        shell_refresh_signal_policy(state);
     }
     return 0;
 }
@@ -1048,7 +1066,7 @@ static int builtin_trap(struct shell_state *state, char *const argv[]) {
                 trace_log(POSISH_TRACE_TRAPS, "trap ignore signo=%d", signo);
             } else {
                 /*
-                 * Signals ignored by the parent on shell entry stay ignored.
+                 * In non-interactive shells, inherited SIG_IGN remains sticky.
                  */
                 if (inherited_ignore_locked(state, signo)) {
                     free(state->signal_traps[signo]);

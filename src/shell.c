@@ -341,6 +341,19 @@ static void append_command(char **buf, size_t *len, size_t *cap,
     (*buf)[*len] = '\0';
 }
 
+static bool inherited_ignore_locked(const struct shell_state *state, int signo) {
+    return !state->interactive && signals_inherited_ignored(signo) &&
+           !state->parent_was_interactive;
+}
+
+static bool trap_clear_keeps_ignore(const struct shell_state *state, int signo) {
+    if (state->interactive && state->main_context && signals_policy_ignored(signo)) {
+        return true;
+    }
+
+    return inherited_ignore_locked(state, signo);
+}
+
 void shell_state_init(struct shell_state *state) {
     int signo;
 
@@ -416,6 +429,37 @@ void shell_state_destroy(struct shell_state *state) {
     state->running_exit_trap = false;
     state->running_signal_trap = false;
     state->last_handled_signal = 0;
+}
+
+void shell_refresh_signal_policy(struct shell_state *state) {
+    int signo;
+
+    /*
+     * Keep runtime option flips (set +/-i, set +/-m) and trap state in one
+     * place so all execution paths observe the same live dispositions.
+     */
+    signals_apply_policy(state->interactive, state->monitor_mode);
+
+    for (signo = 1; signo < NSIG; signo++) {
+        if (state->signal_traps[signo] != NULL) {
+            if (state->signal_traps[signo][0] == '\0') {
+                (void)signals_set_ignored(signo);
+            } else if (inherited_ignore_locked(state, signo)) {
+                free(state->signal_traps[signo]);
+                state->signal_traps[signo] = NULL;
+                (void)signals_set_ignored(signo);
+            } else {
+                (void)signals_set_trap(signo);
+            }
+        } else if (state->signal_cleared[signo]) {
+            if (trap_clear_keeps_ignore(state, signo)) {
+                (void)signals_set_ignored(signo);
+            } else {
+                (void)signals_set_default(signo);
+            }
+        }
+        signals_clear_pending(signo);
+    }
 }
 
 void shell_run_pending_traps(struct shell_state *state) {

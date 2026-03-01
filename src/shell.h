@@ -42,6 +42,7 @@ struct shell_state {
 
 void shell_state_init(struct shell_state *state);
 void shell_state_destroy(struct shell_state *state);
+void shell_refresh_signal_policy(struct shell_state *state);
 void shell_run_exit_trap(struct shell_state *state);
 void shell_run_pending_traps(struct shell_state *state);
 int shell_run_command(struct shell_state *state, const char *command);
