@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - arithmetic interface */
+
 #ifndef POSISH_ARITH_H
 #define POSISH_ARITH_H
 

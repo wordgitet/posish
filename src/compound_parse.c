@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - compound command parsing */
+
 #include "compound_parse.h"
 
 #include "arena.h"

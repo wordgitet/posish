@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - builtin dispatch interface */
+
 #ifndef POSISH_BUILTIN_H
 #define POSISH_BUILTIN_H
 

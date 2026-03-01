@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - lexer interface */
+
 #ifndef POSISH_LEXER_H
 #define POSISH_LEXER_H
 

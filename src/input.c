@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - input helpers */
+
 #include "input.h"
 
 #include "arena.h"

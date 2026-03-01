@@ -1,4 +1,9 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - regular builtins */
+
 #include "builtins/builtin.h"
+#include "builtins/netbsd_test.h"
 
 #include "error.h"
 #include "jobs.h"
@@ -102,38 +107,13 @@ static int run_utility(char *const argv[]) {
 }
 
 static int builtin_test(char *const argv[]) {
-    if (strcmp(argv[0], "[") == 0) {
-        size_t argc;
-        size_t i;
-        char **test_argv;
-        int status;
+    size_t argc;
 
-        argc = 0;
-        while (argv[argc] != NULL) {
-            argc++;
-        }
-        if (argc < 2 || strcmp(argv[argc - 1], "]") != 0) {
-            posish_errorf("[: missing closing ]");
-            return 2;
-        }
-
-        test_argv = calloc(argc, sizeof(*test_argv));
-        if (test_argv == NULL) {
-            perror("calloc");
-            return 1;
-        }
-        test_argv[0] = "test";
-        for (i = 1; i + 1 < argc; i++) {
-            test_argv[i] = argv[i];
-        }
-        test_argv[argc - 1] = NULL;
-
-        status = run_utility(test_argv);
-        free(test_argv);
-        return status;
+    argc = 0;
+    while (argv[argc] != NULL) {
+        argc++;
     }
-
-    return run_utility(argv);
+    return posish_netbsd_test_builtin((int)argc, argv);
 }
 
 static int builtin_echoraw(char *const argv[]) {

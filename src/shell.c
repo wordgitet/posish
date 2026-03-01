@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - shell runtime */
+
 #define _POSIX_C_SOURCE 200809L
 
 #include "shell.h"

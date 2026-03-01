@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - error reporting interface */
+
 #ifndef POSISH_ERROR_H
 #define POSISH_ERROR_H
 

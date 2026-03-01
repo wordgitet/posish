@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - signal policy and traps */
+
 #include "signals.h"
 #include "trace.h"
 

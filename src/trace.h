@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - trace interface */
+
 #ifndef POSISH_TRACE_H
 #define POSISH_TRACE_H
 

@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - lexer */
+
 #include "lexer.h"
 
 #include "arena.h"

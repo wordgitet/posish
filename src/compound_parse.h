@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - compound parse interface */
+
 #ifndef POSISH_COMPOUND_PARSE_H
 #define POSISH_COMPOUND_PARSE_H
 

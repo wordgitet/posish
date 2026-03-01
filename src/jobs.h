@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - job interface */
+
 #ifndef POSISH_JOBS_H
 #define POSISH_JOBS_H
 

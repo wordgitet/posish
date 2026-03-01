@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - trace logging */
+
 #include "trace.h"
 
 #if defined(POSISH_ENABLE_TRACE) && POSISH_ENABLE_TRACE

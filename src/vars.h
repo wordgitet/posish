@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - variable interface */
+
 #ifndef POSISH_VARS_H
 #define POSISH_VARS_H
 

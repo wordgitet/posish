@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - shell state and APIs */
+
 #ifndef POSISH_SHELL_H
 #define POSISH_SHELL_H
 

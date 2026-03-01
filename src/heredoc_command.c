@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - here-document processing */
+
 #include "heredoc_command.h"
 
 #include "arena.h"

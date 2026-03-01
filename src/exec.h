@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - execution interface */
+
 #ifndef POSISH_EXEC_H
 #define POSISH_EXEC_H
 

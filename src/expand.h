@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - expansion interface */
+
 #ifndef POSISH_EXPAND_H
 #define POSISH_EXPAND_H
 

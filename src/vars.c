@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - variable storage */
+
 #include "vars.h"
 
 #include "arena.h"

@@ -1,6 +1,11 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - program entry point */
+
 #include "shell.h"
 
 #include "posish/version.h"
+#include "arena.h"
 #include "jobs.h"
 #include "options.h"
 #include "signals.h"
@@ -15,6 +20,27 @@ static void usage(const char *argv0) {
     fprintf(stderr, "usage: %s [-c command] [script]\n", argv0);
 }
 
+static int set_initial_positional_params(struct shell_state *state, int argc,
+                                         char **argv, int start_index) {
+    int count;
+    int i;
+
+    if (start_index >= argc) {
+        state->positional_params = NULL;
+        state->positional_count = 0;
+        return 0;
+    }
+
+    count = argc - start_index;
+    state->positional_params = arena_xmalloc(sizeof(*state->positional_params) *
+                                             (size_t)count);
+    for (i = 0; i < count; i++) {
+        state->positional_params[i] = arena_xstrdup(argv[start_index + i]);
+    }
+    state->positional_count = (size_t)count;
+    return 0;
+}
+
 int main(int argc, char **argv) {
     struct shell_state state;
     int status;
@@ -23,6 +49,7 @@ int main(int argc, char **argv) {
     bool interactive_option_seen;
     bool force_interactive;
     bool run_interactive;
+    bool read_stdin_script;
     const char *command;
     const char *parent_interactive;
 
@@ -49,6 +76,7 @@ int main(int argc, char **argv) {
     i = 1;
     interactive_option_seen = false;
     force_interactive = false;
+    read_stdin_script = false;
     command = NULL;
     parent_interactive = getenv("POSISH_PARENT_INTERACTIVE");
     state.parent_was_interactive =
@@ -78,6 +106,8 @@ int main(int argc, char **argv) {
                     state.explicit_non_interactive = argv[i][0] == '+';
                 } else if (argv[i][j] == 'm') {
                     state.monitor_mode = argv[i][0] == '-';
+                } else if (argv[i][j] == 's') {
+                    read_stdin_script = argv[i][0] == '-';
                 } else if (argv[i][j] == 'v') {
                     state.verbose = argv[i][0] == '-';
                 } else if (argv[i][0] == '-' && argv[i][j] == 'c') {
@@ -108,7 +138,17 @@ int main(int argc, char **argv) {
     shell_refresh_signal_policy(&state);
 
     if (command != NULL) {
+        (void)set_initial_positional_params(&state, argc, argv, i);
+    } else if (read_stdin_script) {
+        (void)set_initial_positional_params(&state, argc, argv, i);
+    } else if (i < argc) {
+        (void)set_initial_positional_params(&state, argc, argv, i + 1);
+    }
+
+    if (command != NULL) {
         status = shell_run_command(&state, command);
+    } else if (read_stdin_script) {
+        status = shell_run_stream(&state, stdin, run_interactive);
     } else if (i < argc) {
         status = shell_run_file(&state, argv[i]);
     } else {

@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - here-document interface */
+
 #ifndef POSISH_HEREDOC_COMMAND_H
 #define POSISH_HEREDOC_COMMAND_H
 

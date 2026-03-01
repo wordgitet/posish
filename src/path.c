@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - path utilities */
+
 #include "path.h"
 
 #include "arena.h"

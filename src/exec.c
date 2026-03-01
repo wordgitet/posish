@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - execution engine */
+
 #include "exec.h"
 
 #include "arena.h"

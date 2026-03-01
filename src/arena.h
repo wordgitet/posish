@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - allocator interface */
+
 #ifndef POSISH_ARENA_H
 #define POSISH_ARENA_H
 

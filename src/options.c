@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - options subsystem */
+
 #include "options.h"
 
 void options_init(void) {

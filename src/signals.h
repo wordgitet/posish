@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - signal interface */
+
 #ifndef POSISH_SIGNALS_H
 #define POSISH_SIGNALS_H
 

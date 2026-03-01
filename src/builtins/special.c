@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - special builtins */
+
 #include "builtins/builtin.h"
 
 #include "error.h"
@@ -78,7 +82,8 @@ static bool is_reserved_word_name(const char *name) {
 static bool is_regular_builtin_name(const char *name) {
     static const char *const words[] = {"cd",      "true",      "false",
                                         "test",    "[",         "kill",
-                                        "wait",    "fg",        "alias",
+                                        "wait",    "fg",        "bg",
+                                        "alias",
                                         "unalias", "echoraw",   "bracket",
                                         "make_command"};
     size_t i;
@@ -305,6 +310,15 @@ static int builtin_command_describe(struct shell_state *state, char *const argv[
             }
             fflush(stdout);
             free(path);
+            continue;
+        } else if (strcmp(argv[i], "test") == 0 || strcmp(argv[i], "[") == 0) {
+            /* Keep test-suite gate semantics honest: report builtin nature. */
+            if (verbose) {
+                printf("%s is a shell builtin\n", argv[i]);
+            } else {
+                printf("%s\n", argv[i]);
+            }
+            fflush(stdout);
             continue;
         } else {
             path = find_command_path(argv[i], use_standard_path);

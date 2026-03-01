@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - parser entrypoints */
+
 #include "parser.h"
 
 #include "arena.h"

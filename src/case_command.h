@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: 0BSD */
+
+/* posish - case command interface */
+
 #ifndef POSISH_CASE_COMMAND_H
 #define POSISH_CASE_COMMAND_H
 
