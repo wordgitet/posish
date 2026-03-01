@@ -1,9 +1,22 @@
-# Known Fails (M1)
+# Known Fails
 
-This file tracks intentionally accepted failures for M1 so they do not get
-misclassified as regressions.
+This file is the single source of truth for accepted M1 scope cuts and current
+non-green POSIX test buckets.
 
-## Accepted gaps
+## Snapshot (2026-03-01)
+
+- Fulltruth baseline (`tests/posix/summary-fulltruth.csv`):
+  - `FULL_PASS 88`
+  - `PARTIAL_FAIL 34`
+  - `FULL_FAIL 0`
+  - `TIMEOUT 0`
+  - `MISSING 0`
+  - `OK 10504`
+  - `ERROR 566`
+  - `SKIPPED 14`
+  - `RATIO_OK_OVER_OK_PLUS_ERROR 0.9489`
+
+## Accepted Scope Cuts
 
 - `set -C` / noclobber behavior:
   - Current policy: option parses, behavior not fully enforced yet.
@@ -13,23 +26,34 @@ misclassified as regressions.
     diagnostic.
   - Impacted area: quoting tests that require full escape processing.
 
-## Signal status (updated 2026-02-28)
+## Current Blockers / Regressions
 
-- Signal semantics use truth mode by default.
-- Use `make test-signal` (`TESTCASE_TIMEOUT_SIGNAL=0`).
-- Use `make test-signal-contained` for bounded per-file runs.
+Top active non-green buckets by error count:
 
-## Current active blockers (2026-02-28 current reruns)
+- `alias-p.tst` (58)
+- `option-p.tst` (53)
+- `param-p.tst` (45)
+- `error-p.tst` (37)
+- `quote-p.tst` (32)
+- `read-p.tst` (31)
+- `if-p.tst` (31)
+- `set-p.tst` (25)
+- `getopts-p.tst` (26)
+- `redir-p.tst` (21)
+- `ppid-p.tst` (1)
 
-- `kill4-p.tst` remains failing (no longer hard-aborting):
-  - Symptom:
-    - line 20 / 30: timeouts + missing `HUP` output, stderr includes
-      `(: No such file or directory` and `kill: (-<pgid>): No such process`
-    - line 44 / 61: timeouts + missing expected `USR1/USR2` or `TERM` output,
-      stderr includes `halt(): No such file or directory`, `do: ...`, `done: ...`
-  - Repro: `make -B -C tests/posix kill4-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=10`
+The complete non-green file list is sourced from
+`tests/posix/summary-fulltruth.csv`.
 
-## Maintenance
+## Repro Commands
 
-- Keep this list short and explicit.
-- Remove entries as soon as implementation reaches conformance.
+Use truth mode (`TESTCASE_TIMEOUT=0`) for semantic reruns.
+
+```sh
+make -B -C tests/posix option-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
+make -B -C tests/posix set-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
+make -B -C tests/posix shift-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
+make -B -C tests/posix redir-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
+make -B -C tests/posix param-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
+make -B -C tests/posix ppid-p.trs TESTEE=../../build/posish TESTCASE_TIMEOUT=0
+```
