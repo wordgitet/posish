@@ -78,6 +78,8 @@ int main(int argc, char **argv) {
                     state.explicit_non_interactive = argv[i][0] == '+';
                 } else if (argv[i][j] == 'm') {
                     state.monitor_mode = argv[i][0] == '-';
+                } else if (argv[i][j] == 'v') {
+                    state.verbose = argv[i][0] == '-';
                 } else if (argv[i][0] == '-' && argv[i][j] == 'c') {
                     saw_c = true;
                 }
@@ -113,6 +115,8 @@ int main(int argc, char **argv) {
         status = shell_run_stream(&state, stdin, run_interactive);
     }
 
+    /* Drain late-arriving pending signals before shutdown/final EXIT trap. */
+    shell_run_pending_traps(&state);
     shell_run_exit_trap(&state);
 
     if (state.should_exit) {

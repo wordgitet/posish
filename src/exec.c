@@ -927,6 +927,55 @@ static bool keyword_boundary(char ch) {
            ch == '}';
 }
 
+static bool word_starts_command_position(const char *source, size_t pos) {
+    size_t i;
+
+    if (pos == 0) {
+        return true;
+    }
+
+    i = pos;
+    while (i > 0) {
+        char ch;
+
+        ch = source[i - 1];
+        if (ch == ' ' || ch == '\t') {
+            i--;
+            continue;
+        }
+        if (ch == '\n' || ch == ';' || ch == '&' || ch == '|' || ch == '(' ||
+            ch == '{') {
+            return true;
+        }
+        break;
+    }
+
+    if (i == 0) {
+        return true;
+    }
+
+    if (isalnum((unsigned char)source[i - 1]) || source[i - 1] == '_') {
+        size_t start;
+        size_t len;
+
+        start = i - 1;
+        while (start > 0 &&
+               (isalnum((unsigned char)source[start - 1]) ||
+                source[start - 1] == '_')) {
+            start--;
+        }
+        len = i - start;
+        if ((len == 4 && strncmp(source + start, "then", 4) == 0) ||
+            (len == 2 && strncmp(source + start, "do", 2) == 0) ||
+            (len == 4 && strncmp(source + start, "else", 4) == 0) ||
+            (len == 4 && strncmp(source + start, "elif", 4) == 0)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static bool inherited_ignore_locked(const struct shell_state *state, int signo) {
     return !state->interactive && signals_inherited_ignored(signo) &&
            !state->parent_was_interactive;
@@ -1395,8 +1444,7 @@ static bool parse_simple_if(const char *source, char **cond_out, char **then_out
             }
             if (paren_depth == 0 && brace_depth == 0 &&
                 (isalpha((unsigned char)ch) || ch == '_') &&
-                (i == 0 || !(isalnum((unsigned char)source[i - 1]) ||
-                             source[i - 1] == '_'))) {
+                word_starts_command_position(source, i)) {
                 size_t j;
                 size_t wlen;
 
@@ -1571,8 +1619,7 @@ static bool parse_simple_while(const char *source, char **cond_out,
             }
             if (paren_depth == 0 && brace_depth == 0 &&
                 (isalpha((unsigned char)ch) || ch == '_') &&
-                (i == 0 || !(isalnum((unsigned char)source[i - 1]) ||
-                             source[i - 1] == '_'))) {
+                word_starts_command_position(source, i)) {
                 size_t j;
                 size_t wlen;
 
@@ -1679,8 +1726,7 @@ static bool parse_simple_while(const char *source, char **cond_out,
             }
             if (paren_depth == 0 && brace_depth == 0 &&
                 (isalpha((unsigned char)ch) || ch == '_') &&
-                (i == 0 || !(isalnum((unsigned char)source[i - 1]) ||
-                             source[i - 1] == '_'))) {
+                word_starts_command_position(source, i)) {
                 size_t j;
                 size_t wlen;
 
@@ -1835,8 +1881,7 @@ static bool parse_simple_for(const char *source, char **name_out,
             }
             if (paren_depth == 0 && brace_depth == 0 &&
                 (isalpha((unsigned char)ch) || ch == '_') &&
-                (i == 0 || !(isalnum((unsigned char)source[i - 1]) ||
-                             source[i - 1] == '_'))) {
+                word_starts_command_position(source, i)) {
                 size_t j;
                 size_t wlen;
 
@@ -1942,8 +1987,7 @@ static bool parse_simple_for(const char *source, char **name_out,
             }
             if (paren_depth == 0 && brace_depth == 0 &&
                 (isalpha((unsigned char)ch) || ch == '_') &&
-                (i == 0 || !(isalnum((unsigned char)source[i - 1]) ||
-                             source[i - 1] == '_'))) {
+                word_starts_command_position(source, i)) {
                 size_t j;
                 size_t wlen;
 
@@ -2325,6 +2369,12 @@ static bool try_execute_simple_case(struct shell_state *state,
 
         cmd_start = i;
         quote = '\0';
+        {
+            bool clause_ended_with_esac;
+            bool clause_ended_with_terminator;
+
+            clause_ended_with_esac = false;
+            clause_ended_with_terminator = false;
         for (; source[i] != '\0'; i++) {
             char ch;
 
@@ -2339,6 +2389,14 @@ static bool try_execute_simple_case(struct shell_state *state,
                     continue;
                 }
                 if (ch == ';' && source[i + 1] == ';') {
+                    clause_ended_with_terminator = true;
+                    break;
+                }
+                if ((isalpha((unsigned char)ch) || ch == '_') &&
+                    word_starts_command_position(source, i) &&
+                    strncmp(source + i, "esac", 4) == 0 &&
+                    keyword_boundary(source[i + 4])) {
+                    clause_ended_with_esac = true;
                     break;
                 }
             } else if (quote == '\'' && ch == '\'') {
@@ -2353,7 +2411,7 @@ static bool try_execute_simple_case(struct shell_state *state,
                 }
             }
         }
-        if (source[i] == '\0') {
+        if (source[i] == '\0' && !clause_ended_with_esac) {
             free(word);
             *status_out = 2;
             return true;
@@ -2375,7 +2433,10 @@ static bool try_execute_simple_case(struct shell_state *state,
         }
         free(patterns);
 
-        i += 2;
+        if (clause_ended_with_terminator) {
+            i += 2;
+        }
+        }
     }
 
     free(word);
@@ -4132,8 +4193,7 @@ static int execute_andor(struct shell_state *state, const char *source) {
                 quote = ch;
             } else if (paren_depth == 0 && brace_depth == 0 &&
                        (isalpha((unsigned char)ch) || ch == '_') &&
-                       (i == 0 || !(isalnum((unsigned char)source[i - 1]) ||
-                                    source[i - 1] == '_'))) {
+                       word_starts_command_position(source, i)) {
                 size_t j;
 
                 j = i;
@@ -4305,8 +4365,7 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                 quote = ch;
             } else if (paren_depth == 0 && brace_depth == 0 &&
                        (isalpha((unsigned char)ch) || ch == '_') &&
-                       (i == 0 || !(isalnum((unsigned char)source[i - 1]) ||
-                                    source[i - 1] == '_'))) {
+                       word_starts_command_position(source, i)) {
                 size_t j;
 
                 j = i;

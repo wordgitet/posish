@@ -24,8 +24,10 @@ struct shell_state {
     bool explicit_non_interactive;
     bool parent_was_interactive;
     bool monitor_mode;
+    bool verbose;
     bool in_async_context;
     bool main_context;
+    bool in_command_builtin;
     pid_t last_async_pid;
     int break_levels;
     int continue_levels;
@@ -37,6 +39,8 @@ struct shell_state {
     char *exit_trap;
     bool running_exit_trap;
     bool running_signal_trap;
+    bool trap_entry_status_valid;
+    int trap_entry_status;
     char *signal_traps[NSIG];
     bool signal_cleared[NSIG];
     char **readonly_names;

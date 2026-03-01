@@ -370,8 +370,10 @@ void shell_state_init(struct shell_state *state) {
     state->explicit_non_interactive = false;
     state->parent_was_interactive = false;
     state->monitor_mode = false;
+    state->verbose = false;
     state->in_async_context = false;
     state->main_context = true;
+    state->in_command_builtin = false;
     state->last_async_pid = -1;
     state->break_levels = 0;
     state->continue_levels = 0;
@@ -383,6 +385,8 @@ void shell_state_init(struct shell_state *state) {
     state->exit_trap = NULL;
     state->running_exit_trap = false;
     state->running_signal_trap = false;
+    state->trap_entry_status_valid = false;
+    state->trap_entry_status = 0;
     for (signo = 0; signo < NSIG; signo++) {
         state->signal_traps[signo] = NULL;
         state->signal_cleared[signo] = false;
@@ -443,6 +447,10 @@ void shell_state_destroy(struct shell_state *state) {
     state->running_exit_trap = false;
     state->running_signal_trap = false;
     state->last_handled_signal = 0;
+    state->verbose = false;
+    state->in_command_builtin = false;
+    state->trap_entry_status_valid = false;
+    state->trap_entry_status = 0;
 }
 
 void shell_refresh_signal_policy(struct shell_state *state) {
@@ -488,6 +496,8 @@ void shell_run_pending_traps(struct shell_state *state) {
         int saved_last_status;
         bool saved_should_exit;
         int saved_exit_status;
+        bool saved_trap_status_valid;
+        int saved_trap_status;
         char *command;
 
         signo = signals_take_next_pending();
@@ -509,9 +519,15 @@ void shell_run_pending_traps(struct shell_state *state) {
         saved_last_status = state->last_status;
         saved_should_exit = state->should_exit;
         saved_exit_status = state->exit_status;
+        saved_trap_status_valid = state->trap_entry_status_valid;
+        saved_trap_status = state->trap_entry_status;
 
         state->should_exit = false;
+        state->trap_entry_status = saved_last_status;
+        state->trap_entry_status_valid = true;
         (void)shell_run_command(state, command);
+        state->trap_entry_status_valid = saved_trap_status_valid;
+        state->trap_entry_status = saved_trap_status;
         trace_log(POSISH_TRACE_TRAPS,
                   "signal trap signo=%d finished status=%d should_exit=%d",
                   signo, state->last_status, state->should_exit ? 1 : 0);
@@ -528,6 +544,8 @@ void shell_run_exit_trap(struct shell_state *state) {
     int saved_last_status;
     int saved_exit_status;
     bool saved_should_exit;
+    bool saved_trap_status_valid;
+    int saved_trap_status;
 
     if (state->running_exit_trap || state->exit_trap == NULL) {
         return;
@@ -536,11 +554,17 @@ void shell_run_exit_trap(struct shell_state *state) {
     saved_last_status = state->last_status;
     saved_should_exit = state->should_exit;
     saved_exit_status = state->exit_status;
+    saved_trap_status_valid = state->trap_entry_status_valid;
+    saved_trap_status = state->trap_entry_status;
 
     state->running_exit_trap = true;
     state->should_exit = false;
+    state->trap_entry_status = saved_last_status;
+    state->trap_entry_status_valid = true;
     trace_log(POSISH_TRACE_TRAPS, "run EXIT trap command=%s", state->exit_trap);
     (void)shell_run_command(state, state->exit_trap);
+    state->trap_entry_status_valid = saved_trap_status_valid;
+    state->trap_entry_status = saved_trap_status;
     state->running_exit_trap = false;
 
     /* Keep the original shell exit unless the trap explicitly requested one. */
@@ -616,7 +640,9 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
 
     if (!line_mode_input) {
         ssize_t nread;
+        bool ran_command;
 
+        ran_command = false;
         /*
          * Batch whole-script input whenever stdin is not a TTY.
          * This keeps here-doc/compound syntax intact even for `-i` test runs
@@ -624,13 +650,21 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
          */
         while ((nread = getline(&line, &cap, stream)) >= 0) {
             (void)nread;
+            if (state->verbose) {
+                fputs(line, stderr);
+            }
             append_command(&command, &command_len, &command_cap, line);
             line_no++;
         }
         if (command_len > 0) {
             shell_run_command(state, command);
+            ran_command = true;
         }
         shell_run_pending_traps(state);
+        if (!ran_command && !state->should_exit) {
+            /* Executing an empty script resets $? to success. */
+            state->last_status = 0;
+        }
 
         free(line);
         free(command);
@@ -656,6 +690,9 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
         nread = getline(&line, &cap, stream);
         if (nread < 0) {
             break;
+        }
+        if (state->verbose) {
+            fputs(line, stderr);
         }
 
         append_command(&command, &command_len, &command_cap, line);

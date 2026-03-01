@@ -343,6 +343,15 @@ static int wait_status_to_shell_status(int wstatus) {
     return 1;
 }
 
+static int default_status_for_flow_builtin(const struct shell_state *state) {
+    if (state->main_context &&
+        (state->running_signal_trap || state->running_exit_trap) &&
+        state->trap_entry_status_valid) {
+        return state->trap_entry_status;
+    }
+    return state->last_status;
+}
+
 static int builtin_command(struct shell_state *state, char *const argv[]) {
     size_t i;
     bool opt_v;
@@ -417,7 +426,14 @@ static int builtin_command(struct shell_state *state, char *const argv[]) {
         restore_path = true;
     }
 
-    status = builtin_dispatch(state, &argv[i], &handled);
+    {
+        bool saved_in_command_builtin;
+
+        saved_in_command_builtin = state->in_command_builtin;
+        state->in_command_builtin = true;
+        status = builtin_dispatch(state, &argv[i], &handled);
+        state->in_command_builtin = saved_in_command_builtin;
+    }
     if (!handled) {
         pid_t pid;
         int wstatus;
@@ -508,6 +524,8 @@ static int builtin_set(struct shell_state *state, char *const argv[]) {
                     refresh_signal_policy = true;
                 }
                 state->monitor_mode = new_monitor_mode;
+            } else if (opt[j] == 'v') {
+                state->verbose = opt[0] == '-';
             }
         }
         i++;
@@ -579,7 +597,7 @@ static int builtin_return(struct shell_state *state, char *const argv[]) {
         i++;
     }
 
-    status = state->last_status;
+    status = default_status_for_flow_builtin(state);
     if (argv[i] != NULL) {
         errno = 0;
         n = strtol(argv[i], &end, 10);
@@ -624,7 +642,7 @@ static int builtin_dot(struct shell_state *state, char *const argv[]) {
     path = find_dot_script_path(argv[i]);
     if (path == NULL) {
         posish_errorf(".: %s: file not found", argv[i]);
-        if (!state->interactive) {
+        if (!state->interactive && !state->in_command_builtin) {
             state->should_exit = true;
             state->exit_status = 1;
         }
@@ -1361,18 +1379,25 @@ int builtin_try_special(struct shell_state *state, char *const argv[], bool *han
     }
 
     if (strcmp(argv[0], "exit") == 0) {
+        size_t i;
         int status;
         char *end;
 
-        status = state->last_status;
-        if (argv[1] != NULL) {
+        i = 1;
+        if (argv[i] != NULL && strcmp(argv[i], "--") == 0) {
+            i++;
+        }
+
+        status = default_status_for_flow_builtin(state);
+        if (argv[i] != NULL) {
             errno = 0;
-            status = (int)strtol(argv[1], &end, 10);
-            if (errno != 0 || end == argv[1] || *end != '\0') {
-                posish_errorf("exit: numeric argument required: %s", argv[1]);
+            status = (int)strtol(argv[i], &end, 10);
+            if (errno != 0 || end == argv[i] || *end != '\0') {
+                posish_errorf("exit: numeric argument required: %s", argv[i]);
                 status = 2;
             }
-            if (argv[2] != NULL) {
+            i++;
+            if (argv[i] != NULL) {
                 posish_errorf("exit: too many arguments");
                 *handled = true;
                 return 1;
