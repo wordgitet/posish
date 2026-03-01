@@ -13,6 +13,7 @@
 #include "heredoc_command.h"
 #include "jobs.h"
 #include "lexer.h"
+#include "redir.h"
 #include "signals.h"
 #include "trace.h"
 #include "vars.h"
@@ -31,27 +32,6 @@
 
 enum andor_op { ANDOR_AND, ANDOR_OR };
 
-enum redir_kind {
-    REDIR_OPEN_READ,
-    REDIR_OPEN_WRITE,
-    REDIR_OPEN_APPEND,
-    REDIR_DUP_IN,
-    REDIR_DUP_OUT,
-    REDIR_CLOSE,
-};
-
-struct redir_spec {
-    enum redir_kind kind;
-    int target_fd;
-    int source_fd;
-    char *path;
-};
-
-struct redir_vec {
-    struct redir_spec *items;
-    size_t len;
-};
-
 struct word_vec {
     char **items;
     size_t len;
@@ -65,17 +45,6 @@ struct env_restore {
 
 struct env_restore_vec {
     struct env_restore *items;
-    size_t len;
-};
-
-struct fd_backup {
-    int fd;
-    int saved_fd;
-    bool was_open;
-};
-
-struct fd_backup_vec {
-    struct fd_backup *items;
     size_t len;
 };
 
@@ -147,17 +116,6 @@ static void free_string_vec(char **vec, size_t len) {
     free(vec);
 }
 
-static void redir_vec_free(struct redir_vec *redirs) {
-    size_t i;
-
-    for (i = 0; i < redirs->len; i++) {
-        free(redirs->items[i].path);
-    }
-    free(redirs->items);
-    redirs->items = NULL;
-    redirs->len = 0;
-}
-
 static void word_vec_free(struct word_vec *words) {
     free(words->items);
     words->items = NULL;
@@ -180,61 +138,6 @@ static int word_vec_push(struct word_vec *words, char *word) {
     words->items = xrealloc(words->items, sizeof(*words->items) * (words->len + 1));
     words->items[words->len++] = word;
     return 0;
-}
-
-static int redir_vec_push(struct redir_vec *redirs, const struct redir_spec *spec) {
-    redirs->items = xrealloc(redirs->items, sizeof(*redirs->items) * (redirs->len + 1));
-    redirs->items[redirs->len++] = *spec;
-    return 0;
-}
-
-static int fd_backup_save(struct fd_backup_vec *backups, int fd) {
-    size_t i;
-    struct fd_backup b;
-
-    for (i = 0; i < backups->len; i++) {
-        if (backups->items[i].fd == fd) {
-            return 0;
-        }
-    }
-
-    b.fd = fd;
-    b.saved_fd = fcntl(fd, F_DUPFD, 10);
-    if (b.saved_fd < 0) {
-        if (errno != EBADF) {
-            perror("dup");
-            return -1;
-        }
-        b.was_open = false;
-    } else {
-        b.was_open = true;
-    }
-
-    backups->items = xrealloc(backups->items, sizeof(*backups->items) * (backups->len + 1));
-    backups->items[backups->len++] = b;
-    return 0;
-}
-
-static void fd_backup_restore(struct fd_backup_vec *backups) {
-    size_t i;
-
-    for (i = backups->len; i > 0; i--) {
-        struct fd_backup *b;
-
-        b = &backups->items[i - 1];
-        if (b->was_open) {
-            if (dup2(b->saved_fd, b->fd) < 0) {
-                perror("dup2");
-            }
-            close(b->saved_fd);
-        } else {
-            close(b->fd);
-        }
-    }
-
-    free(backups->items);
-    backups->items = NULL;
-    backups->len = 0;
 }
 
 static char *strip_comments(const char *src) {
@@ -844,123 +747,6 @@ static bool ignore_helper_function_declaration(const char *source) {
     return keyword_boundary(source[i + 14]);
 }
 
-static int parse_fd_text(const char *text, int *fd_out) {
-    size_t i;
-    int value;
-
-    if (text[0] == '\0') {
-        return -1;
-    }
-
-    value = 0;
-    for (i = 0; text[i] != '\0'; i++) {
-        if (!isdigit((unsigned char)text[i])) {
-            return -1;
-        }
-        value = value * 10 + (text[i] - '0');
-    }
-
-    *fd_out = value;
-    return 0;
-}
-
-static int parse_dup_operand(const char *text, struct redir_spec *spec) {
-    int fd;
-
-    if (strcmp(text, "-") == 0) {
-        spec->kind = REDIR_CLOSE;
-        spec->source_fd = -1;
-        return 0;
-    }
-
-    if (parse_fd_text(text, &fd) != 0) {
-        return -1;
-    }
-
-    spec->source_fd = fd;
-    return 0;
-}
-
-static int parse_redir_token(const char *token, struct redir_spec *spec, bool *needs_word) {
-    size_t pos;
-    int fd;
-    bool have_fd;
-    const char *rest;
-
-    spec->kind = REDIR_OPEN_READ;
-    spec->target_fd = 0;
-    spec->source_fd = -1;
-    spec->path = NULL;
-    *needs_word = false;
-
-    pos = 0;
-    fd = 0;
-    have_fd = false;
-    while (isdigit((unsigned char)token[pos])) {
-        have_fd = true;
-        fd = fd * 10 + (token[pos] - '0');
-        pos++;
-    }
-
-    if (token[pos] == '\0' || (token[pos] != '<' && token[pos] != '>')) {
-        return 0;
-    }
-
-    if (token[pos] == '<') {
-        if (token[pos + 1] == '&') {
-            spec->kind = REDIR_DUP_IN;
-            pos += 2;
-        } else {
-            spec->kind = REDIR_OPEN_READ;
-            pos += 1;
-        }
-    } else {
-        if (token[pos + 1] == '>') {
-            spec->kind = REDIR_OPEN_APPEND;
-            pos += 2;
-        } else if (token[pos + 1] == '|') {
-            /* Treat >| as truncate for now; noclobber policy is deferred. */
-            spec->kind = REDIR_OPEN_WRITE;
-            pos += 2;
-        } else if (token[pos + 1] == '&') {
-            spec->kind = REDIR_DUP_OUT;
-            pos += 2;
-        } else {
-            spec->kind = REDIR_OPEN_WRITE;
-            pos += 1;
-        }
-    }
-
-    if (have_fd) {
-        spec->target_fd = fd;
-    } else if (spec->kind == REDIR_OPEN_READ || spec->kind == REDIR_DUP_IN) {
-        spec->target_fd = STDIN_FILENO;
-    } else {
-        spec->target_fd = STDOUT_FILENO;
-    }
-
-    rest = token + pos;
-    if (spec->kind == REDIR_DUP_IN || spec->kind == REDIR_DUP_OUT) {
-        if (*rest == '\0') {
-            *needs_word = true;
-            return 1;
-        }
-        if (parse_dup_operand(rest, spec) != 0) {
-            posish_errorf("invalid file descriptor redirection: %s", token);
-            return -1;
-        }
-        return 1;
-    }
-
-    if (*rest == '\0') {
-        *needs_word = true;
-        return 1;
-    }
-
-    spec->path = arena_xstrdup(rest);
-    return 1;
-}
-
 static int collect_words_and_redirs(const struct token_vec *expanded, struct word_vec *words,
                                     struct redir_vec *redirs) {
     size_t i;
@@ -1003,70 +789,6 @@ static int collect_words_and_redirs(const struct token_vec *expanded, struct wor
         }
 
         redir_vec_push(redirs, &spec);
-    }
-
-    return 0;
-}
-
-static int apply_one_redirection(const struct redir_spec *redir) {
-    int opened_fd;
-
-    opened_fd = -1;
-    if (redir->kind == REDIR_OPEN_READ) {
-        opened_fd = open(redir->path, O_RDONLY);
-    } else if (redir->kind == REDIR_OPEN_WRITE) {
-        opened_fd = open(redir->path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    } else if (redir->kind == REDIR_OPEN_APPEND) {
-        opened_fd = open(redir->path, O_WRONLY | O_CREAT | O_APPEND, 0666);
-    }
-
-    if (opened_fd >= 0) {
-        if (opened_fd != redir->target_fd) {
-            if (dup2(opened_fd, redir->target_fd) < 0) {
-                perror("dup2");
-                close(opened_fd);
-                return 1;
-            }
-            close(opened_fd);
-        }
-        return 0;
-    }
-
-    if (redir->kind == REDIR_OPEN_READ || redir->kind == REDIR_OPEN_WRITE ||
-        redir->kind == REDIR_OPEN_APPEND) {
-        perror(redir->path);
-        return 1;
-    }
-
-    if (redir->kind == REDIR_DUP_IN || redir->kind == REDIR_DUP_OUT) {
-        if (dup2(redir->source_fd, redir->target_fd) < 0) {
-            perror("dup2");
-            return 1;
-        }
-        return 0;
-    }
-
-    if (close(redir->target_fd) != 0 && errno != EBADF) {
-        perror("close");
-        return 1;
-    }
-    return 0;
-}
-
-static int apply_redirections(const struct redir_vec *redirs, bool save_restore,
-                              struct fd_backup_vec *backups) {
-    size_t i;
-
-    for (i = 0; i < redirs->len; i++) {
-        if (save_restore) {
-            if (fd_backup_save(backups, redirs->items[i].target_fd) != 0) {
-                return 1;
-            }
-        }
-
-        if (apply_one_redirection(&redirs->items[i]) != 0) {
-            return 1;
-        }
     }
 
     return 0;
