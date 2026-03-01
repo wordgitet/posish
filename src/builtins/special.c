@@ -83,6 +83,7 @@ static bool is_regular_builtin_name(const char *name) {
     static const char *const words[] = {"cd",      "true",      "false",
                                         "test",    "[",         "kill",
                                         "wait",    "fg",        "bg",
+                                        "umask",
                                         "alias",
                                         "unalias", "echoraw",   "bracket",
                                         "make_command"};
@@ -106,6 +107,24 @@ static bool has_shell_function(const struct shell_state *state,
         }
     }
     return false;
+}
+
+static int remove_shell_function(struct shell_state *state, const char *name) {
+    size_t i;
+
+    for (i = 0; i < state->function_count; i++) {
+        if (strcmp(state->functions[i].name, name) == 0) {
+            free(state->functions[i].name);
+            free(state->functions[i].body);
+            if (i + 1 < state->function_count) {
+                memmove(&state->functions[i], &state->functions[i + 1],
+                        sizeof(*state->functions) * (state->function_count - (i + 1)));
+            }
+            state->function_count--;
+            return 0;
+        }
+    }
+    return 0;
 }
 
 static char *xstrdup_local(const char *s) {
@@ -825,14 +844,65 @@ static int print_readonly_variables(const struct shell_state *state) {
 }
 
 static int builtin_unset(struct shell_state *state, char *const argv[]) {
+    enum unset_mode {
+        UNSET_VARIABLE,
+        UNSET_FUNCTION
+    };
     size_t i;
+    enum unset_mode mode;
     int status;
 
+    mode = UNSET_VARIABLE;
+    i = 1;
+    while (argv[i] != NULL) {
+        size_t j;
+
+        if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
+        }
+        if (argv[i][0] != '-' || argv[i][1] == '\0') {
+            break;
+        }
+        for (j = 1; argv[i][j] != '\0'; j++) {
+            if (argv[i][j] == 'f') {
+                mode = UNSET_FUNCTION;
+            } else if (argv[i][j] == 'v') {
+                mode = UNSET_VARIABLE;
+            } else {
+                posish_errorf("unset: invalid option: -%c", argv[i][j]);
+                if (!state->interactive) {
+                    state->should_exit = true;
+                    state->exit_status = 2;
+                }
+                return 2;
+            }
+        }
+        i++;
+    }
+
     status = 0;
-    for (i = 1; argv[i] != NULL; i++) {
-        if (vars_unset(state, argv[i]) != 0) {
+    for (; argv[i] != NULL; i++) {
+        int rc;
+
+        if (mode == UNSET_FUNCTION) {
+            if (!vars_is_name_valid(argv[i])) {
+                posish_errorf("unset: invalid function name: %s", argv[i]);
+                status = 1;
+                continue;
+            }
+            rc = remove_shell_function(state, argv[i]);
+        } else {
+            rc = vars_unset(state, argv[i]);
+        }
+        if (rc != 0) {
             status = 1;
         }
+    }
+
+    if (status != 0 && !state->interactive) {
+        state->should_exit = true;
+        state->exit_status = status;
     }
     return status;
 }

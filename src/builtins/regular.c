@@ -76,6 +76,268 @@ static int builtin_cd(char *const argv[]) {
     return 0;
 }
 
+static int parse_octal_umask(const char *text, mode_t *mask_out) {
+    char *end;
+    unsigned long value;
+
+    if (text == NULL || text[0] == '\0') {
+        return -1;
+    }
+
+    errno = 0;
+    value = strtoul(text, &end, 8);
+    if (errno != 0 || *end != '\0' || value > 0777UL) {
+        return -1;
+    }
+
+    *mask_out = (mode_t)value;
+    return 0;
+}
+
+static mode_t who_mask_for_class(char cls) {
+    if (cls == 'u') {
+        return 0700;
+    }
+    if (cls == 'g') {
+        return 0070;
+    }
+    return 0007;
+}
+
+static unsigned mode_triplet(mode_t mode, char cls) {
+    if (cls == 'u') {
+        return (unsigned)((mode >> 6) & 07);
+    }
+    if (cls == 'g') {
+        return (unsigned)((mode >> 3) & 07);
+    }
+    return (unsigned)(mode & 07);
+}
+
+static mode_t copy_triplet_to_targets(unsigned triplet, mode_t who) {
+    mode_t bits;
+
+    bits = 0;
+    if ((who & 0700) != 0) {
+        bits |= (mode_t)(triplet << 6);
+    }
+    if ((who & 0070) != 0) {
+        bits |= (mode_t)(triplet << 3);
+    }
+    if ((who & 0007) != 0) {
+        bits |= (mode_t)triplet;
+    }
+    return bits;
+}
+
+static mode_t perm_bits_for_targets(mode_t who, char perm) {
+    mode_t bits;
+
+    bits = 0;
+    if (perm == 'r') {
+        if ((who & 0700) != 0) {
+            bits |= 0400;
+        }
+        if ((who & 0070) != 0) {
+            bits |= 0040;
+        }
+        if ((who & 0007) != 0) {
+            bits |= 0004;
+        }
+        return bits;
+    }
+    if (perm == 'w') {
+        if ((who & 0700) != 0) {
+            bits |= 0200;
+        }
+        if ((who & 0070) != 0) {
+            bits |= 0020;
+        }
+        if ((who & 0007) != 0) {
+            bits |= 0002;
+        }
+        return bits;
+    }
+    if ((who & 0700) != 0) {
+        bits |= 0100;
+    }
+    if ((who & 0070) != 0) {
+        bits |= 0010;
+    }
+    if ((who & 0007) != 0) {
+        bits |= 0001;
+    }
+    return bits;
+}
+
+static int parse_symbolic_umask(const char *spec, mode_t *mask_out) {
+    const char *p;
+    mode_t mode;
+
+    if (spec == NULL || spec[0] == '\0') {
+        return -1;
+    }
+
+    p = spec;
+    mode = (mode_t)(~(*mask_out) & 0777);
+    while (*p != '\0') {
+        mode_t who;
+        bool have_who;
+
+        who = 0;
+        have_who = false;
+        while (*p == 'u' || *p == 'g' || *p == 'o' || *p == 'a') {
+            have_who = true;
+            if (*p == 'a') {
+                who |= 0777;
+            } else {
+                who |= who_mask_for_class(*p);
+            }
+            p++;
+        }
+        if (!have_who) {
+            who = 0777;
+        }
+
+        if (*p != '+' && *p != '-' && *p != '=') {
+            return -1;
+        }
+
+        while (*p == '+' || *p == '-' || *p == '=') {
+            char op;
+            mode_t bits;
+
+            op = *p++;
+            bits = 0;
+            while (*p != '\0' && *p != ',' && *p != '+' && *p != '-' &&
+                   *p != '=') {
+                char ch;
+
+                ch = *p++;
+                if (ch == 'r' || ch == 'w' || ch == 'x') {
+                    bits |= perm_bits_for_targets(who, ch);
+                } else if (ch == 'u' || ch == 'g' || ch == 'o') {
+                    bits |= copy_triplet_to_targets(mode_triplet(mode, ch), who);
+                } else {
+                    return -1;
+                }
+            }
+
+            if (op == '=') {
+                mode &= (mode_t)~who;
+                mode |= (bits & who);
+            } else if (op == '+') {
+                mode |= bits;
+            } else {
+                mode &= (mode_t)~bits;
+            }
+        }
+
+        if (*p == ',') {
+            p++;
+            if (*p == '\0') {
+                return -1;
+            }
+            continue;
+        }
+        if (*p != '\0') {
+            return -1;
+        }
+    }
+
+    *mask_out = (mode_t)(~mode & 0777);
+    return 0;
+}
+
+static void append_symbolic_triplet(char *buf, size_t *offset, unsigned triplet) {
+    if ((triplet & 04) != 0) {
+        buf[(*offset)++] = 'r';
+    }
+    if ((triplet & 02) != 0) {
+        buf[(*offset)++] = 'w';
+    }
+    if ((triplet & 01) != 0) {
+        buf[(*offset)++] = 'x';
+    }
+}
+
+static void print_umask_symbolic(mode_t mask) {
+    mode_t mode;
+    char out[64];
+    size_t off;
+
+    mode = (mode_t)(~mask & 0777);
+    off = 0;
+    out[off++] = 'u';
+    out[off++] = '=';
+    append_symbolic_triplet(out, &off, mode_triplet(mode, 'u'));
+    out[off++] = ',';
+    out[off++] = 'g';
+    out[off++] = '=';
+    append_symbolic_triplet(out, &off, mode_triplet(mode, 'g'));
+    out[off++] = ',';
+    out[off++] = 'o';
+    out[off++] = '=';
+    append_symbolic_triplet(out, &off, mode_triplet(mode, 'o'));
+    out[off] = '\0';
+    puts(out);
+}
+
+static int builtin_umask(char *const argv[]) {
+    size_t i;
+    bool symbolic;
+    const char *operand;
+    mode_t current_mask;
+    mode_t new_mask;
+
+    i = 1;
+    symbolic = false;
+    while (argv[i] != NULL) {
+        if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
+        }
+        if (strcmp(argv[i], "-S") == 0) {
+            symbolic = true;
+            i++;
+            continue;
+        }
+        if (argv[i][0] == '-' && argv[i][1] != '\0') {
+            posish_errorf("umask: invalid option: %s", argv[i]);
+            return 2;
+        }
+        break;
+    }
+
+    operand = argv[i];
+    if (operand != NULL && argv[i + 1] != NULL) {
+        posish_errorf("umask: too many operands");
+        return 1;
+    }
+
+    current_mask = umask(0);
+    umask(current_mask);
+
+    if (operand == NULL) {
+        if (symbolic) {
+            print_umask_symbolic(current_mask);
+        } else {
+            printf("%03o\n", (unsigned)(current_mask & 0777));
+        }
+        return 0;
+    }
+
+    new_mask = current_mask;
+    if (parse_octal_umask(operand, &new_mask) != 0 &&
+        parse_symbolic_umask(operand, &new_mask) != 0) {
+        posish_errorf("umask: invalid mode: %s", operand);
+        return 1;
+    }
+
+    umask(new_mask);
+    return 0;
+}
+
 static int run_utility(char *const argv[]) {
     int status;
     pid_t pid;
@@ -836,6 +1098,10 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
         *handled = true;
         return builtin_bg(state, argv);
     }
+    if (strcmp(argv[0], "umask") == 0) {
+        *handled = true;
+        return builtin_umask(argv);
+    }
     if (strcmp(argv[0], "alias") == 0) {
         *handled = true;
         return builtin_alias(argv);
@@ -865,6 +1131,7 @@ bool builtin_is_name(const char *name) {
     static const char *const regular_names[] = {"cd",       "true",        "false",
                                                 "test",     "[",           "kill",
                                                 "wait",     "fg",          "bg",
+                                                "umask",
                                                 "alias",    "unalias",     "echoraw",
                                                 "bracket",  "make_command"};
     size_t i;

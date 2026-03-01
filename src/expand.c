@@ -326,152 +326,238 @@ static int append_parameter(const char *name, size_t nlen,
   return 0;
 }
 
+static int append_expanded_fragment(const char *expr, size_t start, size_t elen,
+                                    struct shell_state *state, char **buf,
+                                    size_t *len, size_t *cap) {
+  char *expanded_word;
+  size_t wlen;
+  char *word;
+  int rc;
+
+  wlen = elen - start;
+  word = arena_xmalloc(wlen + 1);
+  memcpy(word, expr + start, wlen);
+  word[wlen] = '\0';
+
+  rc = expand_token(word, state, &expanded_word);
+  if (rc != 0) {
+    free(word);
+    return -1;
+  }
+
+  append_str(buf, len, cap, expanded_word);
+  free(expanded_word);
+  free(word);
+  return 0;
+}
+
+static int expand_fragment_to_string(const char *expr, size_t start, size_t elen,
+                                     struct shell_state *state, char **out) {
+  size_t wlen;
+  char *word;
+  int rc;
+
+  wlen = elen - start;
+  word = arena_xmalloc(wlen + 1);
+  memcpy(word, expr + start, wlen);
+  word[wlen] = '\0';
+
+  rc = expand_token(word, state, out);
+  free(word);
+  return rc;
+}
+
 static int append_braced_parameter(const char *expr, size_t elen,
                                    struct shell_state *state, char **buf,
                                    size_t *len, size_t *cap) {
+  enum braced_op {
+    BRACED_NONE,
+    BRACED_MINUS,
+    BRACED_COLON_MINUS,
+    BRACED_PLUS,
+    BRACED_COLON_PLUS,
+    BRACED_ASSIGN,
+    BRACED_COLON_ASSIGN,
+    BRACED_PERCENT
+  };
+  enum braced_op op;
+  size_t op_pos;
   size_t i;
+  size_t name_len;
+  char *name;
+  const char *value;
+  bool is_set;
+  bool is_nonempty;
+  size_t word_start;
 
-  for (i = 0; i + 1 < elen; i++) {
-    if (expr[i] == ':' && expr[i + 1] == '+') {
-      size_t name_len;
-      char *name;
-      const char *value;
-      bool set_nonempty;
-      char *word;
-      char *expanded_word;
-
-      name_len = i;
-      name = arena_xmalloc(name_len + 1);
-      memcpy(name, expr, name_len);
-      name[name_len] = '\0';
-
-      value = getenv(name);
-      set_nonempty = value != NULL && value[0] != '\0';
-      if (set_nonempty) {
-        size_t wlen;
-
-        wlen = elen - (i + 2);
-        word = arena_xmalloc(wlen + 1);
-        memcpy(word, expr + i + 2, wlen);
-        word[wlen] = '\0';
-
-        if (expand_token(word, state, &expanded_word) != 0) {
-          free(word);
-          free(name);
-          return -1;
-        }
-        append_str(buf, len, cap, expanded_word);
-        free(expanded_word);
-        free(word);
-      }
-      free(name);
-      return 0;
-    }
-  }
-
+  op = BRACED_NONE;
+  op_pos = 0;
+  /* Parse the first operator token; `:-`, `:+`, and `:=` take precedence. */
   for (i = 0; i < elen; i++) {
-    if (expr[i] == '=') {
-      size_t name_len;
-      char *name;
-      const char *value;
-      size_t wlen;
-      char *word;
-      char *expanded_word;
-
-      name_len = i;
-      name = arena_xmalloc(name_len + 1);
-      memcpy(name, expr, name_len);
-      name[name_len] = '\0';
-
-      if (!vars_is_name_valid(name)) {
-        free(name);
+    if (expr[i] == ':' && i + 1 < elen) {
+      if (expr[i + 1] == '-') {
+        op = BRACED_COLON_MINUS;
+        op_pos = i;
         break;
       }
-
-      value = getenv(name);
-      if (value == NULL) {
-        wlen = elen - (i + 1);
-        word = arena_xmalloc(wlen + 1);
-        memcpy(word, expr + i + 1, wlen);
-        word[wlen] = '\0';
-
-        if (expand_token(word, state, &expanded_word) != 0) {
-          free(word);
-          free(name);
-          return -1;
-        }
-        if (vars_set(state, name, expanded_word, true) != 0) {
-          free(expanded_word);
-          free(word);
-          free(name);
-          return -1;
-        }
-        free(expanded_word);
-        free(word);
-        value = getenv(name);
+      if (expr[i + 1] == '+') {
+        op = BRACED_COLON_PLUS;
+        op_pos = i;
+        break;
       }
-
-      if (value != NULL) {
-        append_str(buf, len, cap, value);
+      if (expr[i + 1] == '=') {
+        op = BRACED_COLON_ASSIGN;
+        op_pos = i;
+        break;
       }
-      free(name);
-      return 0;
+    }
+    if (expr[i] == '-') {
+      op = BRACED_MINUS;
+      op_pos = i;
+      break;
+    }
+    if (expr[i] == '+') {
+      op = BRACED_PLUS;
+      op_pos = i;
+      break;
+    }
+    if (expr[i] == '=') {
+      op = BRACED_ASSIGN;
+      op_pos = i;
+      break;
+    }
+    if (expr[i] == '%') {
+      op = BRACED_PERCENT;
+      op_pos = i;
+      break;
     }
   }
 
-  for (i = 0; i < elen; i++) {
-    if (expr[i] == '%') {
-      size_t name_len;
-      char *name;
-      const char *value;
-      size_t plen;
-      char *pattern;
-      char *expanded_pattern;
-      size_t vlen;
-      size_t eplen;
+  if (op == BRACED_NONE) {
+    return append_parameter(expr, elen, state, buf, len, cap);
+  }
 
-      name_len = i;
-      name = arena_xmalloc(name_len + 1);
-      memcpy(name, expr, name_len);
-      name[name_len] = '\0';
-      value = getenv(name);
-      if (value == NULL) {
-        value = "";
-      }
+  name_len = op_pos;
+  name = arena_xmalloc(name_len + 1);
+  memcpy(name, expr, name_len);
+  name[name_len] = '\0';
 
-      plen = elen - (i + 1);
-      pattern = arena_xmalloc(plen + 1);
-      memcpy(pattern, expr + i + 1, plen);
-      pattern[plen] = '\0';
+  value = getenv(name);
+  is_set = value != NULL;
+  is_nonempty = value != NULL && value[0] != '\0';
 
-      if (expand_token(pattern, state, &expanded_pattern) != 0) {
-        free(pattern);
+  if (op == BRACED_MINUS || op == BRACED_COLON_MINUS) {
+    bool use_default;
+
+    word_start = op == BRACED_COLON_MINUS ? op_pos + 2 : op_pos + 1;
+    use_default = op == BRACED_COLON_MINUS ? !is_nonempty : !is_set;
+    if (use_default) {
+      i = append_expanded_fragment(expr, word_start, elen, state, buf, len, cap);
+      free(name);
+      return i;
+    }
+    if (is_set) {
+      append_str(buf, len, cap, value);
+    }
+    free(name);
+    return 0;
+  }
+
+  if (op == BRACED_PLUS || op == BRACED_COLON_PLUS) {
+    bool use_alternate;
+
+    word_start = op == BRACED_COLON_PLUS ? op_pos + 2 : op_pos + 1;
+    use_alternate = op == BRACED_COLON_PLUS ? is_nonempty : is_set;
+    if (use_alternate) {
+      i = append_expanded_fragment(expr, word_start, elen, state, buf, len, cap);
+      free(name);
+      return i;
+    }
+    free(name);
+    return 0;
+  }
+
+  if (op == BRACED_ASSIGN || op == BRACED_COLON_ASSIGN) {
+    bool should_assign;
+
+    if (!vars_is_name_valid(name)) {
+      free(name);
+      return append_parameter(expr, elen, state, buf, len, cap);
+    }
+
+    word_start = op == BRACED_COLON_ASSIGN ? op_pos + 2 : op_pos + 1;
+    should_assign = op == BRACED_COLON_ASSIGN ? !is_nonempty : !is_set;
+    if (should_assign) {
+      char *expanded_word;
+      int rc;
+
+      rc = expand_fragment_to_string(expr, word_start, elen, state,
+                                     &expanded_word);
+      if (rc != 0) {
         free(name);
         return -1;
       }
-
-      vlen = strlen(value);
-      eplen = strlen(expanded_pattern);
-      if (eplen > 0 && vlen >= eplen &&
-          strcmp(value + (vlen - eplen), expanded_pattern) == 0) {
-        char *trimmed;
-
-        trimmed = arena_xmalloc(vlen - eplen + 1);
-        memcpy(trimmed, value, vlen - eplen);
-        trimmed[vlen - eplen] = '\0';
-        append_str(buf, len, cap, trimmed);
-        free(trimmed);
-      } else {
-        append_str(buf, len, cap, value);
+      rc = vars_set(state, name, expanded_word, true);
+      free(expanded_word);
+      if (rc != 0) {
+        free(name);
+        return -1;
       }
-
-      free(expanded_pattern);
-      free(pattern);
-      free(name);
-      return 0;
+      value = getenv(name);
     }
+    if (value != NULL) {
+      append_str(buf, len, cap, value);
+    }
+    free(name);
+    return 0;
   }
 
+  if (op == BRACED_PERCENT) {
+    size_t pattern_start;
+    char *pattern;
+    char *expanded_pattern;
+    size_t plen;
+    size_t vlen;
+    size_t eplen;
+
+    pattern_start = op_pos + 1;
+    if (value == NULL) {
+      value = "";
+    }
+
+    plen = elen - pattern_start;
+    pattern = arena_xmalloc(plen + 1);
+    memcpy(pattern, expr + pattern_start, plen);
+    pattern[plen] = '\0';
+
+    if (expand_token(pattern, state, &expanded_pattern) != 0) {
+      free(pattern);
+      free(name);
+      return -1;
+    }
+
+    vlen = strlen(value);
+    eplen = strlen(expanded_pattern);
+    if (eplen > 0 && vlen >= eplen &&
+        strcmp(value + (vlen - eplen), expanded_pattern) == 0) {
+      char *trimmed;
+
+      trimmed = arena_xmalloc(vlen - eplen + 1);
+      memcpy(trimmed, value, vlen - eplen);
+      trimmed[vlen - eplen] = '\0';
+      append_str(buf, len, cap, trimmed);
+      free(trimmed);
+    } else {
+      append_str(buf, len, cap, value);
+    }
+
+    free(expanded_pattern);
+    free(pattern);
+    free(name);
+    return 0;
+  }
+
+  free(name);
   return append_parameter(expr, elen, state, buf, len, cap);
 }
 
