@@ -265,8 +265,12 @@ static bool heredoc_needs_more_input(const char *buf, size_t len) {
 static int needs_more_input(char *buf, size_t *len) {
     size_t i;
     int quote;
+    int paren_depth;
+    int brace_depth;
 
     quote = 0;
+    paren_depth = 0;
+    brace_depth = 0;
     i = 0;
     while (i < *len) {
         char ch;
@@ -293,6 +297,26 @@ static int needs_more_input(char *buf, size_t *len) {
                 i += 2;
                 continue;
             }
+            if (ch == '(') {
+                paren_depth++;
+                i++;
+                continue;
+            }
+            if (ch == ')' && paren_depth > 0) {
+                paren_depth--;
+                i++;
+                continue;
+            }
+            if (ch == '{') {
+                brace_depth++;
+                i++;
+                continue;
+            }
+            if (ch == '}' && brace_depth > 0) {
+                brace_depth--;
+                i++;
+                continue;
+            }
             i++;
             continue;
         }
@@ -316,6 +340,25 @@ static int needs_more_input(char *buf, size_t *len) {
 
     if (quote != 0) {
         return 1;
+    }
+    if (paren_depth > 0 || brace_depth > 0) {
+        return 1;
+    }
+    {
+        size_t end;
+
+        end = *len;
+        while (end > 0 && isspace((unsigned char)buf[end - 1])) {
+            end--;
+        }
+        if (end > 0) {
+            if (buf[end - 1] == '|') {
+                return 1;
+            }
+            if (buf[end - 1] == '&' && end >= 2 && buf[end - 2] == '&') {
+                return 1;
+            }
+        }
     }
     return heredoc_needs_more_input(buf, *len) ? 1 : 0;
 }

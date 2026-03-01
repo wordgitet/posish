@@ -20,7 +20,10 @@ Status: `active`
 Notes:
 
 - Active blockers (from 2026-02-28 fulltruth rebaseline):
-  - `command-p.tst:12` (`dot script not found does not kill shell`)
-  - `kill4-p.tst` (abort path near testcase line 13, `sending signal to process 0`)
+  - `kill4-p.tst` remains failing (no longer aborting at line 13):
+    - line 20 / 30: timeout + missing `HUP` with stderr `(: No such file or directory`
+      and `kill: (-<pgid>): No such process`
+    - line 44 / 61: timeout + missing expected job-signal output with stderr
+      `halt(): No such file or directory`, `do: ...`, `done: ...`
 - Previously tracked async/grouping/wait blocker lines are now green in current
   reruns and were removed from this file.

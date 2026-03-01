@@ -6,6 +6,7 @@
 
 struct tracked_job {
     pid_t pid;
+    pid_t pgid;
     unsigned int job_id;
     unsigned long serial;
     bool stopped;
@@ -93,7 +94,8 @@ static void touch_job(struct tracked_job *job) {
     }
 }
 
-static struct tracked_job *add_job(pid_t pid, const char *command, bool stopped) {
+static struct tracked_job *add_job(pid_t pid, pid_t pgid, const char *command,
+                                   bool stopped) {
     struct tracked_job *new_jobs;
     struct tracked_job *job;
 
@@ -105,6 +107,7 @@ static struct tracked_job *add_job(pid_t pid, const char *command, bool stopped)
 
     job = &g_jobs[g_job_count];
     job->pid = pid;
+    job->pgid = pgid > 0 ? pgid : pid;
     job->job_id = g_next_job_id++;
     job->serial = g_next_serial++;
     job->stopped = stopped;
@@ -136,6 +139,7 @@ static bool fill_info_from_job(const struct tracked_job *job,
     }
 
     out->pid = job->pid;
+    out->pgid = job->pgid;
     out->job_id = job->job_id;
     out->command = job->command;
     out->stopped = job->stopped;
@@ -186,7 +190,7 @@ void jobs_destroy(void) {
     g_next_serial = 1;
 }
 
-void jobs_track_async(pid_t pid, const char *command) {
+void jobs_track_async(pid_t pid, pid_t pgid, const char *command) {
     struct tracked_job *job;
 
     if (pid <= 0) {
@@ -195,17 +199,21 @@ void jobs_track_async(pid_t pid, const char *command) {
 
     job = find_job(pid);
     if (job == NULL) {
-        job = add_job(pid, command, false);
+        job = add_job(pid, pgid, command, false);
         if (job == NULL) {
             return;
         }
     } else {
         job->stopped = false;
+        if (pgid > 0) {
+            job->pgid = pgid;
+        }
         set_job_command(job, command);
         touch_job(job);
     }
 
-    trace_log(POSISH_TRACE_JOBS, "track async pid=%ld command=%s", (long)pid,
+    trace_log(POSISH_TRACE_JOBS, "track async pid=%ld pgid=%ld command=%s",
+              (long)pid, (long)job->pgid,
               job->command == NULL ? "<none>" : job->command);
 }
 
@@ -253,26 +261,30 @@ pid_t jobs_resolve_spec(const char *spec) {
     return info.pid;
 }
 
-void jobs_note_stopped(pid_t pid) {
-    jobs_note_stopped_with_command(pid, NULL);
+void jobs_note_stopped(pid_t pid, pid_t pgid) {
+    jobs_note_stopped_with_command(pid, pgid, NULL);
 }
 
-void jobs_note_stopped_with_command(pid_t pid, const char *command) {
+void jobs_note_stopped_with_command(pid_t pid, pid_t pgid, const char *command) {
     struct tracked_job *job;
 
     if (pid > 0) {
         job = find_job(pid);
         if (job == NULL) {
-            job = add_job(pid, command, true);
+            job = add_job(pid, pgid, command, true);
             if (job == NULL) {
                 return;
             }
         } else {
             job->stopped = true;
+            if (pgid > 0) {
+                job->pgid = pgid;
+            }
             set_job_command(job, command);
             touch_job(job);
         }
-        trace_log(POSISH_TRACE_JOBS, "note stopped pid=%ld", (long)pid);
+        trace_log(POSISH_TRACE_JOBS, "note stopped pid=%ld pgid=%ld", (long)pid,
+                  (long)job->pgid);
     }
 }
 
@@ -294,8 +306,9 @@ bool jobs_get_current(bool stopped_only, struct jobs_entry_info *out) {
     ok = get_best_job(stopped_only, out);
     if (ok) {
         trace_log(POSISH_TRACE_JOBS,
-                  "current stopped_only=%d pid=%ld id=%u stopped=%d", stopped_only ? 1 : 0,
-                  (long)out->pid, out->job_id, out->stopped ? 1 : 0);
+                  "current stopped_only=%d pid=%ld pgid=%ld id=%u stopped=%d",
+                  stopped_only ? 1 : 0, (long)out->pid, (long)out->pgid,
+                  out->job_id, out->stopped ? 1 : 0);
     } else {
         trace_log(POSISH_TRACE_JOBS, "current stopped_only=%d <none>",
                   stopped_only ? 1 : 0);

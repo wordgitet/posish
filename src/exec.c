@@ -457,7 +457,7 @@ static bool word_starts_command_position(const char *source, size_t pos) {
             continue;
         }
         if (ch == '\n' || ch == ';' || ch == '&' || ch == '|' || ch == '(' ||
-            ch == '{') {
+            ch == ')' || ch == '{') {
             return true;
         }
         break;
@@ -486,6 +486,30 @@ static bool word_starts_command_position(const char *source, size_t pos) {
         }
     }
 
+    return false;
+}
+
+static bool newline_continues_command(const char *source, size_t pos) {
+    size_t i;
+
+    if (source[pos] != '\n') {
+        return false;
+    }
+
+    i = pos;
+    while (i > 0 && (source[i - 1] == ' ' || source[i - 1] == '\t')) {
+        i--;
+    }
+    if (i == 0) {
+        return false;
+    }
+
+    if (source[i - 1] == '|') {
+        return true;
+    }
+    if (source[i - 1] == '&' && i >= 2 && source[i - 2] == '&') {
+        return true;
+    }
     return false;
 }
 
@@ -737,8 +761,6 @@ static bool parse_function_definition(const char *source, char **name_out, char 
     size_t name_end;
     size_t body_start;
     size_t body_end;
-    int brace_depth;
-    char quote;
 
     i = 0;
     while (isspace((unsigned char)source[i])) {
@@ -771,58 +793,28 @@ static bool parse_function_definition(const char *source, char **name_out, char 
     while (isspace((unsigned char)source[i])) {
         i++;
     }
-    if (source[i] != '{') {
+    if (source[i] == '\0') {
         return false;
     }
 
-    body_start = i + 1;
-    brace_depth = 1;
-    quote = '\0';
-    for (i = i + 1; source[i] != '\0'; i++) {
-        char ch;
-
-        ch = source[i];
-        if (quote == '\0') {
-            if (ch == '\\' && source[i + 1] != '\0') {
-                i++;
-                continue;
-            }
-            if (ch == '\'' || ch == '"') {
-                quote = ch;
-                continue;
-            }
-            if (ch == '{') {
-                brace_depth++;
-            } else if (ch == '}') {
-                brace_depth--;
-                if (brace_depth == 0) {
-                    body_end = i;
-                    i++;
-                    while (isspace((unsigned char)source[i])) {
-                        i++;
-                    }
-                    if (source[i] != '\0') {
-                        return false;
-                    }
-                    *name_out = dup_trimmed_slice(source, name_start, name_end);
-                    *body_out = dup_trimmed_slice(source, body_start, body_end);
-                    return true;
-                }
-            }
-        } else if (quote == '\'' && ch == '\'') {
-            quote = '\0';
-        } else if (quote == '"') {
-            if (ch == '\\' && source[i + 1] != '\0') {
-                i++;
-                continue;
-            }
-            if (ch == '"') {
-                quote = '\0';
-            }
-        }
+    /*
+     * POSIX allows any compound command as a function body, not just brace
+     * groups. Keep the full trailing command text as the function body.
+     */
+    body_start = i;
+    body_end = strlen(source);
+    while (body_end > body_start &&
+           isspace((unsigned char)source[body_end - 1])) {
+        body_end--;
+    }
+    if (body_end <= body_start) {
+        return false;
     }
 
-    return false;
+    *name_out = dup_trimmed_slice(source, name_start, name_end);
+    *body_out = dup_trimmed_slice(source, body_start, body_end);
+    return true;
+
 }
 
 static bool has_pending_flow_control(const struct shell_state *state) {
@@ -1295,7 +1287,7 @@ static int run_external_argv(struct shell_state *state, char *const argv[],
         return WEXITSTATUS(status);
     }
     if (WIFSTOPPED(status)) {
-        jobs_note_stopped_with_command(pid, argv[0]);
+        jobs_note_stopped_with_command(pid, pid, argv[0]);
         trace_log(POSISH_TRACE_SIGNALS, "external pid=%ld stopped sig=%d",
                   (long)pid, WSTOPSIG(status));
         return 128 + WSTOPSIG(status);
@@ -1907,7 +1899,7 @@ static int run_subshell_command(struct shell_state *parent_state,
         return WEXITSTATUS(status);
     }
     if (WIFSTOPPED(status)) {
-        jobs_note_stopped_with_command(pid, source);
+        jobs_note_stopped_with_command(pid, pid, source);
         trace_log(POSISH_TRACE_SIGNALS, "subshell pid=%ld stopped sig=%d",
                   (long)pid, WSTOPSIG(status));
         return 128 + WSTOPSIG(status);
@@ -2022,7 +2014,7 @@ static int run_async_list(struct shell_state *state, const char *source) {
     }
 
     state->last_async_pid = pid;
-    jobs_track_async(pid, source);
+    jobs_track_async(pid, pid, source);
     trace_log(POSISH_TRACE_SIGNALS, "async list pid=%ld", (long)pid);
     return 0;
 }
@@ -2295,6 +2287,8 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
     char **commands;
     size_t cmd_len;
     pid_t *pids;
+    pid_t pipeline_pgid;
+    bool isolate_pipeline_pgid;
     int last_status;
     int in_fd;
 
@@ -2406,6 +2400,8 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
     }
 
     pids = arena_xmalloc(sizeof(*pids) * cmd_len);
+    pipeline_pgid = -1;
+    isolate_pipeline_pgid = state->monitor_mode && state->main_context;
     in_fd = -1;
 
     for (i = 0; i < cmd_len; i++) {
@@ -2439,6 +2435,20 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
         }
 
         if (pid == 0) {
+            if (isolate_pipeline_pgid) {
+                pid_t target_pgid;
+
+                /*
+                 * Top-level monitor mode keeps pipeline children in their own
+                 * process group so group-targeted signals do not hit the shell.
+                 */
+                target_pgid = (i == 0) ? 0 : pipeline_pgid;
+                if (setpgid(0, target_pgid) != 0 && errno != EACCES &&
+                    errno != ESRCH && errno != EPERM && errno != EINVAL) {
+                    _exit(1);
+                }
+            }
+
             if (in_fd >= 0) {
                 if (dup2(in_fd, STDIN_FILENO) < 0) {
                     perror("dup2");
@@ -2466,6 +2476,15 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
         }
 
         pids[i] = pid;
+        if (isolate_pipeline_pgid) {
+            if (pipeline_pgid <= 0) {
+                pipeline_pgid = pid;
+            }
+            if (setpgid(pid, pipeline_pgid) != 0 && errno != EACCES &&
+                errno != ESRCH && errno != EPERM && errno != EINVAL) {
+                /* keep running: parent/child setpgid races are non-fatal */
+            }
+        }
 
         if (in_fd >= 0) {
             close(in_fd);
@@ -2504,7 +2523,7 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
             if (WIFEXITED(wstatus)) {
                 last_status = WEXITSTATUS(wstatus);
             } else if (WIFSTOPPED(wstatus)) {
-                jobs_note_stopped_with_command(pids[i], commands[i]);
+                jobs_note_stopped_with_command(pids[i], pids[i], commands[i]);
                 last_status = 128 + WSTOPSIG(wstatus);
             } else if (WIFSIGNALED(wstatus)) {
                 last_status = 128 + WTERMSIG(wstatus);
@@ -2798,7 +2817,9 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                 brace_depth--;
             } else if (paren_depth == 0 && brace_depth == 0 &&
                        if_depth == 0 && case_depth == 0 && loop_depth == 0 &&
-                       (ch == ';' || ch == '\n' ||
+                       (ch == ';' ||
+                        (ch == '\n' &&
+                         !newline_continues_command(source, i)) ||
                         /*
                          * Treat only a control-operator '&' as async
                          * separator. Exclude '&&' and redirection forms

@@ -50,7 +50,7 @@ static bool word_starts_command_position(const char *source, size_t pos) {
             continue;
         }
         if (ch == '\n' || ch == ';' || ch == '&' || ch == '|' || ch == '(' ||
-            ch == '{') {
+            ch == ')' || ch == '{') {
             return true;
         }
         break;

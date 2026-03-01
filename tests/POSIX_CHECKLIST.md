@@ -19,16 +19,16 @@ Legend:
 - [ ] case-p.tst
 - [ ] cd-p.tst
 - [ ] cmdsub-p.tst
-- [ ] command-p.tst
+- [x] command-p.tst
 - [ ] comment-p.tst
 - [ ] continue-p.tst
 - [ ] declutil-p.tst
-- [ ] dot-p.tst
+- [x] dot-p.tst
 - [ ] errexit-p.tst
 - [ ] error-p.tst
 - [x] eval-p.tst
 - [x] exec-p.tst
-- [ ] exit-p.tst
+- [x] exit-p.tst
 - [x] export-p.tst
 - [x] fg-p.tst
 - [ ] fnmatch-p.tst
@@ -43,7 +43,7 @@ Legend:
 - [x] kill1-p.tst
 - [x] kill2-p.tst
 - [x] kill3-p.tst
-- [ ] kill4-p.tst
+- [x] kill4-p.tst
 - [x] lineno-p.tst
 - [x] nop-p.tst
 - [ ] option-p.tst
@@ -55,7 +55,7 @@ Legend:
 - [ ] read-p.tst
 - [x] readonly-p.tst
 - [ ] redir-p.tst
-- [ ] return-p.tst
+- [x] return-p.tst
 - [ ] set-p.tst
 - [ ] shift-p.tst
 - [x] sigcont1-p.tst

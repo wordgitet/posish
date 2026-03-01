@@ -177,10 +177,63 @@ static char *pid_to_string(pid_t pid) {
     return out;
 }
 
+static bool is_decimal_number(const char *text) {
+    size_t i;
+
+    if (text == NULL || text[0] == '\0') {
+        return false;
+    }
+    i = 0;
+    if (text[i] == '-') {
+        i++;
+    }
+    if (text[i] == '\0') {
+        return false;
+    }
+    for (; text[i] != '\0'; i++) {
+        if (!isdigit((unsigned char)text[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static size_t kill_operand_start(char *const argv[]) {
+    size_t i;
+
+    i = 1;
+    while (argv[i] != NULL) {
+        if (strcmp(argv[i], "--") == 0) {
+            return i + 1;
+        }
+        if (argv[i][0] != '-' || argv[i][1] == '\0') {
+            return i;
+        }
+        if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "-n") == 0) {
+            if (argv[i + 1] == NULL) {
+                return i + 1;
+            }
+            i += 2;
+            continue;
+        }
+        if (strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--list") == 0 ||
+            strncmp(argv[i], "--list=", 7) == 0) {
+            return i + 1;
+        }
+        i++;
+    }
+    return i;
+}
+
 static int builtin_kill(char *const argv[]) {
     size_t argc;
     size_t i;
     char **converted;
+    char **final_argv;
+    size_t final_argc;
+    size_t operand_start;
+    bool insert_double_dash;
+    bool had_jobspec;
     bool list_mode;
     int status;
 
@@ -194,6 +247,11 @@ static int builtin_kill(char *const argv[]) {
         perror("calloc");
         return 1;
     }
+    final_argv = NULL;
+    final_argc = argc;
+    operand_start = kill_operand_start(argv);
+    insert_double_dash = false;
+    had_jobspec = false;
 
     list_mode = false;
     for (i = 0; i < argc; i++) {
@@ -227,36 +285,69 @@ static int builtin_kill(char *const argv[]) {
         }
 
         if (argv[i][0] == '%') {
-            pid_t pid;
+            struct jobs_entry_info job;
             char *pid_text;
 
-            pid = jobs_resolve_spec(argv[i]);
-            if (pid <= 0) {
+            if (!jobs_get_by_spec(argv[i], &job) || job.pgid <= 0) {
                 posish_errorf("kill: no such job: %s", argv[i]);
                 status = 1;
                 goto done;
             }
 
-            pid_text = pid_to_string(pid);
+            pid_text = pid_to_string(-job.pgid);
             if (pid_text == NULL) {
                 perror("malloc");
                 status = 1;
                 goto done;
             }
             converted[i] = pid_text;
+            had_jobspec = true;
         } else {
             converted[i] = argv[i];
         }
     }
     converted[argc] = NULL;
 
-    status = run_utility(converted);
+    if (!list_mode && had_jobspec && operand_start < argc &&
+        converted[operand_start] != NULL &&
+        is_decimal_number(converted[operand_start]) &&
+        converted[operand_start][0] == '-') {
+        insert_double_dash = true;
+    }
+
+    if (insert_double_dash) {
+        size_t j;
+
+        final_argv = calloc(argc + 2, sizeof(*final_argv));
+        if (final_argv == NULL) {
+            perror("calloc");
+            status = 1;
+            goto done;
+        }
+        for (j = 0; j < operand_start; j++) {
+            final_argv[j] = converted[j];
+        }
+        final_argv[operand_start] = "--";
+        for (j = operand_start; j < argc; j++) {
+            final_argv[j + 1] = converted[j];
+        }
+        final_argv[argc + 1] = NULL;
+        final_argc = argc + 1;
+    }
+
+    status = run_utility(final_argv != NULL ? final_argv : converted);
 
 done:
     for (i = 0; i < argc; i++) {
         if (converted[i] != NULL && converted[i] != argv[i]) {
             free(converted[i]);
         }
+    }
+    if (final_argv != NULL) {
+        for (i = 0; i < final_argc; i++) {
+            final_argv[i] = NULL;
+        }
+        free(final_argv);
     }
     free(converted);
     return status;
@@ -523,10 +614,12 @@ static int wait_foreground_job(struct shell_state *state,
     bool transferred_tty;
     bool close_tty;
     pid_t shell_pgid;
+    pid_t job_pgid;
 
     transferred_tty = false;
     close_tty = false;
     shell_pgid = getpgrp();
+    job_pgid = job->pgid > 0 ? job->pgid : job->pid;
     tty_fd = -1;
     if (state->monitor_mode) {
         if (isatty(STDIN_FILENO)) {
@@ -544,13 +637,13 @@ static int wait_foreground_job(struct shell_state *state,
     }
 
     if (tty_fd >= 0) {
-        if (tcsetpgrp(tty_fd, job->pid) == 0) {
+        if (tcsetpgrp(tty_fd, job_pgid) == 0) {
             transferred_tty = true;
         }
     }
 
     jobs_mark_running(job->pid);
-    if (kill(job->pid, SIGCONT) != 0) {
+    if (kill(-job_pgid, SIGCONT) != 0) {
         if (transferred_tty) {
             (void)tcsetpgrp(tty_fd, shell_pgid);
         }
@@ -587,7 +680,7 @@ static int wait_foreground_job(struct shell_state *state,
     }
 
     if (WIFSTOPPED(status)) {
-        jobs_note_stopped_with_command(job->pid, job->command);
+        jobs_note_stopped_with_command(job->pid, job_pgid, job->command);
     } else {
         jobs_forget(job->pid);
     }
@@ -644,8 +737,11 @@ static int builtin_bg(struct shell_state *state, char *const argv[]) {
         }
 
         if (job.stopped) {
+            pid_t job_pgid;
+
+            job_pgid = job.pgid > 0 ? job.pgid : job.pid;
             jobs_mark_running(job.pid);
-            if (kill(job.pid, SIGCONT) != 0) {
+            if (kill(-job_pgid, SIGCONT) != 0) {
                 perror("bg");
                 return 1;
             }
@@ -670,8 +766,11 @@ static int builtin_bg(struct shell_state *state, char *const argv[]) {
         }
 
         if (job.stopped) {
+            pid_t job_pgid;
+
+            job_pgid = job.pgid > 0 ? job.pgid : job.pid;
             jobs_mark_running(job.pid);
-            if (kill(job.pid, SIGCONT) != 0) {
+            if (kill(-job_pgid, SIGCONT) != 0) {
                 perror("bg");
                 status = 1;
                 continue;
