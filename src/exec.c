@@ -174,9 +174,24 @@ static size_t source_line_at_offset(const char *source, size_t offset) {
 }
 
 static void set_lineno_for_command(const char *source, size_t start) {
+    const char *base_text;
+    char *end;
+    unsigned long base;
     char line_buf[32];
+    size_t line;
 
-    snprintf(line_buf, sizeof(line_buf), "%zu", source_line_at_offset(source, start));
+    base = 0;
+    base_text = getenv("POSISH_LINENO_BASE");
+    if (base_text != NULL && base_text[0] != '\0') {
+        errno = 0;
+        base = strtoul(base_text, &end, 10);
+        if (errno != 0 || end == base_text || *end != '\0') {
+            base = 0;
+        }
+    }
+
+    line = source_line_at_offset(source, start) + (size_t)base;
+    snprintf(line_buf, sizeof(line_buf), "%zu", line);
     (void)setenv("LINENO", line_buf, 1);
 }
 

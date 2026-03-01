@@ -271,6 +271,7 @@ static int needs_more_input(char *buf, size_t *len) {
     int quote;
     int paren_depth;
     int brace_depth;
+    int param_depth;
     int if_depth;
     int do_depth;
     int case_depth;
@@ -279,6 +280,7 @@ static int needs_more_input(char *buf, size_t *len) {
     quote = 0;
     paren_depth = 0;
     brace_depth = 0;
+    param_depth = 0;
     if_depth = 0;
     do_depth = 0;
     case_depth = 0;
@@ -307,6 +309,18 @@ static int needs_more_input(char *buf, size_t *len) {
             }
             if (ch == '\\' && i + 1 < *len) {
                 i += 2;
+                continue;
+            }
+            if (ch == '$' && i + 1 < *len && buf[i + 1] == '{') {
+                param_depth++;
+                command_position = false;
+                i += 2;
+                continue;
+            }
+            if (ch == '}' && param_depth > 0) {
+                param_depth--;
+                command_position = false;
+                i++;
                 continue;
             }
             if (isspace((unsigned char)ch)) {
@@ -463,6 +477,9 @@ static int needs_more_input(char *buf, size_t *len) {
         return 1;
     }
     if (paren_depth > 0 || brace_depth > 0) {
+        return 1;
+    }
+    if (param_depth > 0) {
         return 1;
     }
     if (if_depth > 0 || do_depth > 0 || case_depth > 0) {
@@ -811,6 +828,7 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
     bool secondary_prompt;
     bool line_mode_input;
     size_t line_no;
+    size_t command_start_line;
 
     line = NULL;
     cap = 0;
@@ -823,6 +841,7 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
         (!interactive && state->monitor_mode &&
          !state->explicit_non_interactive);
     line_no = 1;
+    command_start_line = 1;
     state->interactive = interactive;
 
     if (line_mode_input && !interactive) {
@@ -845,9 +864,14 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
          */
         (void)setvbuf(stream, NULL, _IONBF, 0);
         while (!state->should_exit && (nread = getline(&line, &cap, stream)) >= 0) {
+            char base_buf[32];
+
             (void)nread;
             if (state->verbose) {
                 fputs(line, stderr);
+            }
+            if (command_len == 0) {
+                command_start_line = line_no;
             }
             append_command(&command, &command_len, &command_cap, line);
             if (needs_more_input(command, &command_len)) {
@@ -855,6 +879,8 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
                 continue;
             }
 
+            snprintf(base_buf, sizeof(base_buf), "%zu", command_start_line - 1);
+            (void)setenv("POSISH_LINENO_BASE", base_buf, 1);
             shell_run_command(state, command);
             command_len = 0;
             if (command != NULL) {
@@ -872,6 +898,10 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
                                 "unexpected EOF while looking for matching quote");
                 state->last_status = 2;
             } else {
+                char base_buf[32];
+
+                snprintf(base_buf, sizeof(base_buf), "%zu", command_start_line - 1);
+                (void)setenv("POSISH_LINENO_BASE", base_buf, 1);
                 shell_run_command(state, command);
                 ran_command = true;
             }
@@ -911,6 +941,9 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
             fputs(line, stderr);
         }
 
+        if (command_len == 0) {
+            command_start_line = line_no;
+        }
         append_command(&command, &command_len, &command_cap, line);
         if (needs_more_input(command, &command_len)) {
             secondary_prompt = true;
@@ -918,6 +951,12 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
             continue;
         }
 
+        {
+            char base_buf[32];
+
+            snprintf(base_buf, sizeof(base_buf), "%zu", command_start_line - 1);
+            (void)setenv("POSISH_LINENO_BASE", base_buf, 1);
+        }
         shell_run_command(state, command);
         command_len = 0;
         if (command != NULL) {
@@ -935,6 +974,7 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
 
     free(line);
     free(command);
+    (void)unsetenv("POSISH_LINENO_BASE");
 
     if (state->should_exit) {
         return state->exit_status;
