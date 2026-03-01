@@ -6,12 +6,14 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 
 #define POSISH_ALIAS_ENV_PREFIX "POSISH_ALIAS_"
@@ -514,34 +516,62 @@ static int builtin_wait(struct shell_state *state, char *const argv[]) {
     return last_status;
 }
 
-static int builtin_fg(char *const argv[]) {
-    pid_t pid;
+static int wait_foreground_job(struct shell_state *state,
+                               const struct jobs_entry_info *job) {
     int status;
+    int tty_fd;
+    bool transferred_tty;
+    bool close_tty;
+    pid_t shell_pgid;
 
-    if (argv[1] != NULL) {
-        posish_errorf("fg: job specifiers are not supported yet");
-        return 1;
+    transferred_tty = false;
+    close_tty = false;
+    shell_pgid = getpgrp();
+    tty_fd = -1;
+    if (state->monitor_mode) {
+        if (isatty(STDIN_FILENO)) {
+            tty_fd = STDIN_FILENO;
+        } else {
+            /*
+             * Job control operates on the controlling terminal, which can
+             * differ from stdin in harnessed test runs.
+             */
+            tty_fd = open("/dev/tty", O_RDWR);
+            if (tty_fd >= 0) {
+                close_tty = true;
+            }
+        }
     }
 
-    pid = jobs_take_stopped();
-    if (pid <= 0) {
-        posish_errorf("fg: no current job");
-        return 1;
+    if (tty_fd >= 0) {
+        if (tcsetpgrp(tty_fd, job->pid) == 0) {
+            transferred_tty = true;
+        }
     }
 
-    /*
-     * M1 shim: resume the latest stopped foreground process and wait for it.
-     * Full job-table/process-group semantics come in later milestones.
-     */
-    if (kill(pid, SIGCONT) != 0) {
+    jobs_mark_running(job->pid);
+    if (kill(job->pid, SIGCONT) != 0) {
+        if (transferred_tty) {
+            (void)tcsetpgrp(tty_fd, shell_pgid);
+        }
+        if (close_tty) {
+            close(tty_fd);
+        }
         perror("fg");
         return 1;
     }
 
     for (;;) {
-        if (waitpid(pid, &status, WUNTRACED) < 0) {
+        if (waitpid(job->pid, &status, WUNTRACED) < 0) {
             if (errno == EINTR) {
+                shell_run_pending_traps(state);
                 continue;
+            }
+            if (transferred_tty) {
+                (void)tcsetpgrp(tty_fd, shell_pgid);
+            }
+            if (close_tty) {
+                close(tty_fd);
             }
             perror("waitpid");
             return 1;
@@ -549,10 +579,114 @@ static int builtin_fg(char *const argv[]) {
         break;
     }
 
+    if (transferred_tty) {
+        (void)tcsetpgrp(tty_fd, shell_pgid);
+    }
+    if (close_tty) {
+        close(tty_fd);
+    }
+
     if (WIFSTOPPED(status)) {
-        jobs_note_stopped(pid);
+        jobs_note_stopped_with_command(job->pid, job->command);
+    } else {
+        jobs_forget(job->pid);
     }
     return wait_status_to_shell_status(status);
+}
+
+static int builtin_fg(struct shell_state *state, char *const argv[]) {
+    struct jobs_entry_info job;
+
+    if (!state->monitor_mode) {
+        posish_errorf("fg: job control is disabled");
+        return 1;
+    }
+
+    if (argv[1] != NULL) {
+        if (argv[2] != NULL) {
+            posish_errorf("fg: too many arguments");
+            return 1;
+        }
+        if (!jobs_get_by_spec(argv[1], &job)) {
+            posish_errorf("fg: no such job: %s", argv[1]);
+            return 1;
+        }
+    } else {
+        if (!jobs_get_current(true, &job) && !jobs_get_current(false, &job)) {
+            posish_errorf("fg: no current job");
+            return 1;
+        }
+    }
+
+    if (job.command != NULL && job.command[0] != '\0') {
+        puts(job.command);
+        fflush(stdout);
+    }
+    return wait_foreground_job(state, &job);
+}
+
+static int builtin_bg(struct shell_state *state, char *const argv[]) {
+    size_t i;
+    int status;
+
+    if (!state->monitor_mode) {
+        posish_errorf("bg: job control is disabled");
+        return 1;
+    }
+
+    status = 0;
+    if (argv[1] == NULL) {
+        struct jobs_entry_info job;
+
+        if (!jobs_get_current(true, &job) && !jobs_get_current(false, &job)) {
+            posish_errorf("bg: no current job");
+            return 1;
+        }
+
+        if (job.stopped) {
+            jobs_mark_running(job.pid);
+            if (kill(job.pid, SIGCONT) != 0) {
+                perror("bg");
+                return 1;
+            }
+        }
+        if (job.command != NULL && job.command[0] != '\0') {
+            printf("[%u] %s\n", job.job_id, job.command);
+        } else {
+            printf("[%u] %ld\n", job.job_id, (long)job.pid);
+        }
+        fflush(stdout);
+        state->last_async_pid = job.pid;
+        return 0;
+    }
+
+    for (i = 1; argv[i] != NULL; i++) {
+        struct jobs_entry_info job;
+
+        if (!jobs_get_by_spec(argv[i], &job)) {
+            posish_errorf("bg: no such job: %s", argv[i]);
+            status = 1;
+            continue;
+        }
+
+        if (job.stopped) {
+            jobs_mark_running(job.pid);
+            if (kill(job.pid, SIGCONT) != 0) {
+                perror("bg");
+                status = 1;
+                continue;
+            }
+        }
+        if (job.command != NULL && job.command[0] != '\0') {
+            printf("[%u] %s\n", job.job_id, job.command);
+        } else {
+            printf("[%u] %ld\n", job.job_id, (long)job.pid);
+        }
+        fflush(stdout);
+        state->last_async_pid = job.pid;
+    }
+
+    return status;
 }
 
 static int builtin_make_command(char *const argv[]) {
@@ -617,7 +751,11 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
     }
     if (strcmp(argv[0], "fg") == 0) {
         *handled = true;
-        return builtin_fg(argv);
+        return builtin_fg(state, argv);
+    }
+    if (strcmp(argv[0], "bg") == 0) {
+        *handled = true;
+        return builtin_bg(state, argv);
     }
     if (strcmp(argv[0], "alias") == 0) {
         *handled = true;
@@ -645,11 +783,11 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
 }
 
 bool builtin_is_name(const char *name) {
-    static const char *const regular_names[] = {"cd",      "true",   "false",
-                                                "test",    "[",      "kill",
-                                                "wait",    "fg",     "alias",
-                                                "unalias", "echoraw","bracket",
-                                                "make_command"};
+    static const char *const regular_names[] = {"cd",       "true",        "false",
+                                                "test",     "[",           "kill",
+                                                "wait",     "fg",          "bg",
+                                                "alias",    "unalias",     "echoraw",
+                                                "bracket",  "make_command"};
     size_t i;
 
     if (name == NULL || name[0] == '\0') {

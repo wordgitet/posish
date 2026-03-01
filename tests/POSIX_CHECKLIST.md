@@ -1,6 +1,7 @@
 # POSIX Test Checklist
 
-Last verified: 2026-02-28 (smoke + regressions + targeted signal truth subset + builtins/params Phase A quick-win subset).
+Last verified: 2026-02-28 (full `rebaseline-fulltruth`: pure truth `TESTCASE_TIMEOUT=0` with outer file timeout `200s`).
+Checklist source of truth: `tests/posix/summary-fulltruth.csv` via `make sync-posix-checklist` (strict sync).
 
 Track progress per POSIX test file (`*-p.tst`).
 
@@ -9,7 +10,7 @@ Legend:
 - [x] green
 
 - [ ] alias-p.tst
-- [x] andor-p.tst
+- [ ] andor-p.tst
 - [ ] arith-p.tst
 - [ ] async-p.tst
 - [ ] bg-p.tst
@@ -18,17 +19,17 @@ Legend:
 - [ ] case-p.tst
 - [ ] cd-p.tst
 - [ ] cmdsub-p.tst
-- [x] command-p.tst
+- [ ] command-p.tst
 - [ ] comment-p.tst
 - [ ] continue-p.tst
 - [ ] declutil-p.tst
 - [ ] dot-p.tst
 - [ ] errexit-p.tst
 - [ ] error-p.tst
-- [x] eval-p.tst
-- [x] exec-p.tst
+- [ ] eval-p.tst
+- [ ] exec-p.tst
 - [ ] exit-p.tst
-- [x] export-p.tst
+- [ ] export-p.tst
 - [ ] fg-p.tst
 - [ ] fnmatch-p.tst
 - [ ] for-p.tst
@@ -43,83 +44,83 @@ Legend:
 - [ ] kill2-p.tst
 - [ ] kill3-p.tst
 - [ ] kill4-p.tst
-- [x] lineno-p.tst
-- [x] nop-p.tst
+- [ ] lineno-p.tst
+- [ ] nop-p.tst
 - [ ] option-p.tst
 - [ ] param-p.tst
 - [ ] path-p.tst
 - [ ] pipeline-p.tst
-- [x] ppid-p.tst
+- [ ] ppid-p.tst
 - [ ] quote-p.tst
 - [ ] read-p.tst
-- [x] readonly-p.tst
+- [ ] readonly-p.tst
 - [ ] redir-p.tst
 - [ ] return-p.tst
 - [ ] set-p.tst
 - [ ] shift-p.tst
-- [x] sigcont1-p.tst
-- [x] sigcont2-p.tst
-- [x] sigcont3-p.tst
-- [x] sigcont4-p.tst
-- [x] sigcont5-p.tst
-- [x] sigcont6-p.tst
-- [x] sigcont7-p.tst
-- [x] sigcont8-p.tst
-- [x] sighup1-p.tst
-- [x] sighup2-p.tst
-- [x] sighup3-p.tst
-- [x] sighup4-p.tst
-- [x] sighup5-p.tst
-- [x] sighup6-p.tst
-- [x] sighup7-p.tst
-- [x] sighup8-p.tst
-- [x] sigint1-p.tst
-- [x] sigint2-p.tst
-- [x] sigint3-p.tst
-- [x] sigint4-p.tst
-- [x] sigint5-p.tst
-- [x] sigint6-p.tst
-- [x] sigint7-p.tst
-- [x] sigint8-p.tst
-- [x] sigquit1-p.tst
-- [x] sigquit2-p.tst
-- [x] sigquit3-p.tst
-- [x] sigquit4-p.tst
-- [x] sigquit5-p.tst
-- [x] sigquit6-p.tst
-- [x] sigquit7-p.tst
-- [x] sigquit8-p.tst
-- [x] sigstop3-p.tst
-- [x] sigstop7-p.tst
-- [x] sigterm1-p.tst
-- [x] sigterm2-p.tst
-- [x] sigterm3-p.tst
-- [x] sigterm4-p.tst
-- [x] sigterm5-p.tst
-- [x] sigterm6-p.tst
-- [x] sigterm7-p.tst
-- [x] sigterm8-p.tst
-- [x] sigtstp3-p.tst
-- [x] sigtstp4-p.tst
-- [x] sigtstp7-p.tst
-- [x] sigtstp8-p.tst
-- [x] sigttin3-p.tst
-- [x] sigttin4-p.tst
-- [x] sigttin7-p.tst
-- [x] sigttin8-p.tst
-- [x] sigttou3-p.tst
-- [x] sigttou4-p.tst
-- [x] sigttou7-p.tst
-- [x] sigttou8-p.tst
-- [x] sigurg1-p.tst
-- [x] sigurg2-p.tst
-- [x] sigurg3-p.tst
-- [x] sigurg4-p.tst
-- [x] sigurg5-p.tst
-- [x] sigurg6-p.tst
-- [x] sigurg7-p.tst
-- [x] sigurg8-p.tst
-- [x] simple-p.tst
+- [ ] sigcont1-p.tst
+- [ ] sigcont2-p.tst
+- [ ] sigcont3-p.tst
+- [ ] sigcont4-p.tst
+- [ ] sigcont5-p.tst
+- [ ] sigcont6-p.tst
+- [ ] sigcont7-p.tst
+- [ ] sigcont8-p.tst
+- [ ] sighup1-p.tst
+- [ ] sighup2-p.tst
+- [ ] sighup3-p.tst
+- [ ] sighup4-p.tst
+- [ ] sighup5-p.tst
+- [ ] sighup6-p.tst
+- [ ] sighup7-p.tst
+- [ ] sighup8-p.tst
+- [ ] sigint1-p.tst
+- [ ] sigint2-p.tst
+- [ ] sigint3-p.tst
+- [ ] sigint4-p.tst
+- [ ] sigint5-p.tst
+- [ ] sigint6-p.tst
+- [ ] sigint7-p.tst
+- [ ] sigint8-p.tst
+- [ ] sigquit1-p.tst
+- [ ] sigquit2-p.tst
+- [ ] sigquit3-p.tst
+- [ ] sigquit4-p.tst
+- [ ] sigquit5-p.tst
+- [ ] sigquit6-p.tst
+- [ ] sigquit7-p.tst
+- [ ] sigquit8-p.tst
+- [ ] sigstop3-p.tst
+- [ ] sigstop7-p.tst
+- [ ] sigterm1-p.tst
+- [ ] sigterm2-p.tst
+- [ ] sigterm3-p.tst
+- [ ] sigterm4-p.tst
+- [ ] sigterm5-p.tst
+- [ ] sigterm6-p.tst
+- [ ] sigterm7-p.tst
+- [ ] sigterm8-p.tst
+- [ ] sigtstp3-p.tst
+- [ ] sigtstp4-p.tst
+- [ ] sigtstp7-p.tst
+- [ ] sigtstp8-p.tst
+- [ ] sigttin3-p.tst
+- [ ] sigttin4-p.tst
+- [ ] sigttin7-p.tst
+- [ ] sigttin8-p.tst
+- [ ] sigttou3-p.tst
+- [ ] sigttou4-p.tst
+- [ ] sigttou7-p.tst
+- [ ] sigttou8-p.tst
+- [ ] sigurg1-p.tst
+- [ ] sigurg2-p.tst
+- [ ] sigurg3-p.tst
+- [ ] sigurg4-p.tst
+- [ ] sigurg5-p.tst
+- [ ] sigurg6-p.tst
+- [ ] sigurg7-p.tst
+- [ ] sigurg8-p.tst
+- [ ] simple-p.tst
 - [ ] startup-p.tst
 - [ ] test-p.tst
 - [ ] testtty-p.tst

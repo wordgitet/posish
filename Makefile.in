@@ -63,10 +63,15 @@ SMOKE_TEST_SOURCES = \
 	simple-p.tst \
 	sigstop3-p.tst
 TESTCASE_TIMEOUT ?= 0
-TESTCASE_TIMEOUT_STOP ?= 90
+# Stop-family signal tests are most reliable in truth mode (no per-case watchdog).
+TESTCASE_TIMEOUT_STOP ?= 0
 TESTCASE_TIMEOUT_SIGNAL ?= 0
 SIGNAL_FILE_TIMEOUT ?= 180
 SIGNAL_FILE_TIMEOUT_KILL ?= 5
+FILE_TIMEOUT ?= 200
+KILL_AFTER ?= 5
+FULLTRUTH_SUMMARY ?= summary-fulltruth.log
+FULLTRUTH_CSV ?= summary-fulltruth.csv
 
 all: $(TARGET)
 
@@ -122,6 +127,51 @@ test-regressions: $(TARGET)
 		TESTEE="$$testee" \
 		TESTCASE_TIMEOUT_SIGNAL="$(TESTCASE_TIMEOUT_SIGNAL)"
 
+test-posix-rebaseline: $(TARGET)
+	@if [ -n "$(TESTEE)" ]; then testee="$(TESTEE)"; else testee="`pwd`/$(TARGET)"; fi; \
+	$(MAKE) -C tests/posix test-posix-contained \
+		YASH_RUNNER="$(YASH_RUNNER)" \
+		TESTEE="$$testee" \
+		TESTCASE_TIMEOUT="0" \
+		FILE_TIMEOUT="$(FILE_TIMEOUT)" \
+		KILL_AFTER="$(KILL_AFTER)" \
+		FULLTRUTH_SUMMARY="$(FULLTRUTH_SUMMARY)" \
+		FULLTRUTH_CLASSIFICATION_CSV="$(FULLTRUTH_CSV)"
+
+sync-posix-checklist:
+	$(SHELL) scripts/sync-posix-checklist.sh \
+		--csv tests/posix/$(FULLTRUTH_CSV) \
+		--checklist tests/POSIX_CHECKLIST.md
+
+rebaseline-fulltruth: test-posix-rebaseline sync-posix-checklist
+	@awk -F, '\
+	BEGIN { \
+		full_pass=0; partial_fail=0; full_fail=0; timeout=0; missing=0; ok=0; err=0; skip=0; \
+	} \
+	NR == 1 { next } \
+	{ \
+		if ($$6 == "FULL_PASS") full_pass++; \
+		else if ($$6 == "PARTIAL_FAIL") partial_fail++; \
+		else if ($$6 == "FULL_FAIL") full_fail++; \
+		else if ($$6 == "TIMEOUT") timeout++; \
+		else if ($$6 == "MISSING") missing++; \
+		ok += $$3 + 0; \
+		err += $$4 + 0; \
+		skip += $$5 + 0; \
+	} \
+	END { \
+		ratio = (ok + err == 0) ? 0 : ok / (ok + err); \
+		printf("FULL_PASS: %d\n", full_pass); \
+		printf("PARTIAL_FAIL: %d\n", partial_fail); \
+		printf("FULL_FAIL: %d\n", full_fail); \
+		printf("TIMEOUT: %d\n", timeout); \
+		printf("MISSING: %d\n", missing); \
+		printf("OK: %d\n", ok); \
+		printf("ERROR: %d\n", err); \
+		printf("SKIPPED: %d\n", skip); \
+		printf("RATIO_OK_OVER_OK_PLUS_ERROR: %.4f\n", ratio); \
+	}' tests/posix/$(FULLTRUTH_CSV)
+
 metrics: $(TARGET)
 	mkdir -p tmp/metrics
 	@if [ -n "$(METRICS_TEST_SOURCES)" ]; then \
@@ -139,4 +189,4 @@ clean:
 	rm -rf $(BUILD_DIR)
 	$(MAKE) -C tests/posix clean
 
-.PHONY: all clean test-posix test-smoke test-stop test-signal test-signal-contained test-regressions metrics
+.PHONY: all clean test-posix test-smoke test-stop test-signal test-signal-contained test-regressions test-posix-rebaseline sync-posix-checklist rebaseline-fulltruth metrics

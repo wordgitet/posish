@@ -28,13 +28,24 @@ SMOKE_TEST_SOURCES ?= \
 SMOKE_RESULTS = $(SMOKE_TEST_SOURCES:.tst=.trs)
 SMOKE_SUMMARY = summary-smoke.log
 STOP_TEST_SOURCES = sigstop3-p.tst sigstop7-p.tst sigtstp3-p.tst sigtstp4-p.tst sigtstp7-p.tst sigtstp8-p.tst sigttin3-p.tst sigttin4-p.tst sigttin7-p.tst sigttin8-p.tst sigttou3-p.tst sigttou4-p.tst sigttou7-p.tst sigttou8-p.tst
+SIGNAL_TEST_SOURCES = $(POSIX_SIGNAL_TEST_SOURCES)
+SIGNAL_SUMMARY = summary-signal.log
+REGRESSION_TEST_SOURCES = sigtstp4-p.tst sigttin4-p.tst sigttou4-p.tst command-p.tst
+FULLTRUTH_SUMMARY ?= summary-fulltruth.log
+FULLTRUTH_CLASSIFICATION_CSV ?= summary-fulltruth.csv
 TESTCASE_TIMEOUT ?= 0
-TESTCASE_TIMEOUT_STOP ?= 90
+# Stop-family signal tests are most reliable in truth mode (no per-case watchdog).
+TESTCASE_TIMEOUT_STOP ?= 0
+TESTCASE_TIMEOUT_SIGNAL ?= 0
+SIGNAL_FILE_TIMEOUT ?= 180
+SIGNAL_FILE_TIMEOUT_KILL ?= 5
+FILE_TIMEOUT ?= 200
+KILL_AFTER ?= 5
 
 TESTEE ?= /bin/sh
 RUN_TEST = ./resetsig $(YASH_RUNNER) ./run-test.sh
 
-BYPRODUCTS = $(SOURCES:.c=.o) $(TESTERS) $(TEST_RESULTS) $(SUMMARY) $(SMOKE_SUMMARY) *.dSYM tmp.* tmp.queue
+BYPRODUCTS = $(SOURCES:.c=.o) $(TESTERS) $(TEST_RESULTS) $(SUMMARY) $(SMOKE_SUMMARY) $(SIGNAL_SUMMARY) $(FULLTRUTH_SUMMARY) $(FULLTRUTH_CLASSIFICATION_CSV) summary-fulltruth.*.list *.dSYM tmp.* tmp.queue
 
 check-yash-runner:
 	@if [ -z "$(YASH_RUNNER)" ] || ! [ -x "$(YASH_RUNNER)" ]; then \
@@ -77,6 +88,43 @@ test-stop: check-yash-runner tester
 		TESTEE="$(TESTEE)" \
 		YASH_RUNNER="$(YASH_RUNNER)"
 
+test-signal: check-yash-runner tester
+	@$(MAKE) -B test \
+		TEST_SOURCES="$(SIGNAL_TEST_SOURCES)" \
+		TESTCASE_TIMEOUT="$(TESTCASE_TIMEOUT_SIGNAL)" \
+		TESTEE="$(TESTEE)" \
+		YASH_RUNNER="$(YASH_RUNNER)"
+
+test-signal-contained: check-yash-runner tester
+	@$(SHELL) ../../scripts/run-posix-signal-contained.sh \
+		--tests-dir . \
+		--testee "$(TESTEE)" \
+		--yash-runner "$(YASH_RUNNER)" \
+		--test-sources "$(SIGNAL_TEST_SOURCES)" \
+		--testcase-timeout "$(TESTCASE_TIMEOUT_SIGNAL)" \
+		--file-timeout "$(SIGNAL_FILE_TIMEOUT)" \
+		--kill-after "$(SIGNAL_FILE_TIMEOUT_KILL)" \
+		--summary "$(SIGNAL_SUMMARY)"
+
+test-posix-contained: check-yash-runner tester
+	@$(SHELL) ../../scripts/run-posix-fulltruth-contained.sh \
+		--tests-dir . \
+		--testee "$(TESTEE)" \
+		--yash-runner "$(YASH_RUNNER)" \
+		--test-sources "$(POSIX_TEST_SOURCES)" \
+		--testcase-timeout "$(TESTCASE_TIMEOUT)" \
+		--file-timeout "$(FILE_TIMEOUT)" \
+		--kill-after "$(KILL_AFTER)" \
+		--summary "$(FULLTRUTH_SUMMARY)" \
+		--classification-csv "$(FULLTRUTH_CLASSIFICATION_CSV)"
+
+test-regressions: check-yash-runner tester
+	@$(MAKE) -B test \
+		TEST_SOURCES="$(REGRESSION_TEST_SOURCES)" \
+		TESTCASE_TIMEOUT="$(TESTCASE_TIMEOUT_SIGNAL)" \
+		TESTEE="$(TESTEE)" \
+		YASH_RUNNER="$(YASH_RUNNER)"
+
 $(SUMMARY): $(TEST_RESULTS)
 	$(SHELL) ./summarize.sh $(TEST_RESULTS) >| $@
 
@@ -103,4 +151,4 @@ clean:
 	rm -fr $(BYPRODUCTS)
 
 .IGNORE: ptwrap
-.PHONY: check-yash-runner test test-posix test-smoke test-one test-stop tester clean
+.PHONY: check-yash-runner test test-posix test-smoke test-one test-stop test-signal test-signal-contained test-posix-contained test-regressions tester clean

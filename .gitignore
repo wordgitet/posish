@@ -11,6 +11,9 @@ tests/posix/*.trs
 tests/posix/summary.log
 tests/posix/summary-smoke.log
 tests/posix/summary-signal.log
+tests/posix/summary-fulltruth.log
+tests/posix/summary-fulltruth.csv
+tests/posix/summary-fulltruth.*.list
 tests/posix/checkfg
 tests/posix/ptwrap
 tests/posix/resetsig

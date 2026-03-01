@@ -2848,7 +2848,7 @@ static int run_external_argv(struct shell_state *state, char *const argv[],
         return WEXITSTATUS(status);
     }
     if (WIFSTOPPED(status)) {
-        jobs_note_stopped(pid);
+        jobs_note_stopped_with_command(pid, argv[0]);
         trace_log(POSISH_TRACE_SIGNALS, "external pid=%ld stopped sig=%d",
                   (long)pid, WSTOPSIG(status));
         return 128 + WSTOPSIG(status);
@@ -3460,7 +3460,7 @@ static int run_subshell_command(struct shell_state *parent_state,
         return WEXITSTATUS(status);
     }
     if (WIFSTOPPED(status)) {
-        jobs_note_stopped(pid);
+        jobs_note_stopped_with_command(pid, source);
         trace_log(POSISH_TRACE_SIGNALS, "subshell pid=%ld stopped sig=%d",
                   (long)pid, WSTOPSIG(status));
         return 128 + WSTOPSIG(status);
@@ -4057,7 +4057,7 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
             if (WIFEXITED(wstatus)) {
                 last_status = WEXITSTATUS(wstatus);
             } else if (WIFSTOPPED(wstatus)) {
-                jobs_note_stopped(pids[i]);
+                jobs_note_stopped_with_command(pids[i], commands[i]);
                 last_status = 128 + WSTOPSIG(wstatus);
             } else if (WIFSIGNALED(wstatus)) {
                 last_status = 128 + WTERMSIG(wstatus);

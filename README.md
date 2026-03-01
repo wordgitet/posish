@@ -35,6 +35,7 @@ make test-posix
 make test-stop
 make test-signal
 make test-regressions
+make rebaseline-fulltruth
 ```
 
 Signal-specific notes:
@@ -46,6 +47,28 @@ Signal-specific notes:
 ```sh
 make test-signal-contained
 ```
+
+Full-suite pure-truth rebaseline (outer per-file timeout + checklist sync):
+
+```sh
+make rebaseline-fulltruth
+```
+
+Artifacts are written to `tests/posix/`:
+- `summary-fulltruth.log`
+- `summary-fulltruth.csv`
+- `summary-fulltruth.full-pass.list`
+- `summary-fulltruth.partial-fail.list`
+- `summary-fulltruth.full-fail.list`
+- `summary-fulltruth.timeout.list`
+- `summary-fulltruth.missing.list`
+
+Status meanings in `summary-fulltruth.csv`:
+- `FULL_PASS`: command returned success and `ERROR=0`.
+- `PARTIAL_FAIL`: both `OK>0` and `ERROR>0`.
+- `FULL_FAIL`: no passing assertions for that file or non-zero command with parsed failures.
+- `TIMEOUT`: outer file-level timeout reached.
+- `MISSING`: result file was not produced.
 
 Or explicitly set a testee path:
 
