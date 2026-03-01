@@ -147,7 +147,10 @@ int parse_redir_token(const char *token, struct redir_spec *spec, bool *needs_wo
     }
 
     if (token[pos] == '<') {
-        if (token[pos + 1] == '&') {
+        if (token[pos + 1] == '>') {
+            spec->kind = REDIR_OPEN_RDWR;
+            pos += 2;
+        } else if (token[pos + 1] == '&') {
             spec->kind = REDIR_DUP_IN;
             pos += 2;
         } else {
@@ -173,7 +176,8 @@ int parse_redir_token(const char *token, struct redir_spec *spec, bool *needs_wo
 
     if (have_fd) {
         spec->target_fd = fd;
-    } else if (spec->kind == REDIR_OPEN_READ || spec->kind == REDIR_DUP_IN) {
+    } else if (spec->kind == REDIR_OPEN_READ || spec->kind == REDIR_OPEN_RDWR ||
+               spec->kind == REDIR_DUP_IN) {
         spec->target_fd = STDIN_FILENO;
     } else {
         spec->target_fd = STDOUT_FILENO;
@@ -207,6 +211,8 @@ int apply_one_redirection(const struct redir_spec *redir) {
     opened_fd = -1;
     if (redir->kind == REDIR_OPEN_READ) {
         opened_fd = open(redir->path, O_RDONLY);
+    } else if (redir->kind == REDIR_OPEN_RDWR) {
+        opened_fd = open(redir->path, O_RDWR | O_CREAT, 0666);
     } else if (redir->kind == REDIR_OPEN_WRITE) {
         opened_fd = open(redir->path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     } else if (redir->kind == REDIR_OPEN_APPEND) {
@@ -225,8 +231,8 @@ int apply_one_redirection(const struct redir_spec *redir) {
         return 0;
     }
 
-    if (redir->kind == REDIR_OPEN_READ || redir->kind == REDIR_OPEN_WRITE ||
-        redir->kind == REDIR_OPEN_APPEND) {
+    if (redir->kind == REDIR_OPEN_READ || redir->kind == REDIR_OPEN_RDWR ||
+        redir->kind == REDIR_OPEN_WRITE || redir->kind == REDIR_OPEN_APPEND) {
         perror(redir->path);
         return 1;
     }

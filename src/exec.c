@@ -88,6 +88,78 @@ static char *dup_trimmed_slice(const char *src, size_t start, size_t end) {
     return out;
 }
 
+static char *dup_slice(const char *src, size_t start, size_t end) {
+    char *out;
+    size_t len;
+
+    len = end - start;
+    out = arena_xmalloc(len + 1);
+    if (len > 0) {
+        memcpy(out, src + start, len);
+    }
+    out[len] = '\0';
+    return out;
+}
+
+static char *collapse_line_continuations(const char *source) {
+    size_t i;
+    size_t j;
+    size_t slen;
+    char quote;
+    char *out;
+
+    slen = strlen(source);
+    out = arena_xmalloc(slen + 1);
+    quote = '\0';
+    j = 0;
+
+    for (i = 0; source[i] != '\0'; i++) {
+        char ch;
+
+        ch = source[i];
+        if (quote == '\'') {
+            out[j++] = ch;
+            if (ch == '\'') {
+                quote = '\0';
+            }
+            continue;
+        }
+
+        /*
+         * POSIX line continuation removes backslash-newline before tokenization
+         * (outside single quotes).
+         */
+        if (ch == '\\' && source[i + 1] == '\n') {
+            i++;
+            continue;
+        }
+
+        if (quote == '"') {
+            out[j++] = ch;
+            if (ch == '\\' && source[i + 1] != '\0' && source[i + 1] != '\n') {
+                out[j++] = source[++i];
+                continue;
+            }
+            if (ch == '"') {
+                quote = '\0';
+            }
+            continue;
+        }
+
+        out[j++] = ch;
+        if (ch == '\\' && source[i + 1] != '\0') {
+            out[j++] = source[++i];
+            continue;
+        }
+        if (ch == '\'' || ch == '"') {
+            quote = ch;
+        }
+    }
+
+    out[j] = '\0';
+    return out;
+}
+
 static size_t source_line_at_offset(const char *source, size_t offset) {
     size_t i;
     size_t line;
@@ -263,6 +335,10 @@ static char *strip_comments(const char *src) {
 
         if (quote == '\0') {
             if (ch == '\\' && src[i + 1] != '\0') {
+                if (src[i + 1] == '\n') {
+                    i += 2;
+                    continue;
+                }
                 out[j++] = src[i++];
                 out[j++] = src[i++];
                 prev = out[j - 1];
@@ -290,6 +366,10 @@ static char *strip_comments(const char *src) {
             quote = '\0';
         } else if (quote == '"') {
             if (ch == '\\' && src[i + 1] != '\0') {
+                if (src[i + 1] == '\n') {
+                    i += 2;
+                    continue;
+                }
                 out[j++] = src[i++];
                 out[j++] = src[i++];
                 prev = out[j - 1];
@@ -520,6 +600,107 @@ static bool newline_continues_command(const char *source, size_t pos) {
     if (source[i - 1] == '&' && i >= 2 && source[i - 2] == '&') {
         return true;
     }
+    return false;
+}
+
+static size_t skip_continuations_forward(const char *source, size_t pos) {
+    while (source[pos] == '\\' && source[pos + 1] == '\n') {
+        pos += 2;
+    }
+    return pos;
+}
+
+static long previous_logical_index(const char *source, size_t pos) {
+    long i;
+
+    i = (long)pos - 1;
+    while (i >= 1 && source[i - 1] == '\\' && source[i] == '\n') {
+        i -= 2;
+    }
+    return i;
+}
+
+static bool is_async_separator_amp(const char *source, size_t pos) {
+    size_t next;
+    long prev;
+
+    if (source[pos] != '&') {
+        return false;
+    }
+
+    next = skip_continuations_forward(source, pos + 1);
+    if (source[next] == '&') {
+        return false;
+    }
+
+    prev = previous_logical_index(source, pos);
+    if (prev >= 0 &&
+        (source[prev] == '&' || source[prev] == '<' || source[prev] == '>')) {
+        return false;
+    }
+    return true;
+}
+
+static bool find_command_subst_end(const char *source, size_t start,
+                                   size_t *end_out) {
+    size_t i;
+    int depth;
+    char quote;
+
+    if (source[start] != '$' || source[start + 1] != '(') {
+        return false;
+    }
+
+    i = start + 2;
+    depth = 1;
+    quote = '\0';
+    while (source[i] != '\0') {
+        char ch;
+
+        ch = source[i];
+        if (quote == '\0') {
+            if (ch == '\\' && source[i + 1] != '\0') {
+                i += 2;
+                continue;
+            }
+            if (ch == '\'' || ch == '"') {
+                quote = ch;
+                i++;
+                continue;
+            }
+            if (ch == '(') {
+                depth++;
+                i++;
+                continue;
+            }
+            if (ch == ')') {
+                depth--;
+                if (depth == 0) {
+                    *end_out = i;
+                    return true;
+                }
+            }
+            i++;
+            continue;
+        }
+
+        if (quote == '\'' && ch == '\'') {
+            quote = '\0';
+            i++;
+            continue;
+        }
+        if (quote == '"') {
+            if (ch == '\\' && source[i + 1] != '\0') {
+                i += 2;
+                continue;
+            }
+            if (ch == '"') {
+                quote = '\0';
+            }
+        }
+        i++;
+    }
+
     return false;
 }
 
@@ -825,6 +1006,40 @@ static bool parse_function_definition(const char *source, char **name_out, char 
     *body_out = dup_trimmed_slice(source, body_start, body_end);
     return true;
 
+}
+
+static bool looks_like_function_header_only(const char *source) {
+    size_t i;
+
+    i = 0;
+    while (isspace((unsigned char)source[i])) {
+        i++;
+    }
+    if (!is_name_start_char(source[i])) {
+        return false;
+    }
+    i++;
+    while (is_name_char(source[i])) {
+        i++;
+    }
+    while (isspace((unsigned char)source[i])) {
+        i++;
+    }
+    if (source[i] != '(') {
+        return false;
+    }
+    i++;
+    while (isspace((unsigned char)source[i])) {
+        i++;
+    }
+    if (source[i] != ')') {
+        return false;
+    }
+    i++;
+    while (isspace((unsigned char)source[i])) {
+        i++;
+    }
+    return source[i] == '\0';
 }
 
 static bool has_pending_flow_control(const struct shell_state *state) {
@@ -1889,6 +2104,7 @@ static int run_brace_group_command(struct shell_state *state, const char *body,
 
 static int execute_command_atom(struct shell_state *state, const char *source,
                                 bool allow_builtin) {
+    char *collapsed;
     char *trimmed;
     char *inner;
     char *subshell_redirs;
@@ -1907,7 +2123,11 @@ static int execute_command_atom(struct shell_state *state, const char *source,
     bool while_is_until;
     int status;
 
-    trimmed = dup_trimmed_slice(source, 0, strlen(source));
+    trimmed = dup_slice(source, 0, strlen(source));
+    collapsed = collapse_line_continuations(trimmed);
+    free(trimmed);
+    trimmed = dup_trimmed_slice(collapsed, 0, strlen(collapsed));
+    free(collapsed);
     if (trimmed[0] == '\0') {
         free(trimmed);
         return 0;
@@ -2130,6 +2350,7 @@ static void exec_child_command(struct shell_state *parent_state, const char *sou
 }
 
 static int execute_pipeline(struct shell_state *state, const char *source) {
+    char *normalized;
     char *work;
     char *cursor;
     bool negate;
@@ -2146,7 +2367,9 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
     int last_status;
     int in_fd;
 
-    work = dup_trimmed_slice(source, 0, strlen(source));
+    normalized = collapse_line_continuations(source);
+    work = dup_trimmed_slice(normalized, 0, strlen(normalized));
+    free(normalized);
     cursor = work;
     negate = false;
 
@@ -2400,6 +2623,7 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
 }
 
 static int execute_andor(struct shell_state *state, const char *source) {
+    char *normalized;
     size_t i;
     size_t start;
     char quote;
@@ -2414,12 +2638,17 @@ static int execute_andor(struct shell_state *state, const char *source) {
     size_t op_len;
     int status;
 
+    normalized = collapse_line_continuations(source);
+    source = normalized;
+
     /*
      * Compound loop commands can contain &&/|| internally in their bodies.
      * Parse them as a single pipeline atom here to avoid premature splitting.
      */
     if (compound_needs_single_atom(source)) {
-        return execute_pipeline(state, source);
+        status = execute_pipeline(state, source);
+        free(normalized);
+        return status;
     }
 
     parts = NULL;
@@ -2448,40 +2677,59 @@ static int execute_andor(struct shell_state *state, const char *source) {
                 i++;
                 continue;
             }
+            if (ch == '$' && source[i + 1] == '(') {
+                size_t end;
+
+                if (find_command_subst_end(source, i, &end)) {
+                    i = end;
+                    continue;
+                }
+            }
             if (ch == '\'' || ch == '"') {
                 quote = ch;
             } else if (paren_depth == 0 && brace_depth == 0 &&
                        (isalpha((unsigned char)ch) || ch == '_') &&
                        word_starts_command_position(source, i)) {
                 size_t j;
+                size_t boundary;
+                char keyword[16];
+                size_t kwlen;
 
                 j = i;
-                while (isalnum((unsigned char)source[j]) || source[j] == '_') {
+                kwlen = 0;
+                while (source[j] != '\0') {
+                    if (source[j] == '\\' && source[j + 1] == '\n') {
+                        j += 2;
+                        continue;
+                    }
+                    if (!isalnum((unsigned char)source[j]) && source[j] != '_') {
+                        break;
+                    }
+                    if (kwlen + 1 < sizeof(keyword)) {
+                        keyword[kwlen] = source[j];
+                    }
+                    kwlen++;
                     j++;
                 }
-                if (keyword_boundary(source[j])) {
-                    size_t wlen;
-
-                    wlen = j - i;
-                    if (wlen == 2 && strncmp(source + i, "if", 2) == 0) {
+                boundary = skip_continuations_forward(source, j);
+                if (keyword_boundary(source[boundary])) {
+                    if (kwlen == 2 && strncmp(keyword, "if", 2) == 0) {
                         if_depth++;
-                    } else if (wlen == 2 &&
-                               strncmp(source + i, "fi", 2) == 0 &&
+                    } else if (kwlen == 2 && strncmp(keyword, "fi", 2) == 0 &&
                                if_depth > 0) {
                         if_depth--;
-                    } else if (wlen == 4 && strncmp(source + i, "case", 4) == 0) {
+                    } else if (kwlen == 4 && strncmp(keyword, "case", 4) == 0) {
                         case_depth++;
-                    } else if (wlen == 4 &&
-                               strncmp(source + i, "esac", 4) == 0 &&
+                    } else if (kwlen == 4 && strncmp(keyword, "esac", 4) == 0 &&
                                case_depth > 0) {
                         case_depth--;
                     } else if (case_depth == 0) {
-                        if ((wlen == 5 && strncmp(source + i, "while", 5) == 0) ||
-                            (wlen == 5 && strncmp(source + i, "until", 5) == 0) ||
-                            (wlen == 3 && strncmp(source + i, "for", 3) == 0)) {
+                        if ((kwlen == 5 && strncmp(keyword, "while", 5) == 0) ||
+                            (kwlen == 5 && strncmp(keyword, "until", 5) == 0) ||
+                            (kwlen == 3 && strncmp(keyword, "for", 3) == 0)) {
                             loop_depth++;
-                        } else if (wlen == 4 &&
-                                   strncmp(source + i, "done", 4) == 0 &&
+                        } else if (kwlen == 4 &&
+                                   strncmp(keyword, "done", 4) == 0 &&
                                    loop_depth > 0) {
                             loop_depth--;
                         }
@@ -2511,6 +2759,14 @@ static int execute_andor(struct shell_state *state, const char *source) {
         } else if (quote == '\'' && ch == '\'') {
             quote = '\0';
         } else if (quote == '"') {
+            if (ch == '$' && source[i + 1] == '(') {
+                size_t end;
+
+                if (find_command_subst_end(source, i, &end)) {
+                    i = end;
+                    continue;
+                }
+            }
             if (ch == '\\' && source[i + 1] != '\0') {
                 i++;
                 continue;
@@ -2551,6 +2807,7 @@ static int execute_andor(struct shell_state *state, const char *source) {
     if (part_len == 0) {
         free(parts);
         free(ops);
+        free(normalized);
         return 0;
     }
 
@@ -2558,6 +2815,7 @@ static int execute_andor(struct shell_state *state, const char *source) {
     if (state->should_exit || has_pending_flow_control(state)) {
         free_string_vec(parts, part_len);
         free(ops);
+        free(normalized);
         return status;
     }
 
@@ -2581,6 +2839,7 @@ static int execute_andor(struct shell_state *state, const char *source) {
 
     free_string_vec(parts, part_len);
     free(ops);
+    free(normalized);
     return status;
 }
 
@@ -2595,6 +2854,7 @@ static int execute_program_text(struct shell_state *state, const char *source) {
     int loop_depth;
     int status;
     bool skip_next_done;
+    char *pending_function_head;
 
     quote = '\0';
     paren_depth = 0;
@@ -2605,6 +2865,7 @@ static int execute_program_text(struct shell_state *state, const char *source) {
     start = 0;
     status = 0;
     skip_next_done = false;
+    pending_function_head = NULL;
 
     for (i = 0;; i++) {
         char ch;
@@ -2620,40 +2881,59 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                 i++;
                 continue;
             }
+            if (ch == '$' && source[i + 1] == '(') {
+                size_t end;
+
+                if (find_command_subst_end(source, i, &end)) {
+                    i = end;
+                    continue;
+                }
+            }
             if (ch == '\'' || ch == '"') {
                 quote = ch;
             } else if (paren_depth == 0 && brace_depth == 0 &&
                        (isalpha((unsigned char)ch) || ch == '_') &&
                        word_starts_command_position(source, i)) {
                 size_t j;
+                size_t boundary;
+                char keyword[16];
+                size_t kwlen;
 
                 j = i;
-                while (isalnum((unsigned char)source[j]) || source[j] == '_') {
+                kwlen = 0;
+                while (source[j] != '\0') {
+                    if (source[j] == '\\' && source[j + 1] == '\n') {
+                        j += 2;
+                        continue;
+                    }
+                    if (!isalnum((unsigned char)source[j]) && source[j] != '_') {
+                        break;
+                    }
+                    if (kwlen + 1 < sizeof(keyword)) {
+                        keyword[kwlen] = source[j];
+                    }
+                    kwlen++;
                     j++;
                 }
-                if (keyword_boundary(source[j])) {
-                    size_t wlen;
-
-                    wlen = j - i;
-                    if (wlen == 2 && strncmp(source + i, "if", 2) == 0) {
+                boundary = skip_continuations_forward(source, j);
+                if (keyword_boundary(source[boundary])) {
+                    if (kwlen == 2 && strncmp(keyword, "if", 2) == 0) {
                         if_depth++;
-                    } else if (wlen == 2 &&
-                               strncmp(source + i, "fi", 2) == 0 &&
+                    } else if (kwlen == 2 && strncmp(keyword, "fi", 2) == 0 &&
                                if_depth > 0) {
                         if_depth--;
-                    } else if (wlen == 4 && strncmp(source + i, "case", 4) == 0) {
+                    } else if (kwlen == 4 && strncmp(keyword, "case", 4) == 0) {
                         case_depth++;
-                    } else if (wlen == 4 &&
-                               strncmp(source + i, "esac", 4) == 0 &&
+                    } else if (kwlen == 4 && strncmp(keyword, "esac", 4) == 0 &&
                                case_depth > 0) {
                         case_depth--;
                     } else if (case_depth == 0) {
-                        if ((wlen == 5 && strncmp(source + i, "while", 5) == 0) ||
-                            (wlen == 5 && strncmp(source + i, "until", 5) == 0) ||
-                            (wlen == 3 && strncmp(source + i, "for", 3) == 0)) {
+                        if ((kwlen == 5 && strncmp(keyword, "while", 5) == 0) ||
+                            (kwlen == 5 && strncmp(keyword, "until", 5) == 0) ||
+                            (kwlen == 3 && strncmp(keyword, "for", 3) == 0)) {
                             loop_depth++;
-                        } else if (wlen == 4 &&
-                                   strncmp(source + i, "done", 4) == 0 &&
+                        } else if (kwlen == 4 &&
+                                   strncmp(keyword, "done", 4) == 0 &&
                                    loop_depth > 0) {
                             loop_depth--;
                         }
@@ -2679,15 +2959,20 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                          * separator. Exclude '&&' and redirection forms
                          * like '<&' / '>&'.
                          */
-                        (ch == '&' && source[i + 1] != '&' &&
-                         (i == 0 || (source[i - 1] != '&' &&
-                                     source[i - 1] != '<' &&
-                                     source[i - 1] != '>'))))) {
+                        is_async_separator_amp(source, i))) {
                 delim = true;
             }
         } else if (quote == '\'' && ch == '\'') {
             quote = '\0';
         } else if (quote == '"') {
+            if (ch == '$' && source[i + 1] == '(') {
+                size_t end;
+
+                if (find_command_subst_end(source, i, &end)) {
+                    i = end;
+                    continue;
+                }
+            }
             if (ch == '\\' && source[i + 1] != '\0') {
                 i++;
                 continue;
@@ -2699,11 +2984,39 @@ static int execute_program_text(struct shell_state *state, const char *source) {
 
         if (delim) {
             char *part;
+            char *logical_part;
             bool heredoc_handled;
             size_t heredoc_new_pos;
 
-            part = dup_trimmed_slice(source, start, i);
+            part = dup_slice(source, start, i);
+            logical_part = collapse_line_continuations(part);
+            free(part);
+            part = dup_trimmed_slice(logical_part, 0, strlen(logical_part));
+            free(logical_part);
             if (part[0] != '\0') {
+                if (pending_function_head != NULL) {
+                    size_t hlen;
+                    size_t plen;
+                    char *combined;
+
+                    hlen = strlen(pending_function_head);
+                    plen = strlen(part);
+                    combined = arena_xmalloc(hlen + 1 + plen + 1);
+                    memcpy(combined, pending_function_head, hlen);
+                    combined[hlen] = '\n';
+                    memcpy(combined + hlen + 1, part, plen + 1);
+                    free(pending_function_head);
+                    free(part);
+                    pending_function_head = NULL;
+                    part = combined;
+                }
+
+                if (looks_like_function_header_only(part) && ch != '\0') {
+                    pending_function_head = part;
+                    start = i + 1;
+                    continue;
+                }
+
                 /* Keep $LINENO aligned to each top-level command start. */
                 set_lineno_for_command(source, start);
                 if (skip_next_done && strcmp(part, "done") == 0) {
@@ -2758,6 +3071,11 @@ static int execute_program_text(struct shell_state *state, const char *source) {
 
             start = i + 1;
         }
+    }
+
+    if (pending_function_head != NULL) {
+        status = execute_andor(state, pending_function_head);
+        free(pending_function_head);
     }
 
     return status;

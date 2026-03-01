@@ -22,6 +22,15 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#define QUOTED_IFS_SPACE '\x1f'
+#define QUOTED_IFS_TAB '\x1e'
+#define QUOTED_IFS_NEWLINE '\x1d'
+#define PATTERN_LIT_STAR '\x12'
+#define PATTERN_LIT_QMARK '\x13'
+#define PATTERN_LIT_LBRACK '\x14'
+#define PATTERN_LIT_RBRACK '\x15'
+#define PATTERN_LIT_BSLASH '\x16'
+
 static void *xrealloc(void *ptr, size_t size) {
   void *p;
 
@@ -57,7 +66,8 @@ static void append_str(char **buf, size_t *len, size_t *cap, const char *str) {
   }
 }
 
-static int expand_token(const char *in, struct shell_state *state, char **out);
+static int expand_token(const char *in, struct shell_state *state, char **out,
+                        bool dquote_mode);
 
 static bool token_is_unquoted(const char *token) {
   size_t i;
@@ -244,7 +254,7 @@ static int run_arithmetic_expansion(const char *expr, char **out_value,
   long value;
   char text[64];
 
-  if (expand_token(expr, state, &expanded_expr) != 0) {
+  if (expand_token(expr, state, &expanded_expr, false) != 0) {
     return -1;
   }
 
@@ -370,7 +380,44 @@ static int append_parameter(const char *name, size_t nlen,
 
 static int append_expanded_fragment(const char *expr, size_t start, size_t elen,
                                     struct shell_state *state, char **buf,
-                                    size_t *len, size_t *cap) {
+                                    size_t *len, size_t *cap,
+                                    bool in_double_quotes);
+static void restore_quoted_ifs_markers(char *s);
+static int expand_pattern_fragment(const char *expr, size_t start, size_t elen,
+                                   struct shell_state *state, char **out);
+
+static bool should_tilde_expand(const char *s, bool in_double_quotes) {
+  return !in_double_quotes && s[0] == '~' && (s[1] == '\0' || s[1] == '/');
+}
+
+static char *maybe_tilde_expand_fragment(char *expanded, bool in_double_quotes) {
+  const char *home;
+  size_t hlen;
+  size_t slen;
+  char *out;
+
+  if (!should_tilde_expand(expanded, in_double_quotes)) {
+    return expanded;
+  }
+
+  home = getenv("HOME");
+  if (home == NULL) {
+    return expanded;
+  }
+
+  hlen = strlen(home);
+  slen = strlen(expanded);
+  out = arena_xmalloc(hlen + slen);
+  memcpy(out, home, hlen);
+  memcpy(out + hlen, expanded + 1, slen);
+  free(expanded);
+  return out;
+}
+
+static int append_expanded_fragment(const char *expr, size_t start, size_t elen,
+                                    struct shell_state *state, char **buf,
+                                    size_t *len, size_t *cap,
+                                    bool in_double_quotes) {
   char *expanded_word;
   size_t wlen;
   char *word;
@@ -381,12 +428,13 @@ static int append_expanded_fragment(const char *expr, size_t start, size_t elen,
   memcpy(word, expr + start, wlen);
   word[wlen] = '\0';
 
-  rc = expand_token(word, state, &expanded_word);
+  rc = expand_token(word, state, &expanded_word, in_double_quotes);
   if (rc != 0) {
     free(word);
     return -1;
   }
 
+  expanded_word = maybe_tilde_expand_fragment(expanded_word, in_double_quotes);
   append_str(buf, len, cap, expanded_word);
   free(expanded_word);
   free(word);
@@ -394,9 +442,11 @@ static int append_expanded_fragment(const char *expr, size_t start, size_t elen,
 }
 
 static int expand_fragment_to_string(const char *expr, size_t start, size_t elen,
-                                     struct shell_state *state, char **out) {
+                                     struct shell_state *state, char **out,
+                                     bool in_double_quotes) {
   size_t wlen;
   char *word;
+  char *expanded;
   int rc;
 
   wlen = elen - start;
@@ -404,14 +454,158 @@ static int expand_fragment_to_string(const char *expr, size_t start, size_t elen
   memcpy(word, expr + start, wlen);
   word[wlen] = '\0';
 
-  rc = expand_token(word, state, out);
+  rc = expand_token(word, state, &expanded, in_double_quotes);
   free(word);
+  if (rc != 0) {
+    return rc;
+  }
+
+  expanded = maybe_tilde_expand_fragment(expanded, in_double_quotes);
+  *out = expanded;
   return rc;
+}
+
+static char pattern_marker_for_char(char ch) {
+  switch (ch) {
+  case '*':
+    return PATTERN_LIT_STAR;
+  case '?':
+    return PATTERN_LIT_QMARK;
+  case '[':
+    return PATTERN_LIT_LBRACK;
+  case ']':
+    return PATTERN_LIT_RBRACK;
+  case '\\':
+    return PATTERN_LIT_BSLASH;
+  default:
+    return '\0';
+  }
+}
+
+static char *mark_pattern_escapes(const char *word) {
+  char *marked;
+  size_t i;
+  size_t len;
+  size_t cap;
+  char quote;
+
+  marked = NULL;
+  len = 0;
+  cap = 0;
+  quote = '\0';
+  for (i = 0; word[i] != '\0'; i++) {
+    char ch;
+
+    ch = word[i];
+    if (quote == '\0') {
+      if (ch == '\\' && word[i + 1] != '\0') {
+        char marker;
+
+        marker = pattern_marker_for_char(word[i + 1]);
+        if (marker != '\0') {
+          append_char(&marked, &len, &cap, '\\');
+          append_char(&marked, &len, &cap, marker);
+          i++;
+          continue;
+        }
+      } else if (ch == '\'') {
+        quote = '\'';
+      } else if (ch == '"') {
+        quote = '"';
+      }
+    } else if (quote == '\'' && ch == '\'') {
+      quote = '\0';
+    } else if (quote == '"' && ch == '"') {
+      quote = '\0';
+    }
+    append_char(&marked, &len, &cap, ch);
+  }
+  if (marked == NULL) {
+    marked = arena_xstrdup("");
+  }
+  return marked;
+}
+
+static char *unmark_pattern_escapes(const char *expanded) {
+  char *out;
+  size_t i;
+  size_t len;
+  size_t cap;
+
+  out = NULL;
+  len = 0;
+  cap = 0;
+  for (i = 0; expanded[i] != '\0'; i++) {
+    char ch;
+
+    ch = expanded[i];
+    if (ch == PATTERN_LIT_STAR) {
+      append_char(&out, &len, &cap, '\\');
+      append_char(&out, &len, &cap, '*');
+      continue;
+    }
+    if (ch == PATTERN_LIT_QMARK) {
+      append_char(&out, &len, &cap, '\\');
+      append_char(&out, &len, &cap, '?');
+      continue;
+    }
+    if (ch == PATTERN_LIT_LBRACK) {
+      append_char(&out, &len, &cap, '\\');
+      append_char(&out, &len, &cap, '[');
+      continue;
+    }
+    if (ch == PATTERN_LIT_RBRACK) {
+      append_char(&out, &len, &cap, '\\');
+      append_char(&out, &len, &cap, ']');
+      continue;
+    }
+    if (ch == PATTERN_LIT_BSLASH) {
+      append_char(&out, &len, &cap, '\\');
+      append_char(&out, &len, &cap, '\\');
+      continue;
+    }
+    append_char(&out, &len, &cap, ch);
+  }
+  if (out == NULL) {
+    out = arena_xstrdup("");
+  }
+  return out;
+}
+
+static int expand_pattern_fragment(const char *expr, size_t start, size_t elen,
+                                   struct shell_state *state, char **out) {
+  size_t wlen;
+  char *word;
+  char *marked;
+  char *expanded;
+  char *unmarked;
+  int rc;
+
+  wlen = elen - start;
+  word = arena_xmalloc(wlen + 1);
+  memcpy(word, expr + start, wlen);
+  word[wlen] = '\0';
+
+  marked = mark_pattern_escapes(word);
+  free(word);
+
+  rc = expand_token(marked, state, &expanded, false);
+  free(marked);
+  if (rc != 0) {
+    return rc;
+  }
+
+  restore_quoted_ifs_markers(expanded);
+  unmarked = unmark_pattern_escapes(expanded);
+  free(expanded);
+  *out = unmarked;
+  return 0;
 }
 
 static int append_braced_parameter(const char *expr, size_t elen,
                                    struct shell_state *state, char **buf,
-                                   size_t *len, size_t *cap) {
+                                   size_t *len, size_t *cap,
+                                   bool in_double_quotes) {
     enum braced_op {
         BRACED_NONE,
         BRACED_LENGTH,
@@ -564,7 +758,7 @@ static int append_braced_parameter(const char *expr, size_t elen,
         use_default = op == BRACED_COLON_MINUS ? !is_nonempty : !is_set;
         if (use_default) {
             rc = append_expanded_fragment(expr, word_start, elen, state, buf, len,
-                                          cap);
+                                          cap, in_double_quotes);
             free(name);
             return rc;
         }
@@ -583,7 +777,7 @@ static int append_braced_parameter(const char *expr, size_t elen,
         use_alternate = op == BRACED_COLON_PLUS ? is_nonempty : is_set;
         if (use_alternate) {
             rc = append_expanded_fragment(expr, word_start, elen, state, buf, len,
-                                          cap);
+                                          cap, in_double_quotes);
             free(name);
             return rc;
         }
@@ -601,11 +795,12 @@ static int append_braced_parameter(const char *expr, size_t elen,
             int rc;
 
             rc = expand_fragment_to_string(expr, word_start, elen, state,
-                                           &expanded_word);
+                                           &expanded_word, in_double_quotes);
             if (rc != 0) {
                 free(name);
                 return -1;
             }
+            restore_quoted_ifs_markers(expanded_word);
             rc = vars_set_assignment(state, name, expanded_word, true);
             free(expanded_word);
             if (rc != 0) {
@@ -642,11 +837,12 @@ static int append_braced_parameter(const char *expr, size_t elen,
         msg_expanded = NULL;
         if (word_start < elen) {
             rc = expand_fragment_to_string(expr, word_start, elen, state,
-                                           &msg_expanded);
+                                           &msg_expanded, in_double_quotes);
             if (rc != 0) {
                 free(name);
                 return -1;
             }
+            restore_quoted_ifs_markers(msg_expanded);
         }
         if (msg_expanded != NULL && msg_expanded[0] != '\0') {
             posish_errorf("%s: %s", name, msg_expanded);
@@ -679,8 +875,8 @@ static int append_braced_parameter(const char *expr, size_t elen,
         pattern_pos =
             op == BRACED_DBL_HASH || op == BRACED_DBL_PERCENT ? op_pos + 2
                                                                : op_pos + 1;
-        if (expand_fragment_to_string(expr, pattern_pos, elen, state,
-                                      &expanded_pattern) != 0) {
+        if (expand_pattern_fragment(expr, pattern_pos, elen, state,
+                                    &expanded_pattern) != 0) {
             free(name);
             return -1;
         }
@@ -752,7 +948,105 @@ static int append_braced_parameter(const char *expr, size_t elen,
     return append_parameter(expr, elen, state, buf, len, cap);
 }
 
-static int expand_token(const char *in, struct shell_state *state, char **out) {
+static bool is_ifs_char(const char *ifs, char ch) {
+  size_t i;
+
+  for (i = 0; ifs[i] != '\0'; i++) {
+    if (ifs[i] == ch) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void restore_quoted_ifs_markers(char *s) {
+  size_t i;
+
+  for (i = 0; s[i] != '\0'; i++) {
+    if (s[i] == QUOTED_IFS_SPACE) {
+      s[i] = ' ';
+    } else if (s[i] == QUOTED_IFS_TAB) {
+      s[i] = '\t';
+    } else if (s[i] == QUOTED_IFS_NEWLINE) {
+      s[i] = '\n';
+    }
+  }
+}
+
+static int split_and_append_fields(const char *expanded, struct token_vec *out) {
+  const char *ifs_env;
+  const char *ifs;
+  size_t pos;
+  int appended;
+  bool has_unquoted_ifs;
+
+  ifs_env = getenv("IFS");
+  if (ifs_env == NULL) {
+    ifs = " \t\n";
+  } else {
+    ifs = ifs_env;
+  }
+
+  if (ifs[0] == '\0') {
+    return 0;
+  }
+
+  has_unquoted_ifs = false;
+  for (pos = 0; expanded[pos] != '\0'; pos++) {
+    if (expanded[pos] == QUOTED_IFS_SPACE || expanded[pos] == QUOTED_IFS_TAB ||
+        expanded[pos] == QUOTED_IFS_NEWLINE) {
+      continue;
+    }
+    if (is_ifs_char(ifs, expanded[pos])) {
+      has_unquoted_ifs = true;
+      break;
+    }
+  }
+  if (!has_unquoted_ifs) {
+    return 0;
+  }
+
+  pos = 0;
+  appended = 0;
+  while (expanded[pos] != '\0') {
+    size_t start;
+    size_t end;
+    char *field;
+
+    while (expanded[pos] != '\0' && expanded[pos] != QUOTED_IFS_SPACE &&
+           expanded[pos] != QUOTED_IFS_TAB &&
+           expanded[pos] != QUOTED_IFS_NEWLINE &&
+           is_ifs_char(ifs, expanded[pos])) {
+      pos++;
+    }
+    if (expanded[pos] == '\0') {
+      break;
+    }
+
+    start = pos;
+    while (expanded[pos] != '\0' &&
+           ((expanded[pos] == QUOTED_IFS_SPACE ||
+             expanded[pos] == QUOTED_IFS_TAB ||
+             expanded[pos] == QUOTED_IFS_NEWLINE) ||
+            !is_ifs_char(ifs, expanded[pos]))) {
+      pos++;
+    }
+    end = pos;
+
+    field = arena_xmalloc((end - start) + 1);
+    memcpy(field, expanded + start, end - start);
+    field[end - start] = '\0';
+    restore_quoted_ifs_markers(field);
+    out->items = xrealloc(out->items, sizeof(*out->items) * (out->len + 1));
+    out->items[out->len++] = field;
+    appended++;
+  }
+
+  return appended;
+}
+
+static int expand_token(const char *in, struct shell_state *state, char **out,
+                        bool dquote_mode) {
   size_t i;
   char *buf;
   size_t len;
@@ -796,7 +1090,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out) {
         continue;
       }
     } else {
-      if (in[i] == '\'') {
+      if (!dquote_mode && in[i] == '\'') {
         quote = '\'';
         i++;
         continue;
@@ -817,6 +1111,28 @@ static int expand_token(const char *in, struct shell_state *state, char **out) {
           i++;
           continue;
         }
+        if (dquote_mode) {
+          if (in[i] == '$' || in[i] == '`' || in[i] == '"' || in[i] == '\\' ||
+              in[i] == '}') {
+            append_char(&buf, &len, &cap, in[i]);
+            i++;
+            continue;
+          }
+          append_char(&buf, &len, &cap, '\\');
+          append_char(&buf, &len, &cap, in[i]);
+          i++;
+          continue;
+        }
+        if (in[i] == ' ') {
+          append_char(&buf, &len, &cap, QUOTED_IFS_SPACE);
+          i++;
+          continue;
+        }
+        if (in[i] == '\t') {
+          append_char(&buf, &len, &cap, QUOTED_IFS_TAB);
+          i++;
+          continue;
+        }
         append_char(&buf, &len, &cap, in[i]);
         i++;
         continue;
@@ -826,23 +1142,69 @@ static int expand_token(const char *in, struct shell_state *state, char **out) {
     if (in[i] == '$') {
       if (in[i + 1] == '{') {
         size_t j;
+        int depth;
+        char inner_quote;
+        bool braced_dquote;
 
         j = i + 2;
-        while (in[j] != '\0' && in[j] != '}') {
+        depth = 1;
+        inner_quote = '\0';
+        braced_dquote = dquote_mode || quote == '"';
+        while (in[j] != '\0' && depth > 0) {
+          char ch;
+
+          ch = in[j];
+          if (inner_quote == '\0') {
+            if (ch == '\\' && in[j + 1] != '\0') {
+              j += 2;
+              continue;
+            }
+            if (ch == '"' || (!braced_dquote && ch == '\'')) {
+              inner_quote = ch;
+              j++;
+              continue;
+            }
+            if (ch == '{') {
+              depth++;
+            } else if (ch == '}') {
+              depth--;
+              if (depth == 0) {
+                break;
+              }
+            }
+            j++;
+            continue;
+          }
+
+          if (inner_quote == '\'' && ch == '\'') {
+            inner_quote = '\0';
+            j++;
+            continue;
+          }
+          if (inner_quote == '"') {
+            if (ch == '\\' && in[j + 1] != '\0') {
+              j += 2;
+              continue;
+            }
+            if (ch == '"') {
+              inner_quote = '\0';
+            }
+          }
           j++;
         }
-        if (in[j] != '}') {
+        if (depth != 0 || in[j] != '}') {
           posish_errorf("unterminated parameter expansion");
           free(buf);
           return -1;
         }
 
         if (j > i + 2) {
-          if (append_braced_parameter(in + i + 2, j - (i + 2), state, &buf,
-                                      &len, &cap) != 0) {
-            free(buf);
-            return -1;
-          }
+	          if (append_braced_parameter(in + i + 2, j - (i + 2), state, &buf,
+	                                      &len, &cap,
+	                                      dquote_mode || quote == '"') != 0) {
+	            free(buf);
+	            return -1;
+	          }
         }
         i = j + 1;
         continue;
@@ -1094,7 +1456,7 @@ int expand_words(const struct token_vec *in, struct token_vec *out,
       continue;
     }
 
-    if (expand_token(in->items[i], state, &expanded) != 0) {
+    if (expand_token(in->items[i], state, &expanded, false) != 0) {
       size_t j;
       for (j = 0; j < out->len; j++) {
         free(out->items[j]);
@@ -1109,14 +1471,24 @@ int expand_words(const struct token_vec *in, struct token_vec *out,
      * Unquoted empty expansions are removed from command words.
      * Quoted empties ('' or "") must be preserved.
      */
-    if (split_fields && expanded[0] == '\0' &&
-        token_is_unquoted(in->items[i])) {
-      free(expanded);
-      continue;
+    if (split_fields && token_is_unquoted(in->items[i])) {
+      int count;
+
+      if (expanded[0] == '\0') {
+        free(expanded);
+        continue;
+      }
+      count = split_and_append_fields(expanded, out);
+      if (count > 0) {
+        free(expanded);
+        continue;
+      }
     }
 
-    if (split_fields && !state->noglob && token_is_unquoted(in->items[i]) &&
-        token_has_glob_meta(expanded)) {
+    restore_quoted_ifs_markers(expanded);
+
+	    if (split_fields && !state->noglob && token_is_unquoted(in->items[i]) &&
+	        token_has_glob_meta(expanded)) {
       glob_t g;
       int grc;
 

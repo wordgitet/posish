@@ -44,13 +44,13 @@ Legend:
 - [x] kill2-p.tst
 - [x] kill3-p.tst
 - [x] kill4-p.tst
-- [x] lineno-p.tst
+- [ ] lineno-p.tst
 - [x] nop-p.tst
 - [x] option-p.tst
 - [ ] param-p.tst
 - [x] path-p.tst
 - [ ] pipeline-p.tst
-- [ ] ppid-p.tst
+- [x] ppid-p.tst
 - [ ] quote-p.tst
 - [ ] read-p.tst
 - [x] readonly-p.tst

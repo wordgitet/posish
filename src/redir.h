@@ -10,6 +10,7 @@
 
 enum redir_kind {
     REDIR_OPEN_READ,
+    REDIR_OPEN_RDWR,
     REDIR_OPEN_WRITE,
     REDIR_OPEN_APPEND,
     REDIR_DUP_IN,

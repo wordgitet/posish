@@ -249,12 +249,10 @@ bool parse_simple_if(const char *source, char **cond_out, char **then_out,
                             }
                             break;
                         }
-                    } else if (if_depth == 1 &&
+                    } else if (if_depth == 1 && then_end == 0 &&
                                ((wlen == 4 && strncmp(source + i, "else", 4) == 0) ||
                                 (wlen == 4 && strncmp(source + i, "elif", 4) == 0))) {
-                        if (then_end == 0) {
-                            then_end = i;
-                        }
+                        then_end = i;
                         /*
                          * Preserve `elif ...` by slicing from the keyword and
                          * rewriting it to `if ...` below.
@@ -289,12 +287,15 @@ bool parse_simple_if(const char *source, char **cond_out, char **then_out,
         else_body = dup_trimmed_slice(source, else_start, fi_start);
         if (strncmp(else_body, "elif", 4) == 0 && keyword_boundary(else_body[4])) {
             size_t len;
+            size_t tail_len;
             char *rewritten;
 
             len = strlen(else_body);
-            rewritten = arena_xmalloc(len - 4 + 2 + 1);
+            tail_len = len - 4;
+            rewritten = arena_xmalloc(2 + tail_len + 3 + 1);
             memcpy(rewritten, "if", 2);
-            memcpy(rewritten + 2, else_body + 4, len - 4 + 1);
+            memcpy(rewritten + 2, else_body + 4, tail_len);
+            memcpy(rewritten + 2 + tail_len, "\nfi", 4);
             free(else_body);
             else_body = rewritten;
         } else if (strncmp(else_body, "else", 4) == 0 &&

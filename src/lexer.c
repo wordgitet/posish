@@ -86,7 +86,7 @@ static int append_backtick_subst(const char **p_ptr, char **buf, size_t *len,
 }
 
 static int append_braced_param_subst(const char **p_ptr, char **buf, size_t *len,
-                                     size_t *cap) {
+                                     size_t *cap, bool dquote_context) {
     const char *p;
     int depth;
     int quote;
@@ -103,7 +103,7 @@ static int append_braced_param_subst(const char **p_ptr, char **buf, size_t *len
             if (ch == '\\' && p[1] != '\0') {
                 p++;
                 buf_push(buf, len, cap, *p);
-            } else if (ch == '\'' || ch == '"') {
+            } else if (ch == '"' || (!dquote_context && ch == '\'')) {
                 quote = ch;
             } else if (ch == '{') {
                 depth++;
@@ -202,6 +202,35 @@ int lexer_split_words(const char *line, struct token_vec *out) {
                 break;
             }
 
+            if (quote != '\'' && ch == '$' && p[1] == '(') {
+                if (append_command_subst(&p, &buf, &len, &cap) != 0) {
+                    free(buf);
+                    lexer_free_tokens(out);
+                    return -1;
+                }
+                started = true;
+                continue;
+            }
+            if (quote != '\'' && ch == '$' && p[1] == '{') {
+                if (append_braced_param_subst(&p, &buf, &len, &cap,
+                                              quote == '"') != 0) {
+                    free(buf);
+                    lexer_free_tokens(out);
+                    return -1;
+                }
+                started = true;
+                continue;
+            }
+            if (quote != '\'' && ch == '`') {
+                if (append_backtick_subst(&p, &buf, &len, &cap) != 0) {
+                    free(buf);
+                    lexer_free_tokens(out);
+                    return -1;
+                }
+                started = true;
+                continue;
+            }
+
             if (quote == 0 && ch == '\'') {
                 buf_push(&buf, &len, &cap, ch);
                 quote = '\'';
@@ -243,34 +272,6 @@ int lexer_split_words(const char *line, struct token_vec *out) {
                 buf_push(&buf, &len, &cap, p[1]);
                 started = true;
                 p += 2;
-                continue;
-            }
-
-            if (quote == 0 && ch == '$' && p[1] == '(') {
-                if (append_command_subst(&p, &buf, &len, &cap) != 0) {
-                    free(buf);
-                    lexer_free_tokens(out);
-                    return -1;
-                }
-                started = true;
-                continue;
-            }
-            if (quote == 0 && ch == '$' && p[1] == '{') {
-                if (append_braced_param_subst(&p, &buf, &len, &cap) != 0) {
-                    free(buf);
-                    lexer_free_tokens(out);
-                    return -1;
-                }
-                started = true;
-                continue;
-            }
-            if (quote == 0 && ch == '`') {
-                if (append_backtick_subst(&p, &buf, &len, &cap) != 0) {
-                    free(buf);
-                    lexer_free_tokens(out);
-                    return -1;
-                }
-                started = true;
                 continue;
             }
 
