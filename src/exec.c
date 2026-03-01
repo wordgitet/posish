@@ -41,6 +41,7 @@ struct env_restore {
     char *name;
     char *old_value;
     bool existed;
+    bool was_unexported;
 };
 
 struct env_restore_vec {
@@ -132,6 +133,108 @@ static void env_restore_vec_free(struct env_restore_vec *restore) {
     free(restore->items);
     restore->items = NULL;
     restore->len = 0;
+}
+
+static void trace_simple_words(struct shell_state *state, char *const words[],
+                               size_t count) {
+    const char *raw_ps4;
+    const char *ps4;
+    char *expanded_ps4;
+    struct token_vec in;
+    struct token_vec out;
+    size_t i;
+
+    if (!state->xtrace || count == 0) {
+        return;
+    }
+
+    raw_ps4 = getenv("PS4");
+    if (raw_ps4 == NULL) {
+        raw_ps4 = "+ ";
+    }
+    ps4 = raw_ps4;
+    expanded_ps4 = NULL;
+
+    in.items = (char **)&raw_ps4;
+    in.len = 1;
+    out.items = NULL;
+    out.len = 0;
+    if (expand_words(&in, &out, state, false) == 0) {
+        if (out.len == 1) {
+            expanded_ps4 = out.items[0];
+            ps4 = expanded_ps4;
+        } else {
+            lexer_free_tokens(&out);
+        }
+    }
+
+    fputs(ps4, stderr);
+    for (i = 0; i < count; i++) {
+        if (i > 0) {
+            fputc(' ', stderr);
+        }
+        fputs(words[i], stderr);
+    }
+    fputc('\n', stderr);
+    fflush(stderr);
+    free(expanded_ps4);
+    free(out.items);
+}
+
+static bool noexec_allows_set_toggle(const char *source) {
+    struct token_vec tokens;
+    size_t i;
+    bool allowed;
+
+    tokens.items = NULL;
+    tokens.len = 0;
+    if (lexer_split_words(source, &tokens) != 0) {
+        return false;
+    }
+
+    allowed = false;
+    if (tokens.len == 0 || strcmp(tokens.items[0], "set") != 0) {
+        lexer_free_tokens(&tokens);
+        return false;
+    }
+
+    for (i = 1; i < tokens.len; i++) {
+        const char *opt;
+        size_t j;
+
+        opt = tokens.items[i];
+        if (strcmp(opt, "--") == 0) {
+            break;
+        }
+        if (strcmp(opt, "+o") == 0) {
+            if (i + 1 < tokens.len && strcmp(tokens.items[i + 1], "noexec") == 0) {
+                allowed = true;
+            }
+            break;
+        }
+        if (strncmp(opt, "+o", 2) == 0 && strcmp(opt + 2, "noexec") == 0) {
+            allowed = true;
+            break;
+        }
+        if (opt[0] != '+' && opt[0] != '-') {
+            break;
+        }
+        if (opt[0] != '+') {
+            continue;
+        }
+        for (j = 1; opt[j] != '\0'; j++) {
+            if (opt[j] == 'n') {
+                allowed = true;
+                break;
+            }
+        }
+        if (allowed) {
+            break;
+        }
+    }
+
+    lexer_free_tokens(&tokens);
+    return allowed;
 }
 
 static int word_vec_push(struct word_vec *words, char *word) {
@@ -806,7 +909,7 @@ static int apply_persistent_assignments(struct shell_state *state,
             continue;
         }
 
-        if (vars_set(state, name, value, true) != 0) {
+        if (vars_set_assignment(state, name, value, true) != 0) {
             if (!state->interactive) {
                 state->should_exit = true;
                 state->exit_status = 1;
@@ -820,7 +923,8 @@ static int apply_persistent_assignments(struct shell_state *state,
     return 0;
 }
 
-static void restore_temporary_assignments(struct env_restore_vec *restore) {
+static void restore_temporary_assignments(struct shell_state *state,
+                                          struct env_restore_vec *restore) {
     size_t i;
 
     for (i = restore->len; i > 0; i--) {
@@ -828,7 +932,12 @@ static void restore_temporary_assignments(struct env_restore_vec *restore) {
 
         r = &restore->items[i - 1];
         if (r->existed) {
-            if (setenv(r->name, r->old_value, 1) != 0) {
+            if (r->was_unexported) {
+                if (vars_set_with_mode(state, r->name, r->old_value, false, false) !=
+                    0) {
+                    perror("setenv");
+                }
+            } else if (setenv(r->name, r->old_value, 1) != 0) {
                 perror("setenv");
             }
         } else {
@@ -860,11 +969,13 @@ static int apply_temporary_assignments(struct shell_state *state,
         r.name = name;
         r.old_value = NULL;
         r.existed = false;
+        r.was_unexported = false;
 
         old = getenv(name);
         if (old != NULL) {
             r.old_value = arena_xstrdup(old);
             r.existed = true;
+            r.was_unexported = vars_is_unexported(state, name);
         }
 
         if (vars_set(state, name, value, true) != 0) {
@@ -874,7 +985,7 @@ static int apply_temporary_assignments(struct shell_state *state,
             }
             free(r.name);
             free(r.old_value);
-            restore_temporary_assignments(restore);
+            restore_temporary_assignments(state, restore);
             env_restore_vec_free(restore);
             return 1;
         }
@@ -979,6 +1090,7 @@ static int run_external_argv(struct shell_state *state, char *const argv[],
         (void)setenv("POSISH_PARENT_INTERACTIVE", state->interactive ? "1" : "0",
                      1);
         exec_prepare_signals_for_exec_child(state);
+        vars_apply_unexported_in_child(state);
 
         if (apply_redirections(redirs, false, NULL) != 0) {
             _exit(1);
@@ -1275,6 +1387,7 @@ static int execute_simple_command(struct shell_state *state, const char *source,
             lexer_free_tokens(&expanded);
             return 1;
         }
+        fflush(NULL);
         fd_backup_restore(&fd_backups);
         redir_vec_free(&redirs);
         word_vec_free(&words);
@@ -1284,6 +1397,8 @@ static int execute_simple_command(struct shell_state *state, const char *source,
         }
         return 0;
     }
+
+    trace_simple_words(state, words.items, words.len);
 
     assign_count = 0;
     while (assign_count < words.len && is_assignment_word(words.items[assign_count])) {
@@ -1300,6 +1415,7 @@ static int execute_simple_command(struct shell_state *state, const char *source,
                 status = 1;
             }
         }
+        fflush(NULL);
         fd_backup_restore(&fd_backups);
 
         redir_vec_free(&redirs);
@@ -1326,6 +1442,7 @@ static int execute_simple_command(struct shell_state *state, const char *source,
                 status = 1;
             }
         }
+        fflush(NULL);
         fd_backup_restore(&fd_backups);
         free(argv);
         redir_vec_free(&redirs);
@@ -1401,6 +1518,7 @@ static int execute_simple_command(struct shell_state *state, const char *source,
             } else {
                 status = builtin_dispatch(state, argv, &handled);
             }
+            fflush(NULL);
             fd_backup_restore(&fd_backups);
 
             if (!handled) {
@@ -1423,7 +1541,7 @@ done:
         fd_backup_restore(&pre_expand_backups);
     }
     if (have_temp_env) {
-        restore_temporary_assignments(&temp_env);
+        restore_temporary_assignments(state, &temp_env);
         env_restore_vec_free(&temp_env);
     }
 
@@ -1795,6 +1913,15 @@ static int execute_command_atom(struct shell_state *state, const char *source,
         return 0;
     }
 
+    /*
+     * `set +n` (or `set +o noexec`) is allowed to run while in noexec mode so
+     * scripts can turn execution back on. Everything else is parse-only.
+     */
+    if (state->noexec && !noexec_allows_set_toggle(trimmed)) {
+        free(trimmed);
+        return 0;
+    }
+
     fn_name = NULL;
     fn_body = NULL;
     if_cond = NULL;
@@ -1922,7 +2049,8 @@ static int execute_command_atom(struct shell_state *state, const char *source,
 
         state->loop_depth++;
         for (i = 0; i < for_expanded.len && !state->should_exit; i++) {
-            if (vars_set(state, for_name, for_expanded.items[i], true) != 0) {
+            if (vars_set_assignment(state, for_name, for_expanded.items[i], true) !=
+                0) {
                 status = 1;
                 break;
             }

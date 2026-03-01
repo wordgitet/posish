@@ -372,6 +372,21 @@ static bool parse_long_text(const char *text, long *out_value) {
   return true;
 }
 
+static bool follows_assignment_operator(const struct arith_parser *p,
+                                        size_t start, size_t len) {
+  const char *s;
+
+  s = p->src + start + len;
+  while (*s != '\0' && isspace((unsigned char)*s)) {
+    s++;
+  }
+
+  return starts_with(s, "=") || starts_with(s, "+=") || starts_with(s, "-=") ||
+         starts_with(s, "*=") || starts_with(s, "/=") || starts_with(s, "%=") ||
+         starts_with(s, "<<=") || starts_with(s, ">>=") ||
+         starts_with(s, "&=") || starts_with(s, "^=") || starts_with(s, "|=");
+}
+
 static long read_identifier_value(struct arith_parser *p, size_t start,
                                   size_t len, bool *ok) {
   char *name;
@@ -387,6 +402,16 @@ static long read_identifier_value(struct arith_parser *p, size_t start,
 
   value = getenv(name);
   if (value == NULL || value[0] == '\0') {
+    if (p->state->nounset && !follows_assignment_operator(p, start, len)) {
+      posish_errorf("%s: parameter not set", name);
+      if (!p->state->interactive) {
+        p->state->should_exit = true;
+        p->state->exit_status = 1;
+      }
+      free(name);
+      *ok = false;
+      return 0;
+    }
     free(name);
     *ok = true;
     return 0;
@@ -414,7 +439,7 @@ static int assign_identifier_value(struct arith_parser *p, size_t start,
   }
 
   snprintf(text, sizeof(text), "%ld", value);
-  if (vars_set(p->state, name, text, true) != 0) {
+  if (vars_set_assignment(p->state, name, text, true) != 0) {
     if (!p->state->interactive) {
       p->state->should_exit = true;
       p->state->exit_status = 1;

@@ -46,18 +46,18 @@ Legend:
 - [x] kill4-p.tst
 - [x] lineno-p.tst
 - [x] nop-p.tst
-- [ ] option-p.tst
+- [x] option-p.tst
 - [ ] param-p.tst
-- [ ] path-p.tst
+- [x] path-p.tst
 - [ ] pipeline-p.tst
-- [x] ppid-p.tst
+- [ ] ppid-p.tst
 - [ ] quote-p.tst
 - [ ] read-p.tst
 - [x] readonly-p.tst
 - [ ] redir-p.tst
 - [x] return-p.tst
-- [ ] set-p.tst
-- [ ] shift-p.tst
+- [x] set-p.tst
+- [x] shift-p.tst
 - [x] sigcont1-p.tst
 - [x] sigcont2-p.tst
 - [x] sigcont3-p.tst
@@ -126,8 +126,8 @@ Legend:
 - [x] testtty-p.tst
 - [ ] tilde-p.tst
 - [ ] trap-p.tst
-- [ ] umask-p.tst
-- [ ] unset-p.tst
+- [x] umask-p.tst
+- [x] unset-p.tst
 - [ ] until-p.tst
 - [x] wait-p.tst
 - [ ] while-p.tst

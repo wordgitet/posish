@@ -28,7 +28,16 @@ struct shell_state {
     bool explicit_non_interactive;
     bool parent_was_interactive;
     bool monitor_mode;
+    bool allexport;
+    bool notify;
+    bool noclobber;
+    bool noglob;
+    bool hashondef;
+    bool noexec;
+    bool nounset;
     bool verbose;
+    bool xtrace;
+    bool ignoreeof;
     bool in_async_context;
     bool main_context;
     bool in_command_builtin;
@@ -51,6 +60,8 @@ struct shell_state {
     size_t readonly_count;
     struct shell_function *functions;
     size_t function_count;
+    char **unexported_names;
+    size_t unexported_count;
     char **positional_params;
     size_t positional_count;
 };

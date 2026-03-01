@@ -50,6 +50,7 @@ int main(int argc, char **argv) {
     bool force_interactive;
     bool run_interactive;
     bool read_stdin_script;
+    bool refresh_signal_policy;
     const char *command;
     const char *parent_interactive;
 
@@ -77,6 +78,7 @@ int main(int argc, char **argv) {
     interactive_option_seen = false;
     force_interactive = false;
     read_stdin_script = false;
+    refresh_signal_policy = false;
     command = NULL;
     parent_interactive = getenv("POSISH_PARENT_INTERACTIVE");
     state.parent_was_interactive =
@@ -98,20 +100,59 @@ int main(int argc, char **argv) {
         if ((argv[i][0] == '-' || argv[i][0] == '+') && argv[i][1] != '\0') {
             saw_c = false;
             for (j = 1; argv[i][j] != '\0'; j++) {
-                if (argv[i][j] == 'e') {
-                    state.errexit = argv[i][0] == '-';
-                } else if (argv[i][j] == 'i') {
-                    interactive_option_seen = true;
-                    force_interactive = argv[i][0] == '-';
-                    state.explicit_non_interactive = argv[i][0] == '+';
-                } else if (argv[i][j] == 'm') {
-                    state.monitor_mode = argv[i][0] == '-';
+                bool enable;
+
+                enable = argv[i][0] == '-';
+                if (argv[i][j] == 'o') {
+                    const char *name;
+
+                    if (argv[i][j + 1] != '\0') {
+                        name = argv[i] + j + 1;
+                        j = strlen(argv[i]) - 1;
+                    } else {
+                        i++;
+                        if (i >= argc) {
+                            usage(argv[0]);
+                            shell_state_destroy(&state);
+                            return 2;
+                        }
+                        name = argv[i];
+                    }
+                    if (!options_apply_long(&state, name, enable,
+                                            &refresh_signal_policy)) {
+                        usage(argv[0]);
+                        shell_state_destroy(&state);
+                        return 2;
+                    }
+                    if (strcmp(name, "interactive") == 0) {
+                        interactive_option_seen = true;
+                        force_interactive = enable;
+                        state.explicit_non_interactive = !enable;
+                    }
+                    if (strcmp(name, "monitor") == 0) {
+                        refresh_signal_policy = true;
+                    }
+                    break;
                 } else if (argv[i][j] == 's') {
-                    read_stdin_script = argv[i][0] == '-';
-                } else if (argv[i][j] == 'v') {
-                    state.verbose = argv[i][0] == '-';
+                    read_stdin_script = enable;
                 } else if (argv[i][0] == '-' && argv[i][j] == 'c') {
                     saw_c = true;
+                } else if (options_apply_short(&state, argv[i][j], enable,
+                                               &refresh_signal_policy)) {
+                    if (argv[i][j] == 'i') {
+                        interactive_option_seen = true;
+                        force_interactive = enable;
+                        state.explicit_non_interactive = !enable;
+                    }
+                } else {
+                    usage(argv[0]);
+                    shell_state_destroy(&state);
+                    return 2;
+                }
+                if (argv[i][j] == 'i') {
+                    interactive_option_seen = true;
+                    force_interactive = enable;
+                    state.explicit_non_interactive = !enable;
                 }
             }
             i++;
@@ -135,6 +176,7 @@ int main(int argc, char **argv) {
         run_interactive = (command == NULL && i >= argc && isatty(STDIN_FILENO));
     }
     state.interactive = run_interactive;
+    (void)refresh_signal_policy;
     shell_refresh_signal_policy(&state);
 
     if (command != NULL) {

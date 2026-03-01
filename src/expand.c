@@ -7,11 +7,14 @@
 #include "arena.h"
 #include "arith.h"
 #include "error.h"
+#include "options.h"
 #include "signals.h"
 #include "vars.h"
 
 #include <ctype.h>
 #include <errno.h>
+#include <fnmatch.h>
+#include <glob.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -71,6 +74,23 @@ static bool token_is_unquoted(const char *token) {
     i++;
   }
   return true;
+}
+
+static bool token_has_glob_meta(const char *token) {
+  size_t i;
+
+  i = 0;
+  while (token[i] != '\0') {
+    if (token[i] == '\\' && token[i + 1] != '\0') {
+      i += 2;
+      continue;
+    }
+    if (token[i] == '*' || token[i] == '?' || token[i] == '[') {
+      return true;
+    }
+    i++;
+  }
+  return false;
 }
 
 static bool is_short_parameter_char(char ch) {
@@ -240,90 +260,112 @@ static int run_arithmetic_expansion(const char *expr, char **out_value,
   return 0;
 }
 
+static void mark_noninteractive_expansion_fatal(struct shell_state *state,
+                                                int status) {
+  if (!state->interactive) {
+    state->should_exit = true;
+    state->exit_status = status;
+  }
+}
+
 static int append_parameter(const char *name, size_t nlen,
                             struct shell_state *state, char **buf, size_t *len,
                             size_t *cap) {
-  char *tmp;
-  const char *val;
+    char *tmp;
+    const char *val;
 
-  tmp = arena_xmalloc(nlen + 1);
-  memcpy(tmp, name, nlen);
-  tmp[nlen] = '\0';
+    tmp = arena_xmalloc(nlen + 1);
+    memcpy(tmp, name, nlen);
+    tmp[nlen] = '\0';
 
-  if (strcmp(tmp, "?") == 0) {
-    char num[32];
-    snprintf(num, sizeof(num), "%d", state->last_status);
-    append_str(buf, len, cap, num);
-    free(tmp);
-    return 0;
-  }
-
-  if (strcmp(tmp, "$") == 0) {
-    char num[32];
-    snprintf(num, sizeof(num), "%ld", (long)state->shell_pid);
-    append_str(buf, len, cap, num);
-    free(tmp);
-    return 0;
-  }
-
-  if (strcmp(tmp, "!") == 0) {
-    if (state->last_async_pid > 0) {
-      char num[32];
-
-      snprintf(num, sizeof(num), "%ld", (long)state->last_async_pid);
-      append_str(buf, len, cap, num);
-    }
-    free(tmp);
-    return 0;
-  }
-
-  if (strcmp(tmp, "#") == 0) {
-    char num[32];
-    snprintf(num, sizeof(num), "%zu", state->positional_count);
-    append_str(buf, len, cap, num);
-    free(tmp);
-    return 0;
-  }
-
-  if (strcmp(tmp, "*") == 0) {
-    size_t i;
-    char sep;
-
-    sep = ' ';
-    val = getenv("IFS");
-    if (val != NULL && val[0] != '\0') {
-      sep = val[0];
+    if (strcmp(tmp, "?") == 0) {
+        char num[32];
+        snprintf(num, sizeof(num), "%d", state->last_status);
+        append_str(buf, len, cap, num);
+        free(tmp);
+        return 0;
     }
 
-    for (i = 0; i < state->positional_count; i++) {
-      if (i > 0) {
-        append_char(buf, len, cap, sep);
-      }
-      append_str(buf, len, cap, state->positional_params[i]);
+    if (strcmp(tmp, "$") == 0) {
+        char num[32];
+        snprintf(num, sizeof(num), "%ld", (long)state->shell_pid);
+        append_str(buf, len, cap, num);
+        free(tmp);
+        return 0;
     }
+
+    if (strcmp(tmp, "!") == 0) {
+        if (state->last_async_pid > 0) {
+            char num[32];
+
+            snprintf(num, sizeof(num), "%ld", (long)state->last_async_pid);
+            append_str(buf, len, cap, num);
+        }
+        free(tmp);
+        return 0;
+    }
+
+    if (strcmp(tmp, "#") == 0) {
+        char num[32];
+        snprintf(num, sizeof(num), "%zu", state->positional_count);
+        append_str(buf, len, cap, num);
+        free(tmp);
+        return 0;
+    }
+
+    if (strcmp(tmp, "-") == 0) {
+        char options_buf[64];
+
+        options_format_dollar_minus(state, options_buf, sizeof(options_buf));
+        append_str(buf, len, cap, options_buf);
+        free(tmp);
+        return 0;
+    }
+
+    if (strcmp(tmp, "*") == 0) {
+        size_t i;
+        char sep;
+
+        sep = ' ';
+        val = getenv("IFS");
+        if (val != NULL && val[0] != '\0') {
+            sep = val[0];
+        }
+
+        for (i = 0; i < state->positional_count; i++) {
+            if (i > 0) {
+                append_char(buf, len, cap, sep);
+            }
+            append_str(buf, len, cap, state->positional_params[i]);
+        }
+        free(tmp);
+        return 0;
+    }
+
+    if (isdigit((unsigned char)tmp[0])) {
+        char *end;
+        unsigned long n;
+
+        n = strtoul(tmp, &end, 10);
+        if (end != tmp && *end == '\0' && n > 0 && n <= state->positional_count) {
+            append_str(buf, len, cap, state->positional_params[n - 1]);
+        }
+        free(tmp);
+        return 0;
+    }
+
+    val = getenv(tmp);
+    if (val != NULL) {
+        append_str(buf, len, cap, val);
+    } else if (state->nounset) {
+        posish_errorf("%s: parameter not set", tmp);
+        mark_noninteractive_expansion_fatal(state, 1);
+        free(tmp);
+        return -1;
+    }
+
     free(tmp);
     return 0;
-  }
-
-  if (isdigit((unsigned char)tmp[0])) {
-    char *end;
-    unsigned long n;
-
-    n = strtoul(tmp, &end, 10);
-    if (end != tmp && *end == '\0' && n > 0 && n <= state->positional_count) {
-      append_str(buf, len, cap, state->positional_params[n - 1]);
-    }
-    free(tmp);
-    return 0;
-  }
-
-  val = getenv(tmp);
-  if (val != NULL) {
-    append_str(buf, len, cap, val);
-  }
-
-  free(tmp);
-  return 0;
 }
 
 static int append_expanded_fragment(const char *expr, size_t start, size_t elen,
@@ -370,195 +412,344 @@ static int expand_fragment_to_string(const char *expr, size_t start, size_t elen
 static int append_braced_parameter(const char *expr, size_t elen,
                                    struct shell_state *state, char **buf,
                                    size_t *len, size_t *cap) {
-  enum braced_op {
-    BRACED_NONE,
-    BRACED_MINUS,
-    BRACED_COLON_MINUS,
-    BRACED_PLUS,
-    BRACED_COLON_PLUS,
-    BRACED_ASSIGN,
-    BRACED_COLON_ASSIGN,
-    BRACED_PERCENT
-  };
-  enum braced_op op;
-  size_t op_pos;
-  size_t i;
-  size_t name_len;
-  char *name;
-  const char *value;
-  bool is_set;
-  bool is_nonempty;
-  size_t word_start;
+    enum braced_op {
+        BRACED_NONE,
+        BRACED_LENGTH,
+        BRACED_MINUS,
+        BRACED_COLON_MINUS,
+        BRACED_PLUS,
+        BRACED_COLON_PLUS,
+        BRACED_ASSIGN,
+        BRACED_COLON_ASSIGN,
+        BRACED_ERROR,
+        BRACED_COLON_ERROR,
+        BRACED_HASH,
+        BRACED_DBL_HASH,
+        BRACED_PERCENT,
+        BRACED_DBL_PERCENT
+    };
+    enum braced_op op;
+    size_t name_start;
+    size_t name_len;
+    size_t op_pos;
+    size_t word_start;
+    size_t i;
+    char *name;
+    const char *value;
+    bool is_set;
+    bool is_nonempty;
 
-  op = BRACED_NONE;
-  op_pos = 0;
-  /* Parse the first operator token; `:-`, `:+`, and `:=` take precedence. */
-  for (i = 0; i < elen; i++) {
-    if (expr[i] == ':' && i + 1 < elen) {
-      if (expr[i + 1] == '-') {
-        op = BRACED_COLON_MINUS;
-        op_pos = i;
-        break;
-      }
-      if (expr[i + 1] == '+') {
-        op = BRACED_COLON_PLUS;
-        op_pos = i;
-        break;
-      }
-      if (expr[i + 1] == '=') {
-        op = BRACED_COLON_ASSIGN;
-        op_pos = i;
-        break;
-      }
+    op = BRACED_NONE;
+    name_start = 0;
+    name_len = elen;
+    op_pos = elen;
+
+    if (elen > 0 && expr[0] == '#') {
+        op = BRACED_LENGTH;
+        name_start = 1;
+        name_len = elen - 1;
+    } else {
+        for (i = 0; i < elen; i++) {
+            if (expr[i] == ':' && i + 1 < elen) {
+                if (expr[i + 1] == '-') {
+                    op = BRACED_COLON_MINUS;
+                    op_pos = i;
+                    break;
+                }
+                if (expr[i + 1] == '+') {
+                    op = BRACED_COLON_PLUS;
+                    op_pos = i;
+                    break;
+                }
+                if (expr[i + 1] == '=') {
+                    op = BRACED_COLON_ASSIGN;
+                    op_pos = i;
+                    break;
+                }
+                if (expr[i + 1] == '?') {
+                    op = BRACED_COLON_ERROR;
+                    op_pos = i;
+                    break;
+                }
+            }
+            if (expr[i] == '-') {
+                op = BRACED_MINUS;
+                op_pos = i;
+                break;
+            }
+            if (expr[i] == '+') {
+                op = BRACED_PLUS;
+                op_pos = i;
+                break;
+            }
+            if (expr[i] == '=') {
+                op = BRACED_ASSIGN;
+                op_pos = i;
+                break;
+            }
+            if (expr[i] == '?') {
+                op = BRACED_ERROR;
+                op_pos = i;
+                break;
+            }
+            if (expr[i] == '#') {
+                op = (i + 1 < elen && expr[i + 1] == '#') ? BRACED_DBL_HASH
+                                                           : BRACED_HASH;
+                op_pos = i;
+                break;
+            }
+            if (expr[i] == '%') {
+                op = (i + 1 < elen && expr[i + 1] == '%') ? BRACED_DBL_PERCENT
+                                                           : BRACED_PERCENT;
+                op_pos = i;
+                break;
+            }
+        }
+        if (op != BRACED_NONE) {
+            name_len = op_pos;
+        }
     }
-    if (expr[i] == '-') {
-      op = BRACED_MINUS;
-      op_pos = i;
-      break;
+
+    if (name_len == 0) {
+        return append_parameter(expr, elen, state, buf, len, cap);
     }
-    if (expr[i] == '+') {
-      op = BRACED_PLUS;
-      op_pos = i;
-      break;
-    }
-    if (expr[i] == '=') {
-      op = BRACED_ASSIGN;
-      op_pos = i;
-      break;
-    }
-    if (expr[i] == '%') {
-      op = BRACED_PERCENT;
-      op_pos = i;
-      break;
-    }
-  }
 
-  if (op == BRACED_NONE) {
-    return append_parameter(expr, elen, state, buf, len, cap);
-  }
-
-  name_len = op_pos;
-  name = arena_xmalloc(name_len + 1);
-  memcpy(name, expr, name_len);
-  name[name_len] = '\0';
-
-  value = getenv(name);
-  is_set = value != NULL;
-  is_nonempty = value != NULL && value[0] != '\0';
-
-  if (op == BRACED_MINUS || op == BRACED_COLON_MINUS) {
-    bool use_default;
-
-    word_start = op == BRACED_COLON_MINUS ? op_pos + 2 : op_pos + 1;
-    use_default = op == BRACED_COLON_MINUS ? !is_nonempty : !is_set;
-    if (use_default) {
-      i = append_expanded_fragment(expr, word_start, elen, state, buf, len, cap);
-      free(name);
-      return i;
-    }
-    if (is_set) {
-      append_str(buf, len, cap, value);
-    }
-    free(name);
-    return 0;
-  }
-
-  if (op == BRACED_PLUS || op == BRACED_COLON_PLUS) {
-    bool use_alternate;
-
-    word_start = op == BRACED_COLON_PLUS ? op_pos + 2 : op_pos + 1;
-    use_alternate = op == BRACED_COLON_PLUS ? is_nonempty : is_set;
-    if (use_alternate) {
-      i = append_expanded_fragment(expr, word_start, elen, state, buf, len, cap);
-      free(name);
-      return i;
-    }
-    free(name);
-    return 0;
-  }
-
-  if (op == BRACED_ASSIGN || op == BRACED_COLON_ASSIGN) {
-    bool should_assign;
+    name = arena_xmalloc(name_len + 1);
+    memcpy(name, expr + name_start, name_len);
+    name[name_len] = '\0';
 
     if (!vars_is_name_valid(name)) {
-      free(name);
-      return append_parameter(expr, elen, state, buf, len, cap);
+        free(name);
+        return append_parameter(expr, elen, state, buf, len, cap);
     }
 
-    word_start = op == BRACED_COLON_ASSIGN ? op_pos + 2 : op_pos + 1;
-    should_assign = op == BRACED_COLON_ASSIGN ? !is_nonempty : !is_set;
-    if (should_assign) {
-      char *expanded_word;
-      int rc;
+    value = getenv(name);
+    is_set = value != NULL;
+    is_nonempty = value != NULL && value[0] != '\0';
 
-      rc = expand_fragment_to_string(expr, word_start, elen, state,
-                                     &expanded_word);
-      if (rc != 0) {
+    if (op == BRACED_NONE) {
+        if (!is_set && state->nounset) {
+            posish_errorf("%s: parameter not set", name);
+            mark_noninteractive_expansion_fatal(state, 1);
+            free(name);
+            return -1;
+        }
+        if (is_set) {
+            append_str(buf, len, cap, value);
+        }
+        free(name);
+        return 0;
+    }
+
+    if (op == BRACED_LENGTH) {
+        char text[32];
+
+        if (!is_set && state->nounset) {
+            posish_errorf("%s: parameter not set", name);
+            mark_noninteractive_expansion_fatal(state, 1);
+            free(name);
+            return -1;
+        }
+        snprintf(text, sizeof(text), "%zu", is_set ? strlen(value) : 0);
+        append_str(buf, len, cap, text);
+        free(name);
+        return 0;
+    }
+
+    if (op == BRACED_MINUS || op == BRACED_COLON_MINUS) {
+        bool use_default;
+        int rc;
+
+        word_start = op == BRACED_COLON_MINUS ? op_pos + 2 : op_pos + 1;
+        use_default = op == BRACED_COLON_MINUS ? !is_nonempty : !is_set;
+        if (use_default) {
+            rc = append_expanded_fragment(expr, word_start, elen, state, buf, len,
+                                          cap);
+            free(name);
+            return rc;
+        }
+        if (is_set) {
+            append_str(buf, len, cap, value);
+        }
+        free(name);
+        return 0;
+    }
+
+    if (op == BRACED_PLUS || op == BRACED_COLON_PLUS) {
+        bool use_alternate;
+        int rc;
+
+        word_start = op == BRACED_COLON_PLUS ? op_pos + 2 : op_pos + 1;
+        use_alternate = op == BRACED_COLON_PLUS ? is_nonempty : is_set;
+        if (use_alternate) {
+            rc = append_expanded_fragment(expr, word_start, elen, state, buf, len,
+                                          cap);
+            free(name);
+            return rc;
+        }
+        free(name);
+        return 0;
+    }
+
+    if (op == BRACED_ASSIGN || op == BRACED_COLON_ASSIGN) {
+        bool should_assign;
+
+        word_start = op == BRACED_COLON_ASSIGN ? op_pos + 2 : op_pos + 1;
+        should_assign = op == BRACED_COLON_ASSIGN ? !is_nonempty : !is_set;
+        if (should_assign) {
+            char *expanded_word;
+            int rc;
+
+            rc = expand_fragment_to_string(expr, word_start, elen, state,
+                                           &expanded_word);
+            if (rc != 0) {
+                free(name);
+                return -1;
+            }
+            rc = vars_set_assignment(state, name, expanded_word, true);
+            free(expanded_word);
+            if (rc != 0) {
+                free(name);
+                return -1;
+            }
+            value = getenv(name);
+            is_set = value != NULL;
+        }
+        if (is_set) {
+            append_str(buf, len, cap, value);
+        }
+        free(name);
+        return 0;
+    }
+
+    if (op == BRACED_ERROR || op == BRACED_COLON_ERROR) {
+        bool should_error;
+        const char *msg_default;
+        char *msg_expanded;
+        int rc;
+
+        word_start = op == BRACED_COLON_ERROR ? op_pos + 2 : op_pos + 1;
+        should_error = op == BRACED_COLON_ERROR ? !is_nonempty : !is_set;
+        if (!should_error) {
+            if (is_set) {
+                append_str(buf, len, cap, value);
+            }
+            free(name);
+            return 0;
+        }
+
+        msg_default = "parameter not set";
+        msg_expanded = NULL;
+        if (word_start < elen) {
+            rc = expand_fragment_to_string(expr, word_start, elen, state,
+                                           &msg_expanded);
+            if (rc != 0) {
+                free(name);
+                return -1;
+            }
+        }
+        if (msg_expanded != NULL && msg_expanded[0] != '\0') {
+            posish_errorf("%s: %s", name, msg_expanded);
+        } else {
+            posish_errorf("%s: %s", name, msg_default);
+        }
+        mark_noninteractive_expansion_fatal(state, 1);
+        free(msg_expanded);
         free(name);
         return -1;
-      }
-      rc = vars_set(state, name, expanded_word, true);
-      free(expanded_word);
-      if (rc != 0) {
+    }
+
+    if (op == BRACED_HASH || op == BRACED_DBL_HASH || op == BRACED_PERCENT ||
+        op == BRACED_DBL_PERCENT) {
+        char *expanded_pattern;
+        size_t pattern_pos;
+        size_t vlen;
+        size_t best;
+
+        if (!is_set) {
+            if (state->nounset) {
+                posish_errorf("%s: parameter not set", name);
+                mark_noninteractive_expansion_fatal(state, 1);
+                free(name);
+                return -1;
+            }
+            value = "";
+        }
+
+        pattern_pos =
+            op == BRACED_DBL_HASH || op == BRACED_DBL_PERCENT ? op_pos + 2
+                                                               : op_pos + 1;
+        if (expand_fragment_to_string(expr, pattern_pos, elen, state,
+                                      &expanded_pattern) != 0) {
+            free(name);
+            return -1;
+        }
+
+        vlen = strlen(value);
+        best = (size_t)-1;
+        if (op == BRACED_HASH || op == BRACED_DBL_HASH) {
+            for (i = 0; i <= vlen; i++) {
+                char *candidate;
+                bool matched;
+
+                candidate = arena_xmalloc(i + 1);
+                memcpy(candidate, value, i);
+                candidate[i] = '\0';
+                matched = fnmatch(expanded_pattern, candidate, 0) == 0;
+                free(candidate);
+                if (!matched) {
+                    continue;
+                }
+                if (op == BRACED_HASH) {
+                    best = i;
+                    break;
+                }
+                best = i;
+            }
+
+            if (best == (size_t)-1) {
+                append_str(buf, len, cap, value);
+            } else {
+                append_str(buf, len, cap, value + best);
+            }
+        } else {
+            for (i = 0; i <= vlen; i++) {
+                const char *candidate;
+                bool matched;
+
+                candidate = value + i;
+                matched = fnmatch(expanded_pattern, candidate, 0) == 0;
+                if (!matched) {
+                    continue;
+                }
+                if (op == BRACED_PERCENT) {
+                    best = i;
+                } else {
+                    best = i;
+                    break;
+                }
+            }
+
+            if (best == (size_t)-1) {
+                append_str(buf, len, cap, value);
+            } else {
+                char *trimmed;
+
+                trimmed = arena_xmalloc(best + 1);
+                memcpy(trimmed, value, best);
+                trimmed[best] = '\0';
+                append_str(buf, len, cap, trimmed);
+                free(trimmed);
+            }
+        }
+
+        free(expanded_pattern);
         free(name);
-        return -1;
-      }
-      value = getenv(name);
+        return 0;
     }
-    if (value != NULL) {
-      append_str(buf, len, cap, value);
-    }
+
     free(name);
-    return 0;
-  }
-
-  if (op == BRACED_PERCENT) {
-    size_t pattern_start;
-    char *pattern;
-    char *expanded_pattern;
-    size_t plen;
-    size_t vlen;
-    size_t eplen;
-
-    pattern_start = op_pos + 1;
-    if (value == NULL) {
-      value = "";
-    }
-
-    plen = elen - pattern_start;
-    pattern = arena_xmalloc(plen + 1);
-    memcpy(pattern, expr + pattern_start, plen);
-    pattern[plen] = '\0';
-
-    if (expand_token(pattern, state, &expanded_pattern) != 0) {
-      free(pattern);
-      free(name);
-      return -1;
-    }
-
-    vlen = strlen(value);
-    eplen = strlen(expanded_pattern);
-    if (eplen > 0 && vlen >= eplen &&
-        strcmp(value + (vlen - eplen), expanded_pattern) == 0) {
-      char *trimmed;
-
-      trimmed = arena_xmalloc(vlen - eplen + 1);
-      memcpy(trimmed, value, vlen - eplen);
-      trimmed[vlen - eplen] = '\0';
-      append_str(buf, len, cap, trimmed);
-      free(trimmed);
-    } else {
-      append_str(buf, len, cap, value);
-    }
-
-    free(expanded_pattern);
-    free(pattern);
-    free(name);
-    return 0;
-  }
-
-  free(name);
-  return append_parameter(expr, elen, state, buf, len, cap);
+    return append_parameter(expr, elen, state, buf, len, cap);
 }
 
 static int expand_token(const char *in, struct shell_state *state, char **out) {
@@ -791,7 +982,10 @@ static int expand_token(const char *in, struct shell_state *state, char **out) {
       }
 
       if (is_short_parameter_char(in[i + 1])) {
-        append_parameter(in + i + 1, 1, state, &buf, &len, &cap);
+        if (append_parameter(in + i + 1, 1, state, &buf, &len, &cap) != 0) {
+          free(buf);
+          return -1;
+        }
         i += 2;
         continue;
       }
@@ -803,7 +997,11 @@ static int expand_token(const char *in, struct shell_state *state, char **out) {
         while (isalnum((unsigned char)in[j]) || in[j] == '_') {
           j++;
         }
-        append_parameter(in + i + 1, j - (i + 1), state, &buf, &len, &cap);
+        if (append_parameter(in + i + 1, j - (i + 1), state, &buf, &len, &cap) !=
+            0) {
+          free(buf);
+          return -1;
+        }
         i = j;
         continue;
       }
@@ -915,6 +1113,31 @@ int expand_words(const struct token_vec *in, struct token_vec *out,
         token_is_unquoted(in->items[i])) {
       free(expanded);
       continue;
+    }
+
+    if (split_fields && !state->noglob && token_is_unquoted(in->items[i]) &&
+        token_has_glob_meta(expanded)) {
+      glob_t g;
+      int grc;
+
+      memset(&g, 0, sizeof(g));
+      grc = glob(expanded, 0, NULL, &g);
+      if (grc == 0 && g.gl_pathc > 0) {
+        size_t j;
+
+        for (j = 0; j < g.gl_pathc; j++) {
+          out->items = xrealloc(out->items, sizeof(*out->items) * (out->len + 1));
+          out->items[out->len++] = arena_xstrdup(g.gl_pathv[j]);
+        }
+        globfree(&g);
+        free(expanded);
+        continue;
+      }
+      if (grc == 0) {
+        globfree(&g);
+      } else if (grc != GLOB_NOMATCH) {
+        globfree(&g);
+      }
     }
 
     out->items = xrealloc(out->items, sizeof(*out->items) * (out->len + 1));

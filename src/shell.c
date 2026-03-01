@@ -417,7 +417,16 @@ void shell_state_init(struct shell_state *state) {
     state->explicit_non_interactive = false;
     state->parent_was_interactive = false;
     state->monitor_mode = false;
+    state->allexport = false;
+    state->notify = false;
+    state->noclobber = false;
+    state->noglob = false;
+    state->hashondef = false;
+    state->noexec = false;
+    state->nounset = false;
     state->verbose = false;
+    state->xtrace = false;
+    state->ignoreeof = false;
     state->in_async_context = false;
     state->main_context = true;
     state->in_command_builtin = false;
@@ -442,6 +451,8 @@ void shell_state_init(struct shell_state *state) {
     state->readonly_count = 0;
     state->functions = NULL;
     state->function_count = 0;
+    state->unexported_names = NULL;
+    state->unexported_count = 0;
     state->positional_params = NULL;
     state->positional_count = 0;
 }
@@ -461,6 +472,11 @@ void shell_state_destroy(struct shell_state *state) {
     }
     free(state->functions);
 
+    for (i = 0; i < state->unexported_count; i++) {
+        free(state->unexported_names[i]);
+    }
+    free(state->unexported_names);
+
     for (i = 0; i < state->positional_count; i++) {
         free(state->positional_params[i]);
     }
@@ -476,6 +492,8 @@ void shell_state_destroy(struct shell_state *state) {
     state->readonly_count = 0;
     state->functions = NULL;
     state->function_count = 0;
+    state->unexported_names = NULL;
+    state->unexported_count = 0;
     state->positional_params = NULL;
     state->positional_count = 0;
     state->explicit_non_interactive = false;
@@ -494,7 +512,16 @@ void shell_state_destroy(struct shell_state *state) {
     state->running_exit_trap = false;
     state->running_signal_trap = false;
     state->last_handled_signal = 0;
+    state->allexport = false;
+    state->notify = false;
+    state->noclobber = false;
+    state->noglob = false;
+    state->hashondef = false;
+    state->noexec = false;
+    state->nounset = false;
     state->verbose = false;
+    state->xtrace = false;
+    state->ignoreeof = false;
     state->in_command_builtin = false;
     state->trap_entry_status_valid = false;
     state->trap_entry_status = 0;

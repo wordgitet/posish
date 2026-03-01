@@ -4,8 +4,10 @@
 
 #include "builtins/builtin.h"
 
+#include "arena.h"
 #include "error.h"
 #include "exec.h"
+#include "options.h"
 #include "path.h"
 #include "signals.h"
 #include "trace.h"
@@ -53,6 +55,7 @@ static int builtin_exec(struct shell_state *state, char *const argv[]) {
     trace_log(POSISH_TRACE_SIGNALS, "special builtin exec argv0=%s", argv[i]);
     (void)setenv("POSISH_PARENT_INTERACTIVE", state->interactive ? "1" : "0", 1);
     builtin_exec_prepare_signals(state);
+    vars_apply_unexported_in_child(state);
     execvp(argv[i], &argv[i]);
     saved_errno = errno;
     status = saved_errno == ENOENT ? 127 : 126;
@@ -517,48 +520,168 @@ done:
     return status;
 }
 
+static void free_positional_parameters(struct shell_state *state) {
+    size_t i;
+
+    for (i = 0; i < state->positional_count; i++) {
+        free(state->positional_params[i]);
+    }
+    free(state->positional_params);
+    state->positional_params = NULL;
+    state->positional_count = 0;
+}
+
+static void set_positional_parameters(struct shell_state *state, char *const argv[],
+                                      size_t start_index) {
+    size_t count;
+    size_t i;
+
+    free_positional_parameters(state);
+    for (count = 0; argv[start_index + count] != NULL; count++) {
+    }
+    if (count == 0) {
+        return;
+    }
+
+    state->positional_params =
+        arena_xmalloc(sizeof(*state->positional_params) * count);
+    for (i = 0; i < count; i++) {
+        state->positional_params[i] = arena_xstrdup(argv[start_index + i]);
+    }
+    state->positional_count = count;
+}
+
+static int builtin_shift(struct shell_state *state, char *const argv[]) {
+    size_t i;
+    long n;
+    char *end;
+    size_t shift_count;
+    size_t remain;
+
+    i = 1;
+    if (argv[i] != NULL && strcmp(argv[i], "--") == 0) {
+        i++;
+    }
+
+    n = 1;
+    if (argv[i] != NULL) {
+        errno = 0;
+        n = strtol(argv[i], &end, 10);
+        if (errno != 0 || end == argv[i] || *end != '\0' || n < 0) {
+            posish_errorf("shift: invalid shift count: %s", argv[i]);
+            return 1;
+        }
+        i++;
+    }
+    if (argv[i] != NULL) {
+        posish_errorf("shift: too many arguments");
+        return 1;
+    }
+
+    shift_count = (size_t)n;
+    if (shift_count > state->positional_count) {
+        posish_errorf("shift: shift count out of range");
+        return 1;
+    }
+    if (shift_count == 0) {
+        return 0;
+    }
+
+    for (i = 0; i < shift_count; i++) {
+        free(state->positional_params[i]);
+    }
+
+    remain = state->positional_count - shift_count;
+    if (remain > 0) {
+        memmove(state->positional_params, state->positional_params + shift_count,
+                sizeof(*state->positional_params) * remain);
+    }
+    state->positional_count = remain;
+    if (remain == 0) {
+        free(state->positional_params);
+        state->positional_params = NULL;
+    }
+    return 0;
+}
+
 static int builtin_set(struct shell_state *state, char *const argv[]) {
     size_t i;
     bool refresh_signal_policy;
+    bool set_positionals;
 
     i = 1;
     refresh_signal_policy = false;
+    set_positionals = false;
+
     while (argv[i] != NULL) {
         const char *opt;
+        bool enable;
         size_t j;
 
         opt = argv[i];
         if (strcmp(opt, "--") == 0) {
-            return 0;
+            i++;
+            set_positionals = true;
+            break;
         }
+
         if ((opt[0] != '-' && opt[0] != '+') || opt[1] == '\0') {
-            return 0;
+            set_positionals = true;
+            break;
         }
-        for (j = 1; opt[j] != '\0'; j++) {
-            if (!isalpha((unsigned char)opt[j])) {
-                posish_errorf("set: invalid option: %s", argv[i]);
+        enable = opt[0] == '-';
+
+        if ((strcmp(opt, "-o") == 0 || strcmp(opt, "+o") == 0)) {
+            const char *name;
+
+            if (argv[i + 1] == NULL) {
+                return enable ? options_print_set_o(stdout, state)
+                              : options_print_set_plus_o(stdout, state);
+            }
+            name = argv[i + 1];
+            if (!options_apply_long(state, name, enable, &refresh_signal_policy)) {
+                posish_errorf("set: invalid option name: %s", name);
                 return 2;
             }
-            if (opt[j] == 'e') {
-                state->errexit = opt[0] == '-';
-            } else if (opt[j] == 'i') {
-                bool new_interactive;
+            if (strcmp(name, "interactive") == 0) {
+                state->explicit_non_interactive = !enable;
+            }
+            i += 2;
+            continue;
+        }
 
-                new_interactive = opt[0] == '-';
-                if (state->interactive != new_interactive) {
-                    refresh_signal_policy = true;
-                }
-                state->interactive = new_interactive;
-            } else if (opt[j] == 'm') {
-                bool new_monitor_mode;
+        for (j = 1; opt[j] != '\0'; j++) {
+            if (opt[j] == 'o') {
+                const char *name;
 
-                new_monitor_mode = opt[0] == '-';
-                if (state->monitor_mode != new_monitor_mode) {
-                    refresh_signal_policy = true;
+                if (opt[j + 1] != '\0') {
+                    name = opt + j + 1;
+                    j = strlen(opt) - 1;
+                } else if (argv[i + 1] != NULL) {
+                    name = argv[++i];
+                } else {
+                    return enable ? options_print_set_o(stdout, state)
+                                  : options_print_set_plus_o(stdout, state);
                 }
-                state->monitor_mode = new_monitor_mode;
-            } else if (opt[j] == 'v') {
-                state->verbose = opt[0] == '-';
+
+                if (!options_apply_long(state, name, enable,
+                                        &refresh_signal_policy)) {
+                    posish_errorf("set: invalid option name: %s", name);
+                    return 2;
+                }
+                if (strcmp(name, "interactive") == 0) {
+                    state->explicit_non_interactive = !enable;
+                }
+                break;
+            }
+
+            if (!options_apply_short(state, opt[j], enable,
+                                     &refresh_signal_policy)) {
+                posish_errorf("set: invalid option: -%c", opt[j]);
+                return 2;
+            }
+            if (opt[j] == 'i') {
+                state->explicit_non_interactive = !enable;
             }
         }
         i++;
@@ -566,6 +689,9 @@ static int builtin_set(struct shell_state *state, char *const argv[]) {
 
     if (refresh_signal_policy) {
         shell_refresh_signal_policy(state);
+    }
+    if (set_positionals) {
+        set_positional_parameters(state, argv, i);
     }
     return 0;
 }
@@ -952,7 +1078,7 @@ static int builtin_export(struct shell_state *state, char *const argv[]) {
             continue;
         }
         if (split_assignment(argv[i], &name, &value) == 0) {
-            if (vars_set(state, name, value, true) != 0) {
+            if (vars_set_with_mode(state, name, value, true, true) != 0) {
                 status = 1;
             }
             free(name);
@@ -965,11 +1091,8 @@ static int builtin_export(struct shell_state *state, char *const argv[]) {
             continue;
         }
 
-        if (getenv(argv[i]) == NULL) {
-            if (setenv(argv[i], "", 1) != 0) {
-                perror("setenv");
-                status = 1;
-            }
+        if (vars_mark_exported(state, argv[i]) != 0) {
+            status = 1;
         }
     }
 
@@ -1425,6 +1548,11 @@ int builtin_try_special(struct shell_state *state, char *const argv[], bool *han
     if (strcmp(argv[0], "set") == 0) {
         *handled = true;
         return builtin_set(state, argv);
+    }
+
+    if (strcmp(argv[0], "shift") == 0) {
+        *handled = true;
+        return builtin_shift(state, argv);
     }
 
     if (strcmp(argv[0], "unset") == 0) {
