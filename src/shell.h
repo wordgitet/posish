@@ -27,6 +27,13 @@ struct shell_state {
     bool in_async_context;
     bool main_context;
     pid_t last_async_pid;
+    int break_levels;
+    int continue_levels;
+    int loop_depth;
+    bool return_requested;
+    int return_status;
+    int function_depth;
+    int dot_depth;
     char *exit_trap;
     bool running_exit_trap;
     bool running_signal_trap;

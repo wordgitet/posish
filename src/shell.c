@@ -373,6 +373,13 @@ void shell_state_init(struct shell_state *state) {
     state->in_async_context = false;
     state->main_context = true;
     state->last_async_pid = -1;
+    state->break_levels = 0;
+    state->continue_levels = 0;
+    state->loop_depth = 0;
+    state->return_requested = false;
+    state->return_status = 0;
+    state->function_depth = 0;
+    state->dot_depth = 0;
     state->exit_trap = NULL;
     state->running_exit_trap = false;
     state->running_signal_trap = false;
@@ -425,6 +432,13 @@ void shell_state_destroy(struct shell_state *state) {
     state->in_async_context = false;
     state->main_context = true;
     state->last_async_pid = -1;
+    state->break_levels = 0;
+    state->continue_levels = 0;
+    state->loop_depth = 0;
+    state->return_requested = false;
+    state->return_status = 0;
+    state->function_depth = 0;
+    state->dot_depth = 0;
     state->exit_trap = NULL;
     state->running_exit_trap = false;
     state->running_signal_trap = false;

@@ -1263,13 +1263,19 @@ static bool parse_function_definition(const char *source, char **name_out, char 
     return false;
 }
 
-static bool parse_simple_if(const char *source, char **cond_out, char **then_out) {
+static bool parse_simple_if(const char *source, char **cond_out, char **then_out,
+                            char **else_out) {
     size_t i;
     size_t cond_start;
     size_t cond_end;
     size_t then_start;
     size_t then_end;
+    size_t else_start;
+    size_t fi_start;
     char quote;
+    int paren_depth;
+    int brace_depth;
+    int if_depth;
 
     i = 0;
     while (isspace((unsigned char)source[i])) {
@@ -1287,6 +1293,8 @@ static bool parse_simple_if(const char *source, char **cond_out, char **then_out
     cond_end = 0;
     then_start = 0;
     quote = '\0';
+    paren_depth = 0;
+    brace_depth = 0;
     for (; source[i] != '\0'; i++) {
         char ch;
 
@@ -1300,7 +1308,24 @@ static bool parse_simple_if(const char *source, char **cond_out, char **then_out
                 quote = ch;
                 continue;
             }
-            if (ch == ';') {
+            if (ch == '(') {
+                paren_depth++;
+                continue;
+            }
+            if (ch == ')' && paren_depth > 0) {
+                paren_depth--;
+                continue;
+            }
+            if (ch == '{') {
+                brace_depth++;
+                continue;
+            }
+            if (ch == '}' && brace_depth > 0) {
+                brace_depth--;
+                continue;
+            }
+            if (paren_depth == 0 && brace_depth == 0 &&
+                (ch == ';' || ch == '\n')) {
                 size_t j;
                 j = i + 1;
                 while (isspace((unsigned char)source[j])) {
@@ -1333,7 +1358,12 @@ static bool parse_simple_if(const char *source, char **cond_out, char **then_out
         then_start++;
     }
     then_end = 0;
+    else_start = 0;
+    fi_start = 0;
     quote = '\0';
+    paren_depth = 0;
+    brace_depth = 0;
+    if_depth = 1;
     for (i = then_start; source[i] != '\0'; i++) {
         char ch;
 
@@ -1347,26 +1377,70 @@ static bool parse_simple_if(const char *source, char **cond_out, char **then_out
                 quote = ch;
                 continue;
             }
-            if (ch == ';') {
+            if (ch == '(') {
+                paren_depth++;
+                continue;
+            }
+            if (ch == ')' && paren_depth > 0) {
+                paren_depth--;
+                continue;
+            }
+            if (ch == '{') {
+                brace_depth++;
+                continue;
+            }
+            if (ch == '}' && brace_depth > 0) {
+                brace_depth--;
+                continue;
+            }
+            if (paren_depth == 0 && brace_depth == 0 &&
+                (isalpha((unsigned char)ch) || ch == '_') &&
+                (i == 0 || !(isalnum((unsigned char)source[i - 1]) ||
+                             source[i - 1] == '_'))) {
                 size_t j;
-                j = i + 1;
-                while (isspace((unsigned char)source[j])) {
+                size_t wlen;
+
+                j = i;
+                while (isalnum((unsigned char)source[j]) || source[j] == '_') {
                     j++;
                 }
-                if (strncmp(source + j, "fi", 2) == 0 &&
-                    keyword_boundary(source[j + 2])) {
-                    size_t k;
+                if (keyword_boundary(source[j])) {
+                    wlen = j - i;
+                    if (wlen == 2 && strncmp(source + i, "if", 2) == 0) {
+                        if_depth++;
+                    } else if (wlen == 2 && strncmp(source + i, "fi", 2) == 0) {
+                        if_depth--;
+                        if (if_depth == 0) {
+                            size_t tail;
 
-                    k = j + 2;
-                    while (isspace((unsigned char)source[k])) {
-                        k++;
+                            if (then_end == 0) {
+                                then_end = i;
+                            }
+                            fi_start = i;
+                            tail = j;
+                            while (isspace((unsigned char)source[tail])) {
+                                tail++;
+                            }
+                            if (source[tail] != '\0') {
+                                return false;
+                            }
+                            break;
+                        }
+                    } else if (if_depth == 1 &&
+                               ((wlen == 4 && strncmp(source + i, "else", 4) == 0) ||
+                                (wlen == 4 && strncmp(source + i, "elif", 4) == 0))) {
+                        if (then_end == 0) {
+                            then_end = i;
+                        }
+                        /*
+                         * Preserve `elif ...` by slicing from the keyword and
+                         * rewriting it to `if ...` below.
+                         */
+                        else_start = i;
                     }
-                    if (source[k] != '\0') {
-                        return false;
-                    }
-                    then_end = i;
-                    break;
                 }
+                i = j - 1;
+                continue;
             }
         } else if (quote == '\'' && ch == '\'') {
             quote = '\0';
@@ -1381,16 +1455,52 @@ static bool parse_simple_if(const char *source, char **cond_out, char **then_out
         }
     }
 
-    if (then_end == 0) {
+    if (then_end == 0 || fi_start == 0) {
         return false;
     }
     *cond_out = dup_trimmed_slice(source, cond_start, cond_end);
     *then_out = dup_trimmed_slice(source, then_start, then_end);
+    if (else_start != 0) {
+        char *else_body;
+
+        else_body = dup_trimmed_slice(source, else_start, fi_start);
+        if (strncmp(else_body, "elif", 4) == 0 && keyword_boundary(else_body[4])) {
+            size_t len;
+            char *rewritten;
+
+            len = strlen(else_body);
+            rewritten = arena_xmalloc(len - 4 + 2 + 1);
+            memcpy(rewritten, "if", 2);
+            memcpy(rewritten + 2, else_body + 4, len - 4 + 1);
+            free(else_body);
+            else_body = rewritten;
+        } else if (strncmp(else_body, "else", 4) == 0 &&
+                   keyword_boundary(else_body[4])) {
+            char *trimmed_else;
+            size_t j;
+
+            j = 4;
+            while (isspace((unsigned char)else_body[j])) {
+                j++;
+            }
+            trimmed_else = arena_xstrdup(else_body + j);
+            free(else_body);
+            else_body = trimmed_else;
+        }
+        *else_out = else_body;
+    } else {
+        *else_out = NULL;
+    }
     return true;
 }
 
+static bool has_pending_flow_control(const struct shell_state *state) {
+    return state->break_levels > 0 || state->continue_levels > 0 ||
+           state->return_requested;
+}
+
 static bool parse_simple_while(const char *source, char **cond_out,
-                               char **body_out) {
+                               char **body_out, bool *is_until_out) {
     size_t i;
     size_t cond_start;
     size_t cond_end;
@@ -1401,15 +1511,22 @@ static bool parse_simple_while(const char *source, char **cond_out,
     int brace_depth;
     int case_depth;
     int loop_depth;
+    bool is_until;
 
     i = 0;
     while (isspace((unsigned char)source[i])) {
         i++;
     }
-    if (strncmp(source + i, "while", 5) != 0 || !keyword_boundary(source[i + 5])) {
+    if (strncmp(source + i, "while", 5) == 0 && keyword_boundary(source[i + 5])) {
+        is_until = false;
+        i += 5;
+    } else if (strncmp(source + i, "until", 5) == 0 &&
+               keyword_boundary(source[i + 5])) {
+        is_until = true;
+        i += 5;
+    } else {
         return false;
     }
-    i += 5;
     while (isspace((unsigned char)source[i])) {
         i++;
     }
@@ -1605,6 +1722,7 @@ static bool parse_simple_while(const char *source, char **cond_out,
                                     dup_trimmed_slice(source, cond_start, cond_end);
                                 *body_out =
                                     dup_trimmed_slice(source, body_start, body_end);
+                                *is_until_out = is_until;
                                 return true;
                             }
                         }
@@ -1627,6 +1745,301 @@ static bool parse_simple_while(const char *source, char **cond_out,
     }
 
     return false;
+}
+
+static bool parse_simple_for(const char *source, char **name_out,
+                             char **words_out, char **body_out) {
+    size_t i;
+    size_t name_start;
+    size_t name_end;
+    size_t words_start;
+    size_t words_end;
+    size_t body_start;
+    size_t body_end;
+    char quote;
+    int paren_depth;
+    int brace_depth;
+    int case_depth;
+    int loop_depth;
+
+    i = 0;
+    while (isspace((unsigned char)source[i])) {
+        i++;
+    }
+    if (strncmp(source + i, "for", 3) != 0 || !keyword_boundary(source[i + 3])) {
+        return false;
+    }
+    i += 3;
+    while (isspace((unsigned char)source[i])) {
+        i++;
+    }
+
+    if (!is_name_start_char(source[i])) {
+        return false;
+    }
+    name_start = i;
+    i++;
+    while (is_name_char(source[i])) {
+        i++;
+    }
+    name_end = i;
+
+    while (isspace((unsigned char)source[i])) {
+        i++;
+    }
+    if (strncmp(source + i, "in", 2) != 0 || !keyword_boundary(source[i + 2])) {
+        return false;
+    }
+    i += 2;
+    while (isspace((unsigned char)source[i])) {
+        i++;
+    }
+
+    words_start = i;
+    words_end = 0;
+    body_start = 0;
+    quote = '\0';
+    paren_depth = 0;
+    brace_depth = 0;
+    case_depth = 0;
+    loop_depth = 0;
+
+    for (; source[i] != '\0'; i++) {
+        char ch;
+
+        ch = source[i];
+        if (quote == '\0') {
+            if (ch == '\\' && source[i + 1] != '\0') {
+                i++;
+                continue;
+            }
+            if (ch == '\'' || ch == '"') {
+                quote = ch;
+                continue;
+            }
+            if (ch == '(') {
+                paren_depth++;
+                continue;
+            }
+            if (ch == ')' && paren_depth > 0) {
+                paren_depth--;
+                continue;
+            }
+            if (ch == '{') {
+                brace_depth++;
+                continue;
+            }
+            if (ch == '}' && brace_depth > 0) {
+                brace_depth--;
+                continue;
+            }
+            if (paren_depth == 0 && brace_depth == 0 &&
+                (isalpha((unsigned char)ch) || ch == '_') &&
+                (i == 0 || !(isalnum((unsigned char)source[i - 1]) ||
+                             source[i - 1] == '_'))) {
+                size_t j;
+                size_t wlen;
+
+                j = i;
+                while (isalnum((unsigned char)source[j]) || source[j] == '_') {
+                    j++;
+                }
+                if (keyword_boundary(source[j])) {
+                    wlen = j - i;
+                    if (wlen == 4 && strncmp(source + i, "case", 4) == 0) {
+                        case_depth++;
+                    } else if (wlen == 4 &&
+                               strncmp(source + i, "esac", 4) == 0 &&
+                               case_depth > 0) {
+                        case_depth--;
+                    } else if (case_depth == 0) {
+                        if ((wlen == 5 &&
+                             strncmp(source + i, "while", 5) == 0) ||
+                            (wlen == 5 &&
+                             strncmp(source + i, "until", 5) == 0) ||
+                            (wlen == 3 && strncmp(source + i, "for", 3) == 0)) {
+                            loop_depth++;
+                        } else if (wlen == 4 &&
+                                   strncmp(source + i, "done", 4) == 0 &&
+                                   loop_depth > 0) {
+                            loop_depth--;
+                        }
+                    }
+                }
+                i = j - 1;
+                continue;
+            }
+            if (paren_depth == 0 && brace_depth == 0 && case_depth == 0 &&
+                loop_depth == 0 && (ch == ';' || ch == '\n')) {
+                size_t j;
+
+                j = i + 1;
+                while (isspace((unsigned char)source[j])) {
+                    j++;
+                }
+                if (strncmp(source + j, "do", 2) == 0 &&
+                    keyword_boundary(source[j + 2])) {
+                    words_end = i;
+                    body_start = j + 2;
+                    break;
+                }
+            }
+        } else if (quote == '\'' && ch == '\'') {
+            quote = '\0';
+        } else if (quote == '"') {
+            if (ch == '\\' && source[i + 1] != '\0') {
+                i++;
+                continue;
+            }
+            if (ch == '"') {
+                quote = '\0';
+            }
+        }
+    }
+
+    if (words_end == 0) {
+        return false;
+    }
+    while (isspace((unsigned char)source[body_start])) {
+        body_start++;
+    }
+
+    quote = '\0';
+    paren_depth = 0;
+    brace_depth = 0;
+    case_depth = 0;
+    loop_depth = 1;
+    body_end = 0;
+
+    for (i = body_start; source[i] != '\0'; i++) {
+        char ch;
+
+        ch = source[i];
+        if (quote == '\0') {
+            if (ch == '\\' && source[i + 1] != '\0') {
+                i++;
+                continue;
+            }
+            if (ch == '\'' || ch == '"') {
+                quote = ch;
+                continue;
+            }
+            if (ch == '(') {
+                paren_depth++;
+                continue;
+            }
+            if (ch == ')' && paren_depth > 0) {
+                paren_depth--;
+                continue;
+            }
+            if (ch == '{') {
+                brace_depth++;
+                continue;
+            }
+            if (ch == '}' && brace_depth > 0) {
+                brace_depth--;
+                continue;
+            }
+            if (paren_depth == 0 && brace_depth == 0 &&
+                (isalpha((unsigned char)ch) || ch == '_') &&
+                (i == 0 || !(isalnum((unsigned char)source[i - 1]) ||
+                             source[i - 1] == '_'))) {
+                size_t j;
+                size_t wlen;
+
+                j = i;
+                while (isalnum((unsigned char)source[j]) || source[j] == '_') {
+                    j++;
+                }
+                if (keyword_boundary(source[j])) {
+                    wlen = j - i;
+                    if (wlen == 4 && strncmp(source + i, "case", 4) == 0) {
+                        case_depth++;
+                    } else if (wlen == 4 &&
+                               strncmp(source + i, "esac", 4) == 0 &&
+                               case_depth > 0) {
+                        case_depth--;
+                    } else if (case_depth == 0) {
+                        if ((wlen == 5 &&
+                             strncmp(source + i, "while", 5) == 0) ||
+                            (wlen == 5 &&
+                             strncmp(source + i, "until", 5) == 0) ||
+                            (wlen == 3 && strncmp(source + i, "for", 3) == 0)) {
+                            loop_depth++;
+                        } else if (wlen == 4 &&
+                                   strncmp(source + i, "done", 4) == 0) {
+                            loop_depth--;
+                            if (loop_depth == 0) {
+                                size_t tail;
+
+                                body_end = i;
+                                tail = j;
+                                while (isspace((unsigned char)source[tail])) {
+                                    tail++;
+                                }
+                                if (source[tail] != '\0') {
+                                    return false;
+                                }
+
+                                *name_out =
+                                    dup_trimmed_slice(source, name_start, name_end);
+                                *words_out =
+                                    dup_trimmed_slice(source, words_start, words_end);
+                                *body_out =
+                                    dup_trimmed_slice(source, body_start, body_end);
+                                return true;
+                            }
+                        }
+                    }
+                }
+                i = j - 1;
+                continue;
+            }
+        } else if (quote == '\'' && ch == '\'') {
+            quote = '\0';
+        } else if (quote == '"') {
+            if (ch == '\\' && source[i + 1] != '\0') {
+                i++;
+                continue;
+            }
+            if (ch == '"') {
+                quote = '\0';
+            }
+        }
+    }
+
+    return false;
+}
+
+static bool andor_should_treat_as_single_compound(const char *source) {
+    char *trimmed;
+    char *cond;
+    char *body;
+    char *name;
+    char *words;
+    bool is_until;
+    bool matched;
+
+    trimmed = dup_trimmed_slice(source, 0, strlen(source));
+    cond = NULL;
+    body = NULL;
+    name = NULL;
+    words = NULL;
+    is_until = false;
+    matched = false;
+
+    if (parse_simple_while(trimmed, &cond, &body, &is_until)) {
+        matched = true;
+    } else if (parse_simple_for(trimmed, &name, &words, &body)) {
+        matched = true;
+    }
+
+    free(cond);
+    free(body);
+    free(name);
+    free(words);
+    free(trimmed);
+    return matched;
 }
 
 static int expand_case_word(const char *expr, struct shell_state *state,
@@ -2811,8 +3224,14 @@ static int execute_simple_command(struct shell_state *state, const char *source,
             if (function_body != NULL) {
                 /* Functions run in the current shell with temporary $1..$n. */
                 positional_push(state, argv, argc, &positional_backup);
+                state->function_depth++;
                 status = execute_program_text(state, function_body);
+                state->function_depth--;
                 positional_pop(state, &positional_backup);
+                if (state->return_requested) {
+                    status = state->return_status;
+                    state->return_requested = false;
+                }
                 handled = true;
             } else {
                 status = builtin_dispatch(state, argv, &handled);
@@ -3196,8 +3615,13 @@ static int execute_command_atom(struct shell_state *state, const char *source,
     char *fn_body;
     char *if_cond;
     char *if_then;
+    char *if_else;
     char *while_cond;
     char *while_body;
+    char *for_name;
+    char *for_words;
+    char *for_body;
+    bool while_is_until;
     int status;
 
     trimmed = dup_trimmed_slice(source, 0, strlen(source));
@@ -3210,8 +3634,13 @@ static int execute_command_atom(struct shell_state *state, const char *source,
     fn_body = NULL;
     if_cond = NULL;
     if_then = NULL;
+    if_else = NULL;
     while_cond = NULL;
     while_body = NULL;
+    for_name = NULL;
+    for_words = NULL;
+    for_body = NULL;
+    while_is_until = false;
     inner = NULL;
     subshell_redirs = NULL;
     brace_inner = NULL;
@@ -3230,33 +3659,136 @@ static int execute_command_atom(struct shell_state *state, const char *source,
         return 0;
     }
 
-    if (parse_simple_if(trimmed, &if_cond, &if_then)) {
+    if (parse_simple_if(trimmed, &if_cond, &if_then, &if_else)) {
         status = execute_program_text(state, if_cond);
-        if (status == 0 && !state->should_exit) {
-            status = execute_program_text(state, if_then);
+        if (!state->should_exit && !state->return_requested) {
+            if (status == 0) {
+                status = execute_program_text(state, if_then);
+            } else if (if_else != NULL) {
+                status = execute_program_text(state, if_else);
+            }
         }
         free(if_cond);
         free(if_then);
+        free(if_else);
         free(trimmed);
         return status;
     }
 
-    if (parse_simple_while(trimmed, &while_cond, &while_body)) {
+    if (parse_simple_while(trimmed, &while_cond, &while_body, &while_is_until)) {
         status = 0;
+        state->loop_depth++;
         while (!state->should_exit) {
             int cond_status;
 
             cond_status = execute_program_text(state, while_cond);
-            if (cond_status != 0 || state->should_exit) {
+            if (state->should_exit || state->return_requested) {
+                break;
+            }
+            if ((!while_is_until && cond_status != 0) ||
+                (while_is_until && cond_status == 0)) {
                 break;
             }
             status = execute_program_text(state, while_body);
-            if (state->should_exit) {
+            if (state->should_exit || state->return_requested) {
                 break;
             }
+            if (state->break_levels > 0) {
+                state->break_levels--;
+                status = 0;
+                break;
+            }
+            if (state->continue_levels > 0) {
+                state->continue_levels--;
+                status = 0;
+                if (state->continue_levels > 0) {
+                    break;
+                }
+                continue;
+            }
         }
+        state->loop_depth--;
         free(while_cond);
         free(while_body);
+        free(trimmed);
+        return status;
+    }
+
+    if (parse_simple_for(trimmed, &for_name, &for_words, &for_body)) {
+        struct token_vec for_lexed;
+        struct word_vec for_raw_words;
+        struct redir_vec for_redirs;
+        struct token_vec for_expanded;
+        struct token_vec for_in;
+        size_t i;
+
+        for_lexed.items = NULL;
+        for_lexed.len = 0;
+        for_raw_words.items = NULL;
+        for_raw_words.len = 0;
+        for_redirs.items = NULL;
+        for_redirs.len = 0;
+        for_expanded.items = NULL;
+        for_expanded.len = 0;
+        status = 0;
+
+        if (for_words[0] != '\0') {
+            if (lexer_split_words(for_words, &for_lexed) != 0) {
+                status = 2;
+                goto for_done;
+            }
+            if (collect_words_and_redirs(&for_lexed, &for_raw_words, &for_redirs) != 0) {
+                status = 2;
+                goto for_done;
+            }
+            if (for_redirs.len != 0) {
+                posish_errorf("for: redirection in word list is not supported");
+                status = 2;
+                goto for_done;
+            }
+
+            for_in.items = for_raw_words.items;
+            for_in.len = for_raw_words.len;
+            if (expand_words(&for_in, &for_expanded, state, false) != 0) {
+                status = 2;
+                goto for_done;
+            }
+        }
+
+        state->loop_depth++;
+        for (i = 0; i < for_expanded.len && !state->should_exit; i++) {
+            if (vars_set(state, for_name, for_expanded.items[i], true) != 0) {
+                status = 1;
+                break;
+            }
+
+            status = execute_program_text(state, for_body);
+            if (state->should_exit || state->return_requested) {
+                break;
+            }
+            if (state->break_levels > 0) {
+                state->break_levels--;
+                status = 0;
+                break;
+            }
+            if (state->continue_levels > 0) {
+                state->continue_levels--;
+                status = 0;
+                if (state->continue_levels > 0) {
+                    break;
+                }
+            }
+        }
+        state->loop_depth--;
+
+for_done:
+        lexer_free_tokens(&for_lexed);
+        word_vec_free(&for_raw_words);
+        redir_vec_free(&for_redirs);
+        lexer_free_tokens(&for_expanded);
+        free(for_name);
+        free(for_words);
+        free(for_body);
         free(trimmed);
         return status;
     }
@@ -3553,11 +4085,22 @@ static int execute_andor(struct shell_state *state, const char *source) {
     char quote;
     int paren_depth;
     int brace_depth;
+    int if_depth;
+    int case_depth;
+    int loop_depth;
     char **parts;
     enum andor_op *ops;
     size_t part_len;
     size_t op_len;
     int status;
+
+    /*
+     * Compound loop commands can contain &&/|| internally in their bodies.
+     * Parse them as a single pipeline atom here to avoid premature splitting.
+     */
+    if (andor_should_treat_as_single_compound(source)) {
+        return execute_pipeline(state, source);
+    }
 
     parts = NULL;
     ops = NULL;
@@ -3566,6 +4109,9 @@ static int execute_andor(struct shell_state *state, const char *source) {
     quote = '\0';
     paren_depth = 0;
     brace_depth = 0;
+    if_depth = 0;
+    case_depth = 0;
+    loop_depth = 0;
     start = 0;
 
     for (i = 0;; i++) {
@@ -3584,6 +4130,46 @@ static int execute_andor(struct shell_state *state, const char *source) {
             }
             if (ch == '\'' || ch == '"') {
                 quote = ch;
+            } else if (paren_depth == 0 && brace_depth == 0 &&
+                       (isalpha((unsigned char)ch) || ch == '_') &&
+                       (i == 0 || !(isalnum((unsigned char)source[i - 1]) ||
+                                    source[i - 1] == '_'))) {
+                size_t j;
+
+                j = i;
+                while (isalnum((unsigned char)source[j]) || source[j] == '_') {
+                    j++;
+                }
+                if (keyword_boundary(source[j])) {
+                    size_t wlen;
+
+                    wlen = j - i;
+                    if (wlen == 2 && strncmp(source + i, "if", 2) == 0) {
+                        if_depth++;
+                    } else if (wlen == 2 &&
+                               strncmp(source + i, "fi", 2) == 0 &&
+                               if_depth > 0) {
+                        if_depth--;
+                    } else if (wlen == 4 && strncmp(source + i, "case", 4) == 0) {
+                        case_depth++;
+                    } else if (wlen == 4 &&
+                               strncmp(source + i, "esac", 4) == 0 &&
+                               case_depth > 0) {
+                        case_depth--;
+                    } else if (case_depth == 0) {
+                        if ((wlen == 5 && strncmp(source + i, "while", 5) == 0) ||
+                            (wlen == 5 && strncmp(source + i, "until", 5) == 0) ||
+                            (wlen == 3 && strncmp(source + i, "for", 3) == 0)) {
+                            loop_depth++;
+                        } else if (wlen == 4 &&
+                                   strncmp(source + i, "done", 4) == 0 &&
+                                   loop_depth > 0) {
+                            loop_depth--;
+                        }
+                    }
+                }
+                i = j - 1;
+                continue;
             } else if (ch == '(') {
                 paren_depth++;
             } else if (ch == ')' && paren_depth > 0) {
@@ -3592,10 +4178,14 @@ static int execute_andor(struct shell_state *state, const char *source) {
                 brace_depth++;
             } else if (ch == '}' && brace_depth > 0) {
                 brace_depth--;
-            } else if (paren_depth == 0 && brace_depth == 0 && ch == '&' &&
+            } else if (paren_depth == 0 && brace_depth == 0 &&
+                       if_depth == 0 && case_depth == 0 && loop_depth == 0 &&
+                       ch == '&' &&
                        source[i + 1] == '&') {
                 delim = true;
-            } else if (paren_depth == 0 && brace_depth == 0 && ch == '|' &&
+            } else if (paren_depth == 0 && brace_depth == 0 &&
+                       if_depth == 0 && case_depth == 0 && loop_depth == 0 &&
+                       ch == '|' &&
                        source[i + 1] == '|') {
                 delim = true;
             }
@@ -3646,7 +4236,7 @@ static int execute_andor(struct shell_state *state, const char *source) {
     }
 
     status = execute_pipeline(state, parts[0]);
-    if (state->should_exit) {
+    if (state->should_exit || has_pending_flow_control(state)) {
         free_string_vec(parts, part_len);
         free(ops);
         return status;
@@ -3665,6 +4255,9 @@ static int execute_andor(struct shell_state *state, const char *source) {
         if (state->should_exit) {
             break;
         }
+        if (has_pending_flow_control(state)) {
+            break;
+        }
     }
 
     free_string_vec(parts, part_len);
@@ -3678,6 +4271,7 @@ static int execute_program_text(struct shell_state *state, const char *source) {
     char quote;
     int paren_depth;
     int brace_depth;
+    int if_depth;
     int case_depth;
     int loop_depth;
     int status;
@@ -3686,6 +4280,7 @@ static int execute_program_text(struct shell_state *state, const char *source) {
     quote = '\0';
     paren_depth = 0;
     brace_depth = 0;
+    if_depth = 0;
     case_depth = 0;
     loop_depth = 0;
     start = 0;
@@ -3722,7 +4317,13 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                     size_t wlen;
 
                     wlen = j - i;
-                    if (wlen == 4 && strncmp(source + i, "case", 4) == 0) {
+                    if (wlen == 2 && strncmp(source + i, "if", 2) == 0) {
+                        if_depth++;
+                    } else if (wlen == 2 &&
+                               strncmp(source + i, "fi", 2) == 0 &&
+                               if_depth > 0) {
+                        if_depth--;
+                    } else if (wlen == 4 && strncmp(source + i, "case", 4) == 0) {
                         case_depth++;
                     } else if (wlen == 4 &&
                                strncmp(source + i, "esac", 4) == 0 &&
@@ -3751,7 +4352,7 @@ static int execute_program_text(struct shell_state *state, const char *source) {
             } else if (ch == '}' && brace_depth > 0) {
                 brace_depth--;
             } else if (paren_depth == 0 && brace_depth == 0 &&
-                       case_depth == 0 && loop_depth == 0 &&
+                       if_depth == 0 && case_depth == 0 && loop_depth == 0 &&
                        (ch == ';' || ch == '\n' ||
                         /*
                          * Treat only a control-operator '&' as async
@@ -3821,6 +4422,10 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                 }
                 shell_run_pending_traps(state);
                 if (state->should_exit) {
+                    free(part);
+                    break;
+                }
+                if (has_pending_flow_control(state)) {
                     free(part);
                     break;
                 }

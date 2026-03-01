@@ -9,6 +9,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -191,6 +192,62 @@ static char *find_command_path(const char *name, bool use_standard_path) {
             break;
         }
         p = end + 1;
+    }
+
+    return NULL;
+}
+
+static char *find_dot_script_path(const char *name) {
+    const char *path;
+    const char *p;
+
+    if (strchr(name, '/') != NULL) {
+        if (access(name, R_OK) == 0) {
+            return xstrdup_local(name);
+        }
+        return NULL;
+    }
+
+    path = getenv("PATH");
+    if (path == NULL || path[0] == '\0') {
+        path = ".";
+    }
+    p = path;
+
+    while (1) {
+        const char *colon;
+        size_t dir_len;
+        const char *dir;
+        size_t name_len;
+        char *candidate;
+
+        colon = strchr(p, ':');
+        dir_len = colon == NULL ? strlen(p) : (size_t)(colon - p);
+        dir = p;
+        if (dir_len == 0) {
+            dir = ".";
+            dir_len = 1;
+        }
+
+        name_len = strlen(name);
+        candidate = malloc(dir_len + 1 + name_len + 1);
+        if (candidate == NULL) {
+            perror("malloc");
+            return NULL;
+        }
+        memcpy(candidate, dir, dir_len);
+        candidate[dir_len] = '/';
+        memcpy(candidate + dir_len + 1, name, name_len + 1);
+
+        if (access(candidate, R_OK) == 0) {
+            return candidate;
+        }
+        free(candidate);
+
+        if (colon == NULL) {
+            break;
+        }
+        p = colon + 1;
     }
 
     return NULL;
@@ -460,6 +517,137 @@ static int builtin_set(struct shell_state *state, char *const argv[]) {
         shell_refresh_signal_policy(state);
     }
     return 0;
+}
+
+static int parse_loop_count_operand(const char *name, const char *text,
+                                    int *count_out) {
+    long n;
+    char *end;
+
+    errno = 0;
+    n = strtol(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' || n <= 0 || n > INT_MAX) {
+        posish_errorf("%s: invalid loop count: %s", name, text);
+        return 1;
+    }
+
+    *count_out = (int)n;
+    return 0;
+}
+
+static int builtin_break_or_continue(struct shell_state *state, char *const argv[],
+                                     bool is_continue) {
+    const char *name;
+    int count;
+
+    name = is_continue ? "continue" : "break";
+    count = 1;
+
+    if (argv[1] != NULL) {
+        if (parse_loop_count_operand(name, argv[1], &count) != 0) {
+            return 1;
+        }
+        if (argv[2] != NULL) {
+            posish_errorf("%s: too many arguments", name);
+            return 1;
+        }
+    }
+
+    if (state->loop_depth <= 0) {
+        posish_errorf("%s: only meaningful in a loop", name);
+        return 1;
+    }
+
+    if (is_continue) {
+        state->continue_levels = count;
+        state->break_levels = 0;
+    } else {
+        state->break_levels = count;
+        state->continue_levels = 0;
+    }
+    return 0;
+}
+
+static int builtin_return(struct shell_state *state, char *const argv[]) {
+    size_t i;
+    int status;
+    long n;
+    char *end;
+
+    i = 1;
+    if (argv[i] != NULL && strcmp(argv[i], "--") == 0) {
+        i++;
+    }
+
+    status = state->last_status;
+    if (argv[i] != NULL) {
+        errno = 0;
+        n = strtol(argv[i], &end, 10);
+        if (errno != 0 || end == argv[i] || *end != '\0') {
+            posish_errorf("return: numeric argument required: %s", argv[i]);
+            return 2;
+        }
+        status = (unsigned char)n;
+        i++;
+    }
+
+    if (argv[i] != NULL) {
+        posish_errorf("return: too many arguments");
+        return 1;
+    }
+
+    if (state->function_depth <= 0 && state->dot_depth <= 0) {
+        posish_errorf("return: can only be used in a function or sourced script");
+        return 1;
+    }
+
+    state->return_requested = true;
+    state->return_status = status;
+    return status;
+}
+
+static int builtin_dot(struct shell_state *state, char *const argv[]) {
+    size_t i;
+    char *path;
+    int status;
+    bool saved_interactive;
+
+    i = 1;
+    if (argv[i] != NULL && strcmp(argv[i], "--") == 0) {
+        i++;
+    }
+    if (argv[i] == NULL) {
+        posish_errorf(".: filename argument required");
+        return 2;
+    }
+
+    path = find_dot_script_path(argv[i]);
+    if (path == NULL) {
+        posish_errorf(".: %s: file not found", argv[i]);
+        if (!state->interactive) {
+            state->should_exit = true;
+            state->exit_status = 1;
+        }
+        return 1;
+    }
+
+    /*
+     * Source execution runs in the current shell but should not permanently
+     * flip interactive mode just because shell_run_file uses non-interactive
+     * stream parsing internally.
+     */
+    saved_interactive = state->interactive;
+    state->dot_depth++;
+    status = shell_run_file(state, path);
+    state->dot_depth--;
+    state->interactive = saved_interactive;
+    free(path);
+
+    if (state->return_requested) {
+        status = state->return_status;
+        state->return_requested = false;
+    }
+    return status;
 }
 
 static int split_assignment(const char *word, char **name_out, const char **value_out) {
@@ -1102,6 +1290,11 @@ static int builtin_trap(struct shell_state *state, char *const argv[]) {
 }
 
 int builtin_try_special(struct shell_state *state, char *const argv[], bool *handled) {
+    if (strcmp(argv[0], ".") == 0) {
+        *handled = true;
+        return builtin_dot(state, argv);
+    }
+
     if (strcmp(argv[0], ":") == 0) {
         *handled = true;
         return 0;
@@ -1110,6 +1303,21 @@ int builtin_try_special(struct shell_state *state, char *const argv[], bool *han
     if (strcmp(argv[0], "exec") == 0) {
         *handled = true;
         return builtin_exec(state, argv);
+    }
+
+    if (strcmp(argv[0], "break") == 0) {
+        *handled = true;
+        return builtin_break_or_continue(state, argv, false);
+    }
+
+    if (strcmp(argv[0], "continue") == 0) {
+        *handled = true;
+        return builtin_break_or_continue(state, argv, true);
+    }
+
+    if (strcmp(argv[0], "return") == 0) {
+        *handled = true;
+        return builtin_return(state, argv);
     }
 
     if (strcmp(argv[0], "set") == 0) {
