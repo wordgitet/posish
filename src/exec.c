@@ -55,7 +55,18 @@ struct positional_backup {
 };
 
 static int execute_program_text(struct shell_state *state, const char *source);
+static int execute_program_text_internal(struct shell_state *state,
+                                         const char *source,
+                                         bool apply_aliases);
 static int execute_andor(struct shell_state *state, const char *source);
+static bool is_assignment_word(const char *word);
+static bool find_command_subst_end(const char *source, size_t start,
+                                   size_t *out_end);
+static bool find_dollar_single_quote_end(const char *source, size_t start,
+                                         size_t *out_end);
+static bool command_text_needs_more_input(const char *source,
+                                          bool include_heredoc);
+static bool looks_like_function_header_only(const char *source);
 
 static void *xrealloc(void *ptr, size_t size) {
     void *p;
@@ -245,7 +256,7 @@ static char *lookup_alias_value_dup(const char *name) {
     key = alias_env_key(name);
     value = getenv(key);
     free(key);
-    if (value == NULL || value[0] == '\0') {
+    if (value == NULL) {
         return NULL;
     }
 
@@ -278,9 +289,718 @@ static bool alias_value_has_trailing_blank(const char *value) {
     if (value == NULL || value[0] == '\0') {
         return false;
     }
+
     len = strlen(value);
-    return len > 0 && (value[len - 1] == ' ' || value[len - 1] == '\t' ||
-                       value[len - 1] == '\n');
+    return len > 0 && (value[len - 1] == ' ' || value[len - 1] == '\t');
+}
+
+struct alias_token {
+    char *leading_ws;
+    char *text;
+    char *suppress_alias;
+    bool force_expand;
+    bool is_operator;
+};
+
+struct alias_token_vec {
+    struct alias_token *items;
+    size_t len;
+};
+
+static void alias_token_vec_free(struct alias_token_vec *vec) {
+    size_t i;
+
+    for (i = 0; i < vec->len; i++) {
+        free(vec->items[i].leading_ws);
+        free(vec->items[i].text);
+        free(vec->items[i].suppress_alias);
+    }
+    free(vec->items);
+    vec->items = NULL;
+    vec->len = 0;
+}
+
+static int alias_token_vec_push(struct alias_token_vec *vec, const char *leading_ws,
+                                size_t leading_ws_len, const char *text, size_t len,
+                                bool is_operator,
+                                const char *suppress_alias) {
+    char *leading_copy;
+    char *copy;
+    char *suppress_copy;
+
+    leading_copy = arena_xmalloc(leading_ws_len + 1);
+    memcpy(leading_copy, leading_ws, leading_ws_len);
+    leading_copy[leading_ws_len] = '\0';
+
+    copy = arena_xmalloc(len + 1);
+    memcpy(copy, text, len);
+    copy[len] = '\0';
+    suppress_copy = NULL;
+    if (suppress_alias != NULL) {
+        suppress_copy = arena_xstrdup(suppress_alias);
+    }
+    vec->items = arena_xrealloc(vec->items, sizeof(*vec->items) * (vec->len + 1));
+    vec->items[vec->len].leading_ws = leading_copy;
+    vec->items[vec->len].text = copy;
+    vec->items[vec->len].suppress_alias = suppress_copy;
+    vec->items[vec->len].force_expand = false;
+    vec->items[vec->len].is_operator = is_operator;
+    vec->len++;
+    return 0;
+}
+
+static size_t alias_operator_len_at(const char *s, size_t pos) {
+    if (s[pos] == '!') {
+        bool next_boundary;
+        bool prev_boundary;
+
+        prev_boundary = pos == 0 || isspace((unsigned char)s[pos - 1]) ||
+                        s[pos - 1] == ';' || s[pos - 1] == '&' ||
+                        s[pos - 1] == '|' || s[pos - 1] == '(' ||
+                        s[pos - 1] == ')' || s[pos - 1] == '{' ||
+                        s[pos - 1] == '}' || s[pos - 1] == '<' ||
+                        s[pos - 1] == '>';
+        next_boundary = s[pos + 1] == '\0' ||
+                        isspace((unsigned char)s[pos + 1]) ||
+                        s[pos + 1] == ';' || s[pos + 1] == '&' ||
+                        s[pos + 1] == '|' || s[pos + 1] == '(' ||
+                        s[pos + 1] == ')' || s[pos + 1] == '{' ||
+                        s[pos + 1] == '}';
+        if (prev_boundary && next_boundary) {
+            return 1;
+        }
+        return 0;
+    }
+
+    if (s[pos] == '\0') {
+        return 0;
+    }
+    if (s[pos] == '<' && s[pos + 1] == '<' && s[pos + 2] == '-') {
+        return 3;
+    }
+    if ((s[pos] == '&' && s[pos + 1] == '&') ||
+        (s[pos] == '|' && s[pos + 1] == '|') ||
+        (s[pos] == ';' && s[pos + 1] == ';') ||
+        (s[pos] == '<' && s[pos + 1] == '<') ||
+        (s[pos] == '>' && s[pos + 1] == '>') ||
+        (s[pos] == '<' && s[pos + 1] == '&') ||
+        (s[pos] == '>' && s[pos + 1] == '&') ||
+        (s[pos] == '<' && s[pos + 1] == '>')) {
+        return 2;
+    }
+    if (s[pos] == ';' || s[pos] == '|' || s[pos] == '&' || s[pos] == '(' ||
+        s[pos] == ')' || s[pos] == '{' || s[pos] == '}' || s[pos] == '<' ||
+        s[pos] == '>') {
+        return 1;
+    }
+    return 0;
+}
+
+static bool alias_op_is_redirection(const char *op) {
+    return strcmp(op, "<") == 0 || strcmp(op, ">") == 0 ||
+           strcmp(op, "<<") == 0 || strcmp(op, "<<-") == 0 ||
+           strcmp(op, ">>") == 0 || strcmp(op, "<&") == 0 ||
+           strcmp(op, ">&") == 0 || strcmp(op, "<>") == 0;
+}
+
+static bool alias_word_opens_command_position(const char *word) {
+    return strcmp(word, "then") == 0 || strcmp(word, "do") == 0 ||
+           strcmp(word, "else") == 0 || strcmp(word, "elif") == 0;
+}
+
+static bool alias_word_is_io_number(const char *word) {
+    size_t i;
+
+    if (word == NULL || word[0] == '\0') {
+        return false;
+    }
+    for (i = 0; word[i] != '\0'; i++) {
+        if (!isdigit((unsigned char)word[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool alias_word_is_reserved_in_context(const char *word,
+                                              bool command_position,
+                                              int for_state,
+                                              int case_state) {
+    if (!command_position) {
+        return false;
+    }
+
+    /*
+     * After `for`/`case`, the parser expects a name/word operand, so words
+     * that are usually reserved must still be alias-expandable there.
+     */
+    if (for_state == 1) {
+        return false;
+    }
+    if (case_state == 1) {
+        return true;
+    }
+    if (for_state == 2) {
+        return strcmp(word, "in") == 0 || strcmp(word, "do") == 0;
+    }
+    if (for_state == 3) {
+        return strcmp(word, "do") == 0;
+    }
+    if (for_state == 4 && strcmp(word, "done") == 0) {
+        return true;
+    }
+    if (case_state == 2) {
+        return strcmp(word, "in") == 0;
+    }
+    if (case_state == 3) {
+        return strcmp(word, "esac") == 0;
+    }
+
+    return strcmp(word, "if") == 0 || strcmp(word, "then") == 0 ||
+           strcmp(word, "elif") == 0 || strcmp(word, "else") == 0 ||
+           strcmp(word, "fi") == 0 || strcmp(word, "while") == 0 ||
+           strcmp(word, "until") == 0 || strcmp(word, "for") == 0 ||
+           strcmp(word, "in") == 0 || strcmp(word, "do") == 0 ||
+           strcmp(word, "done") == 0 || strcmp(word, "case") == 0 ||
+           strcmp(word, "esac") == 0;
+}
+
+static bool alias_chain_contains(const char *chain, const char *name) {
+    size_t name_len;
+    const char *p;
+
+    if (chain == NULL || name == NULL) {
+        return false;
+    }
+    name_len = strlen(name);
+    p = chain;
+    while (*p != '\0') {
+        const char *eol;
+        size_t seg_len;
+
+        eol = strchr(p, '\n');
+        if (eol == NULL) {
+            seg_len = strlen(p);
+        } else {
+            seg_len = (size_t)(eol - p);
+        }
+        if (seg_len == name_len && strncmp(p, name, name_len) == 0) {
+            return true;
+        }
+        if (eol == NULL) {
+            break;
+        }
+        p = eol + 1;
+    }
+    return false;
+}
+
+static char *alias_chain_append(const char *chain, const char *name) {
+    size_t chain_len;
+    size_t name_len;
+    char *out;
+
+    if (name == NULL || name[0] == '\0') {
+        return chain != NULL ? arena_xstrdup(chain) : NULL;
+    }
+    if (chain == NULL || chain[0] == '\0') {
+        return arena_xstrdup(name);
+    }
+
+    chain_len = strlen(chain);
+    name_len = strlen(name);
+    out = arena_xmalloc(chain_len + 1 + name_len + 1);
+    memcpy(out, chain, chain_len);
+    out[chain_len] = '\n';
+    memcpy(out + chain_len + 1, name, name_len + 1);
+    return out;
+}
+
+static bool alias_find_backquote_end(const char *source, size_t start,
+                                     size_t *out_end) {
+    size_t i;
+
+    if (source[start] != '`') {
+        return false;
+    }
+
+    i = start + 1;
+    while (source[i] != '\0') {
+        if (source[i] == '\\' && source[i + 1] != '\0') {
+            i += 2;
+            continue;
+        }
+        if (source[i] == '`') {
+            *out_end = i;
+            return true;
+        }
+        i++;
+    }
+    return false;
+}
+
+static int alias_tokenize_with_suppress(const char *text,
+                                        const char *suppress_alias,
+                                        struct alias_token_vec *out) {
+    char *normalized;
+    const char *input;
+    size_t i;
+
+    out->items = NULL;
+    out->len = 0;
+    normalized = collapse_line_continuations(text);
+    input = normalized;
+    i = 0;
+
+    while (input[i] != '\0') {
+        size_t ws_start;
+        size_t ws_len;
+        size_t op_len;
+        size_t start;
+        char quote;
+
+        ws_start = i;
+        while (isspace((unsigned char)input[i])) {
+            i++;
+        }
+        ws_len = i - ws_start;
+        if (input[i] == '\0') {
+            break;
+        }
+
+        op_len = alias_operator_len_at(input, i);
+        if (op_len > 0) {
+            if (alias_token_vec_push(out, input + ws_start, ws_len, input + i, op_len,
+                                     true, suppress_alias) != 0) {
+                alias_token_vec_free(out);
+                free(normalized);
+                return -1;
+            }
+            i += op_len;
+            continue;
+        }
+
+        start = i;
+        quote = '\0';
+        while (input[i] != '\0') {
+            if (quote == '\0') {
+                op_len = alias_operator_len_at(input, i);
+                if (op_len > 0 || isspace((unsigned char)input[i])) {
+                    break;
+                }
+                if (input[i] == '\'' || input[i] == '"') {
+                    quote = input[i++];
+                    continue;
+                }
+                if (input[i] == '\\' && input[i + 1] != '\0') {
+                    i += 2;
+                    continue;
+                }
+                if (input[i] == '$' && input[i + 1] == '(') {
+                    size_t end;
+
+                    if (find_command_subst_end(input, i, &end)) {
+                        i = end + 1;
+                        continue;
+                    }
+                }
+                if (input[i] == '$' && input[i + 1] == '\'') {
+                    size_t end;
+
+                    if (find_dollar_single_quote_end(input, i, &end)) {
+                        i = end + 1;
+                        continue;
+                    }
+                }
+                if (input[i] == '`') {
+                    size_t end;
+
+                    if (alias_find_backquote_end(input, i, &end)) {
+                        i = end + 1;
+                        continue;
+                    }
+                }
+            } else if (quote == '\'') {
+                if (input[i] == '\'') {
+                    quote = '\0';
+                }
+            } else if (quote == '"') {
+                if (input[i] == '\\' && input[i + 1] != '\0') {
+                    i += 2;
+                    continue;
+                }
+                if (input[i] == '$' && input[i + 1] == '(') {
+                    size_t end;
+
+                    if (find_command_subst_end(input, i, &end)) {
+                        i = end + 1;
+                        continue;
+                    }
+                }
+                if (input[i] == '"') {
+                    quote = '\0';
+                }
+            }
+            i++;
+        }
+
+        if (i > start) {
+            if (alias_token_vec_push(out, input + ws_start, ws_len, input + start,
+                                     i - start, false, suppress_alias) != 0) {
+                alias_token_vec_free(out);
+                free(normalized);
+                return -1;
+            }
+        }
+    }
+
+    free(normalized);
+    return 0;
+}
+
+static int alias_tokenize(const char *text, struct alias_token_vec *out) {
+    return alias_tokenize_with_suppress(text, NULL, out);
+}
+
+static int alias_token_vec_replace(struct alias_token_vec *vec, size_t index,
+                                   const struct alias_token_vec *replacement) {
+    struct alias_token *new_items;
+    struct alias_token *old_items;
+    char *old_leading_ws;
+    size_t prefix_count;
+    size_t old_len;
+    size_t tail_count;
+    size_t new_len;
+    size_t r;
+    char *old_text;
+    char *old_suppress_alias;
+
+    old_items = vec->items;
+    old_len = vec->len;
+    tail_count = old_len - (index + 1);
+    prefix_count = index;
+    new_len = old_len - 1 + replacement->len;
+    old_leading_ws = old_items[index].leading_ws;
+    old_text = old_items[index].text;
+    old_suppress_alias = old_items[index].suppress_alias;
+
+    if (new_len == 0) {
+        new_items = NULL;
+    } else {
+        new_items = arena_xmalloc(sizeof(*new_items) * new_len);
+        if (prefix_count > 0) {
+            memcpy(new_items, old_items, sizeof(*new_items) * prefix_count);
+        }
+        if (tail_count > 0) {
+            memcpy(new_items + index + replacement->len, old_items + index + 1,
+                   sizeof(*new_items) * tail_count);
+        }
+    }
+
+    for (r = 0; r < replacement->len; r++) {
+        if (r == 0) {
+            size_t old_ws_len;
+            size_t repl_ws_len;
+            char *combined_ws;
+
+            old_ws_len = strlen(old_leading_ws);
+            repl_ws_len = strlen(replacement->items[r].leading_ws);
+            combined_ws = arena_xmalloc(old_ws_len + repl_ws_len + 1);
+            memcpy(combined_ws, old_leading_ws, old_ws_len);
+            memcpy(combined_ws + old_ws_len, replacement->items[r].leading_ws,
+                   repl_ws_len + 1);
+            new_items[index + r].leading_ws = combined_ws;
+        } else {
+            new_items[index + r].leading_ws =
+                arena_xstrdup(replacement->items[r].leading_ws);
+        }
+        new_items[index + r].text = arena_xstrdup(replacement->items[r].text);
+        if (replacement->items[r].suppress_alias != NULL) {
+            new_items[index + r].suppress_alias =
+                arena_xstrdup(replacement->items[r].suppress_alias);
+        } else {
+            new_items[index + r].suppress_alias = NULL;
+        }
+        new_items[index + r].force_expand = replacement->items[r].force_expand;
+        new_items[index + r].is_operator = replacement->items[r].is_operator;
+    }
+    if (replacement->len == 0 && tail_count > 0) {
+        size_t old_ws_len;
+        size_t next_ws_len;
+        char *combined_ws;
+
+        old_ws_len = strlen(old_leading_ws);
+        next_ws_len = strlen(new_items[index].leading_ws);
+        combined_ws = arena_xmalloc(old_ws_len + next_ws_len + 1);
+        memcpy(combined_ws, old_leading_ws, old_ws_len);
+        memcpy(combined_ws + old_ws_len, new_items[index].leading_ws,
+               next_ws_len + 1);
+        free(new_items[index].leading_ws);
+        new_items[index].leading_ws = combined_ws;
+    }
+    vec->items = new_items;
+    vec->len = new_len;
+    free(old_items);
+    free(old_leading_ws);
+    free(old_text);
+    free(old_suppress_alias);
+    return 0;
+}
+
+static char *alias_render_tokens(const struct alias_token_vec *tokens) {
+    size_t i;
+    size_t total;
+    char *out;
+    size_t pos;
+
+    total = 1;
+    for (i = 0; i < tokens->len; i++) {
+        total += strlen(tokens->items[i].leading_ws);
+        total += strlen(tokens->items[i].text);
+    }
+
+    out = arena_xmalloc(total);
+    pos = 0;
+    for (i = 0; i < tokens->len; i++) {
+        size_t ws_len;
+        size_t tlen;
+
+        ws_len = strlen(tokens->items[i].leading_ws);
+        memcpy(out + pos, tokens->items[i].leading_ws, ws_len);
+        pos += ws_len;
+        tlen = strlen(tokens->items[i].text);
+        memcpy(out + pos, tokens->items[i].text, tlen);
+        pos += tlen;
+    }
+    out[pos] = '\0';
+    return out;
+}
+
+static int rewrite_aliases_for_snippet(struct shell_state *state, const char *text,
+                                       char **out, bool *changed) {
+    struct alias_token_vec tokens;
+    size_t i;
+    bool command_position;
+    bool expect_redir_operand;
+    bool heredoc_operand_position;
+    bool trailing_alias_blank;
+    bool case_clause_commands;
+    bool case_after_clause_sep;
+    int for_state;
+    int case_state;
+
+    (void)state;
+
+    if (alias_tokenize(text, &tokens) != 0) {
+        return -1;
+    }
+
+    *changed = false;
+    command_position = true;
+    expect_redir_operand = false;
+    heredoc_operand_position = false;
+    trailing_alias_blank = false;
+    case_clause_commands = false;
+    case_after_clause_sep = false;
+    for_state = 0;
+    case_state = 0;
+    i = 0;
+
+    while (i < tokens.len) {
+        bool forced_alias_token;
+
+        if (tokens.items[i].is_operator) {
+            if (case_state == 3) {
+                if (strcmp(tokens.items[i].text, ")") == 0 &&
+                    !case_clause_commands) {
+                    case_clause_commands = true;
+                } else if (strcmp(tokens.items[i].text, ";;") == 0) {
+                    case_clause_commands = false;
+                    case_after_clause_sep = true;
+                }
+            }
+            if (alias_op_is_redirection(tokens.items[i].text)) {
+                expect_redir_operand = true;
+                heredoc_operand_position = strcmp(tokens.items[i].text, "<<") == 0 ||
+                                           strcmp(tokens.items[i].text, "<<-") == 0;
+            } else {
+                command_position = true;
+                expect_redir_operand = false;
+                heredoc_operand_position = false;
+                trailing_alias_blank = false;
+            }
+            i++;
+            continue;
+        }
+
+        forced_alias_token = tokens.items[i].force_expand;
+        if (expect_redir_operand) {
+            if (heredoc_operand_position) {
+                expect_redir_operand = false;
+                heredoc_operand_position = false;
+                command_position = true;
+            } else {
+                expect_redir_operand = false;
+                heredoc_operand_position = false;
+                i++;
+                continue;
+            }
+        }
+
+        if (tokens.items[i].force_expand) {
+            command_position = true;
+            tokens.items[i].force_expand = false;
+        }
+        if (!command_position &&
+            strchr(tokens.items[i].leading_ws, '\n') != NULL) {
+            command_position = true;
+        }
+        if (!command_position && case_state == 3 && !case_clause_commands &&
+            tokens.items[i].suppress_alias == NULL && !case_after_clause_sep) {
+            command_position = true;
+        }
+
+        if (!command_position) {
+            if (alias_word_opens_command_position(tokens.items[i].text)) {
+                command_position = true;
+            }
+            goto state_update;
+        }
+
+        if (is_assignment_word(tokens.items[i].text)) {
+            i++;
+            continue;
+        }
+
+        if (alias_word_is_io_number(tokens.items[i].text) && i + 1 < tokens.len &&
+            tokens.items[i + 1].is_operator &&
+            alias_op_is_redirection(tokens.items[i + 1].text)) {
+            expect_redir_operand = true;
+            i++;
+            continue;
+        }
+
+        {
+            bool reserved_here;
+
+            reserved_here = alias_word_is_reserved_in_context(tokens.items[i].text,
+                                                              command_position,
+                                                              for_state,
+                                                              case_state);
+
+            if (!reserved_here &&
+                is_plain_command_word_for_alias(tokens.items[i].text)) {
+                bool blocked;
+                bool disallow_case_pattern_alias;
+                char *alias_value;
+
+                /*
+                 * In case-pattern position, avoid re-aliasing plain pattern
+                 * words unless this token was explicitly forced by a trailing-
+                 * blank alias expansion.
+                 */
+                disallow_case_pattern_alias =
+                    case_state == 3 && !case_clause_commands &&
+                    !forced_alias_token;
+                if (!disallow_case_pattern_alias) {
+                    blocked = alias_chain_contains(tokens.items[i].suppress_alias,
+                                                   tokens.items[i].text);
+                    if (!blocked) {
+                        alias_value = lookup_alias_value_dup(tokens.items[i].text);
+                        if (alias_value != NULL) {
+                            char *next_chain;
+                            struct alias_token_vec repl;
+
+                            next_chain =
+                                alias_chain_append(tokens.items[i].suppress_alias,
+                                                   tokens.items[i].text);
+                            if (alias_tokenize_with_suppress(alias_value,
+                                                             next_chain,
+                                                             &repl) != 0) {
+                                free(next_chain);
+                                free(alias_value);
+                                alias_token_vec_free(&tokens);
+                                return -1;
+                            }
+                            free(next_chain);
+                            trailing_alias_blank =
+                                alias_value_has_trailing_blank(alias_value);
+                            free(alias_value);
+
+                            if (repl.len == 0) {
+                                alias_token_vec_replace(&tokens, i, &repl);
+                            } else {
+                                alias_token_vec_replace(&tokens, i, &repl);
+                            }
+                            if (trailing_alias_blank && i + repl.len < tokens.len) {
+                                tokens.items[i + repl.len].force_expand = true;
+                            }
+                            alias_token_vec_free(&repl);
+                            *changed = true;
+                            command_position = true;
+                            expect_redir_operand = false;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+state_update:
+        if (for_state == 0 && command_position &&
+            strcmp(tokens.items[i].text, "for") == 0) {
+            for_state = 1;
+        } else if (for_state == 1) {
+            for_state = 2;
+        } else if (for_state == 2 &&
+                   strcmp(tokens.items[i].text, "in") == 0) {
+            for_state = 3;
+        } else if (for_state == 2 &&
+                   strcmp(tokens.items[i].text, "do") == 0) {
+            for_state = 4;
+        } else if (for_state == 3 &&
+                   strcmp(tokens.items[i].text, "do") == 0) {
+            for_state = 4;
+        } else if (for_state == 4 &&
+                   strcmp(tokens.items[i].text, "done") == 0) {
+            for_state = 0;
+        }
+
+        if (case_state == 0 && command_position &&
+            strcmp(tokens.items[i].text, "case") == 0) {
+            case_state = 1;
+        } else if (case_state == 1) {
+            case_state = 2;
+        } else if (case_state == 2 &&
+                   strcmp(tokens.items[i].text, "in") == 0) {
+            case_state = 3;
+            case_clause_commands = false;
+            case_after_clause_sep = false;
+        } else if (case_state == 3 &&
+                   strcmp(tokens.items[i].text, "esac") == 0) {
+            case_state = 0;
+            case_clause_commands = false;
+            case_after_clause_sep = false;
+        }
+        if (case_state == 3 && !case_clause_commands) {
+            case_after_clause_sep = false;
+        }
+
+        if (alias_word_opens_command_position(tokens.items[i].text)) {
+            command_position = true;
+            trailing_alias_blank = false;
+        } else if (trailing_alias_blank) {
+            command_position = true;
+            trailing_alias_blank = false;
+        } else {
+            command_position = false;
+        }
+        i++;
+    }
+
+    *out = alias_render_tokens(&tokens);
+    alias_token_vec_free(&tokens);
+    return 0;
 }
 
 static void trace_simple_words(struct shell_state *state, char *const words[],
@@ -1993,130 +2713,6 @@ static int execute_simple_command(struct shell_state *state, const char *source,
     assign_count = 0;
     while (assign_count < raw_words.len && is_assignment_word(raw_words.items[assign_count])) {
         assign_count++;
-    }
-
-    if (allow_builtin && assign_count < raw_words.len) {
-        size_t alias_depth;
-        size_t alias_index;
-        bool pending_next_word;
-        char *alias_stack[64];
-        size_t alias_stack_len;
-        size_t si;
-
-        alias_depth = 0;
-        alias_index = assign_count;
-        pending_next_word = false;
-        alias_stack_len = 0;
-
-        while (alias_index < raw_words.len && alias_depth < 128) {
-            bool blocked;
-            char *alias_value;
-            struct token_vec alias_words;
-            bool trailing_blank;
-            char *expanded_name;
-            size_t old_len;
-            size_t tail_count;
-            size_t new_len;
-
-            if (!is_plain_command_word_for_alias(raw_words.items[alias_index])) {
-                if (pending_next_word) {
-                    for (si = 0; si < alias_stack_len; si++) {
-                        free(alias_stack[si]);
-                    }
-                    alias_stack_len = 0;
-                    pending_next_word = false;
-                    alias_index++;
-                    continue;
-                }
-                break;
-            }
-
-            blocked = false;
-            for (si = 0; si < alias_stack_len; si++) {
-                if (strcmp(alias_stack[si], raw_words.items[alias_index]) == 0) {
-                    blocked = true;
-                    break;
-                }
-            }
-            if (blocked) {
-                if (pending_next_word) {
-                    for (si = 0; si < alias_stack_len; si++) {
-                        free(alias_stack[si]);
-                    }
-                    alias_stack_len = 0;
-                    pending_next_word = false;
-                    alias_index++;
-                    continue;
-                }
-                break;
-            }
-
-            alias_value = lookup_alias_value_dup(raw_words.items[alias_index]);
-            if (alias_value == NULL) {
-                if (pending_next_word) {
-                    for (si = 0; si < alias_stack_len; si++) {
-                        free(alias_stack[si]);
-                    }
-                    alias_stack_len = 0;
-                    pending_next_word = false;
-                    alias_index++;
-                    continue;
-                }
-                break;
-            }
-
-            trailing_blank = alias_value_has_trailing_blank(alias_value);
-            expanded_name = arena_xstrdup(raw_words.items[alias_index]);
-            alias_words.items = NULL;
-            alias_words.len = 0;
-            if (lexer_split_words(alias_value, &alias_words) != 0) {
-                free(alias_value);
-                free(expanded_name);
-                for (si = 0; si < alias_stack_len; si++) {
-                    free(alias_stack[si]);
-                }
-                status = 2;
-                goto done;
-            }
-            free(alias_value);
-
-            if (alias_words.len > 0) {
-                lexed.items = arena_xrealloc(
-                    lexed.items, sizeof(*lexed.items) * (lexed.len + alias_words.len));
-                for (si = 0; si < alias_words.len; si++) {
-                    lexed.items[lexed.len + si] = alias_words.items[si];
-                }
-                lexed.len += alias_words.len;
-            }
-
-            old_len = raw_words.len;
-            tail_count = old_len - (alias_index + 1);
-            new_len = old_len - 1 + alias_words.len;
-            raw_words.items = arena_xrealloc(raw_words.items,
-                                             sizeof(*raw_words.items) * new_len);
-            if (tail_count > 0 && alias_words.len != 1) {
-                memmove(raw_words.items + alias_index + alias_words.len,
-                        raw_words.items + alias_index + 1,
-                        sizeof(*raw_words.items) * tail_count);
-            }
-            for (si = 0; si < alias_words.len; si++) {
-                raw_words.items[alias_index + si] = alias_words.items[si];
-            }
-            raw_words.len = new_len;
-            free(alias_words.items);
-
-            if (alias_stack_len < sizeof(alias_stack) / sizeof(alias_stack[0])) {
-                alias_stack[alias_stack_len++] = expanded_name;
-            } else {
-                free(expanded_name);
-            }
-            alias_depth++;
-            pending_next_word = trailing_blank;
-        }
-
-        for (si = 0; si < alias_stack_len; si++) {
-            free(alias_stack[si]);
-        }
     }
 
     in_vec.items = raw_words.items + assign_count;
@@ -4021,7 +4617,239 @@ static int execute_andor(struct shell_state *state, const char *source) {
     return status;
 }
 
+static bool command_text_needs_more_input(const char *source,
+                                          bool include_heredoc) {
+    size_t i;
+    char quote;
+    int paren_depth;
+    int brace_depth;
+    int if_depth;
+    int case_depth;
+    int loop_depth;
+    bool pending_heredoc;
+    bool trailing_operator;
+
+    quote = '\0';
+    paren_depth = 0;
+    brace_depth = 0;
+    if_depth = 0;
+    case_depth = 0;
+    loop_depth = 0;
+    pending_heredoc = false;
+    trailing_operator = false;
+
+    for (i = 0; source[i] != '\0'; i++) {
+        char ch;
+
+        ch = source[i];
+        if (quote == '\0') {
+            if (ch == '\\') {
+                if (source[i + 1] == '\0') {
+                    return true;
+                }
+                i++;
+                trailing_operator = false;
+                continue;
+            }
+            if (ch == '$' && source[i + 1] == '(') {
+                size_t end;
+
+                if (find_command_subst_end(source, i, &end)) {
+                    i = end;
+                    continue;
+                }
+            }
+            if (ch == '$' && source[i + 1] == '\'') {
+                size_t end;
+
+                if (find_dollar_single_quote_end(source, i, &end)) {
+                    i = end;
+                    continue;
+                }
+            }
+            if (ch == '\'' || ch == '"') {
+                quote = ch;
+                trailing_operator = false;
+                continue;
+            }
+            if (paren_depth == 0 && brace_depth == 0 &&
+                (isalpha((unsigned char)ch) || ch == '_') &&
+                word_starts_command_position(source, i)) {
+                size_t j;
+                size_t boundary;
+                char keyword[16];
+                size_t kwlen;
+
+                j = i;
+                kwlen = 0;
+                while (source[j] != '\0') {
+                    if (source[j] == '\\' && source[j + 1] == '\n') {
+                        j += 2;
+                        continue;
+                    }
+                    if (!isalnum((unsigned char)source[j]) && source[j] != '_') {
+                        break;
+                    }
+                    if (kwlen + 1 < sizeof(keyword)) {
+                        keyword[kwlen] = source[j];
+                    }
+                    kwlen++;
+                    j++;
+                }
+                boundary = skip_continuations_forward(source, j);
+                if (keyword_boundary(source[boundary]) &&
+                    source[boundary] != ')') {
+                    if (kwlen == 2 && strncmp(keyword, "if", 2) == 0) {
+                        if_depth++;
+                    } else if (kwlen == 2 && strncmp(keyword, "fi", 2) == 0 &&
+                               if_depth > 0) {
+                        if_depth--;
+                    } else if (kwlen == 4 && strncmp(keyword, "case", 4) == 0) {
+                        case_depth++;
+                    } else if (kwlen == 4 && strncmp(keyword, "esac", 4) == 0 &&
+                               case_depth > 0) {
+                        case_depth--;
+                    } else if (case_depth == 0) {
+                        if ((kwlen == 5 && strncmp(keyword, "while", 5) == 0) ||
+                            (kwlen == 5 && strncmp(keyword, "until", 5) == 0) ||
+                            (kwlen == 3 && strncmp(keyword, "for", 3) == 0)) {
+                            loop_depth++;
+                        } else if (kwlen == 4 &&
+                                   strncmp(keyword, "done", 4) == 0 &&
+                                   loop_depth > 0 &&
+                                   keyword_preceded_by_list_separator(source, i)) {
+                            loop_depth--;
+                        }
+                    }
+                }
+                i = j - 1;
+                trailing_operator = false;
+                continue;
+            }
+            if (ch == '(') {
+                paren_depth++;
+                trailing_operator = false;
+                continue;
+            }
+            if (ch == ')' && paren_depth > 0) {
+                paren_depth--;
+                trailing_operator = false;
+                continue;
+            }
+            if (ch == '{') {
+                brace_depth++;
+                trailing_operator = false;
+                continue;
+            }
+            if (ch == '}' && brace_depth > 0) {
+                brace_depth--;
+                trailing_operator = false;
+                continue;
+            }
+            if (paren_depth == 0 && brace_depth == 0 && ch == '<' &&
+                source[i + 1] == '<') {
+                pending_heredoc = true;
+                trailing_operator = false;
+                continue;
+            }
+            if (paren_depth == 0 && brace_depth == 0 &&
+                (ch == '|' || ch == '&')) {
+                if ((ch == '|' && source[i + 1] == '|') ||
+                    (ch == '&' && source[i + 1] == '&')) {
+                    trailing_operator = true;
+                    i++;
+                    continue;
+                }
+                if (!(ch == '&' && i > 0 && source[i - 1] == '>')) {
+                    trailing_operator = true;
+                    continue;
+                }
+            }
+            if (!isspace((unsigned char)ch)) {
+                trailing_operator = false;
+                continue;
+            }
+        } else if (quote == '\'' && ch == '\'') {
+            quote = '\0';
+        } else if (quote == '"') {
+            if (ch == '$' && source[i + 1] == '(') {
+                size_t end;
+
+                if (find_command_subst_end(source, i, &end)) {
+                    i = end;
+                    continue;
+                }
+            }
+            if (ch == '\\' && source[i + 1] != '\0') {
+                i++;
+                continue;
+            }
+            if (ch == '"') {
+                quote = '\0';
+            }
+        }
+    }
+
+    return quote != '\0' || paren_depth != 0 || brace_depth != 0 || if_depth > 0 ||
+           case_depth > 0 || loop_depth > 0 || trailing_operator ||
+           looks_like_function_header_only(source) ||
+           (include_heredoc && pending_heredoc);
+}
+
+char *exec_alias_expand_preview(struct shell_state *state, const char *source) {
+    char *logical;
+    char *part;
+    char *rewritten;
+    bool changed;
+
+    if (source == NULL) {
+        return NULL;
+    }
+
+    logical = collapse_line_continuations(source);
+    part = dup_trimmed_slice(logical, 0, strlen(logical));
+    free(logical);
+    if (part[0] == '\0') {
+        free(part);
+        return NULL;
+    }
+
+    rewritten = NULL;
+    changed = false;
+    if (rewrite_aliases_for_snippet(state, part, &rewritten, &changed) != 0) {
+        free(part);
+        return NULL;
+    }
+    if (changed) {
+        free(part);
+        part = rewritten;
+    } else {
+        free(rewritten);
+        free(part);
+        return NULL;
+    }
+
+    if (part[0] == '\0') {
+        free(part);
+        return NULL;
+    }
+    return part;
+}
+
+bool exec_alias_preview_needs_more(const char *preview) {
+    if (preview == NULL || preview[0] == '\0') {
+        return false;
+    }
+    return command_text_needs_more_input(preview, false);
+}
+
 static int execute_program_text(struct shell_state *state, const char *source) {
+    return execute_program_text_internal(state, source, true);
+}
+
+static int execute_program_text_internal(struct shell_state *state,
+                                         const char *source,
+                                         bool apply_aliases) {
     size_t i;
     size_t start;
     char quote;
@@ -4034,6 +4862,8 @@ static int execute_program_text(struct shell_state *state, const char *source) {
     bool skip_next_done;
     bool pending_heredoc;
     char *pending_function_head;
+    char *pending_raw;
+    size_t pending_start;
 
     quote = '\0';
     paren_depth = 0;
@@ -4046,6 +4876,8 @@ static int execute_program_text(struct shell_state *state, const char *source) {
     skip_next_done = false;
     pending_heredoc = false;
     pending_function_head = NULL;
+    pending_raw = NULL;
+    pending_start = 0;
 
     for (i = 0;; i++) {
         char ch;
@@ -4178,19 +5010,92 @@ static int execute_program_text(struct shell_state *state, const char *source) {
         }
 
         if (delim) {
+            char *chunk_raw;
+            char *raw_part;
             char *part;
             char *logical_part;
+            size_t command_start;
             bool heredoc_handled;
             size_t heredoc_new_pos;
             int heredoc_rc;
             heredoc_command_runner_fn heredoc_runner;
 
-            part = dup_slice(source, start, i);
-            logical_part = collapse_line_continuations(part);
-            free(part);
+            chunk_raw = dup_slice(source, start, i);
+            if (pending_raw != NULL) {
+                size_t pending_len;
+                size_t chunk_len;
+
+                pending_len = strlen(pending_raw);
+                chunk_len = strlen(chunk_raw);
+                raw_part = arena_xmalloc(pending_len + chunk_len + 1);
+                memcpy(raw_part, pending_raw, pending_len);
+                memcpy(raw_part + pending_len, chunk_raw, chunk_len + 1);
+                command_start = pending_start;
+                free(pending_raw);
+                pending_raw = NULL;
+                free(chunk_raw);
+            } else {
+                raw_part = chunk_raw;
+                command_start = start;
+            }
+
+            logical_part = collapse_line_continuations(raw_part);
             part = dup_trimmed_slice(logical_part, 0, strlen(logical_part));
             free(logical_part);
             if (part[0] != '\0') {
+                bool alias_changed;
+
+                alias_changed = false;
+                if (apply_aliases) {
+                    char *alias_rewritten_part;
+
+                    alias_rewritten_part = NULL;
+                    if (rewrite_aliases_for_snippet(state, part,
+                                                    &alias_rewritten_part,
+                                                    &alias_changed) != 0) {
+                        free(part);
+                        free(raw_part);
+                        status = 2;
+                        break;
+                    }
+                    if (alias_changed) {
+                        free(part);
+                        part = alias_rewritten_part;
+                    } else {
+                        free(alias_rewritten_part);
+                    }
+
+                    if (part[0] == '\0') {
+                        /* Alias-expanded blank commands preserve prior $? state. */
+                        status = state->last_status;
+                        free(part);
+                        free(raw_part);
+                        if (ch == '\0') {
+                            break;
+                        }
+                        start = i + 1;
+                        pending_heredoc = false;
+                        continue;
+                    }
+
+                    if (alias_changed && ch != '\0' &&
+                        command_text_needs_more_input(part, false)) {
+                        size_t raw_len;
+
+                        raw_len = strlen(raw_part);
+                        pending_raw = arena_xmalloc(raw_len + 2);
+                        memcpy(pending_raw, raw_part, raw_len);
+                        pending_raw[raw_len] = ch;
+                        pending_raw[raw_len + 1] = '\0';
+                        pending_start = command_start;
+                        free(part);
+                        free(raw_part);
+                        start = i + 1;
+                        pending_heredoc = false;
+                        continue;
+                    }
+                }
+
                 if (pending_function_head != NULL) {
                     size_t hlen;
                     size_t plen;
@@ -4210,13 +5115,14 @@ static int execute_program_text(struct shell_state *state, const char *source) {
 
                 if (looks_like_function_header_only(part) && ch != '\0') {
                     pending_function_head = part;
+                    free(raw_part);
                     start = i + 1;
                     pending_heredoc = false;
                     continue;
                 }
 
                 /* Keep $LINENO aligned to each top-level command start. */
-                set_lineno_for_command(source, start);
+                set_lineno_for_command(source, command_start);
                 state->errexit_ignored = false;
                 if (skip_next_done && strcmp(part, "done") == 0) {
                     skip_next_done = false;
@@ -4268,6 +5174,7 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                             state->exit_status = status;
                         }
                         free(part);
+                        free(raw_part);
                         if (state->should_exit) {
                             break;
                         }
@@ -4281,7 +5188,23 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                         status = run_async_list(state, part);
                         state->last_status = status;
                     } else {
-                        status = execute_andor(state, part);
+                        if (apply_aliases && alias_changed &&
+                            command_requires_program_runner(part)) {
+                            char *alias_cleaned;
+
+                            /*
+                             * Alias-expanded snippets can inject comments via
+                             * embedded newlines; normalize them like top-level
+                             * program execution before recursive splitting.
+                             */
+                            alias_cleaned = strip_comments(part);
+                            status = execute_program_text_internal(state,
+                                                                   alias_cleaned,
+                                                                   false);
+                            free(alias_cleaned);
+                        } else {
+                            status = execute_andor(state, part);
+                        }
                         state->last_status = status;
                         if (status != 0 && state->errexit && !state->interactive &&
                             !state->errexit_ignored) {
@@ -4293,14 +5216,17 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                 shell_run_pending_traps(state);
                 if (state->should_exit) {
                     free(part);
+                    free(raw_part);
                     break;
                 }
                 if (has_pending_flow_control(state)) {
                     free(part);
+                    free(raw_part);
                     break;
                 }
             }
             free(part);
+            free(raw_part);
 
             if (ch == '\0') {
                 break;
@@ -4315,6 +5241,7 @@ static int execute_program_text(struct shell_state *state, const char *source) {
         status = execute_andor(state, pending_function_head);
         free(pending_function_head);
     }
+    free(pending_raw);
 
     return status;
 }

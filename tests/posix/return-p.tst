@@ -156,7 +156,7 @@ trapped 19
 __OUT__
 
 # TODO Yash does not yet support this
-test_oE -e 0 -f 'default exit status in trap in function'
+test_oE -e 0 'default exit status in trap in function'
 trap '(exit 1); return; echo X $?' INT
 f() {
     (kill -INT $$; exit 2)

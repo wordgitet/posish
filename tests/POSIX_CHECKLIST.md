@@ -9,7 +9,7 @@ Legend:
 - [ ] not yet green
 - [x] green
 
-- [ ] alias-p.tst
+- [x] alias-p.tst
 - [x] andor-p.tst
 - [x] arith-p.tst
 - [x] async-p.tst
@@ -25,7 +25,7 @@ Legend:
 - [x] declutil-p.tst
 - [x] dot-p.tst
 - [x] errexit-p.tst
-- [ ] error-p.tst
+- [x] error-p.tst
 - [x] eval-p.tst
 - [x] exec-p.tst
 - [x] exit-p.tst
@@ -47,12 +47,12 @@ Legend:
 - [x] lineno-p.tst
 - [x] nop-p.tst
 - [x] option-p.tst
-- [ ] param-p.tst
+- [x] param-p.tst
 - [x] path-p.tst
 - [x] pipeline-p.tst
 - [x] ppid-p.tst
 - [x] quote-p.tst
-- [ ] read-p.tst
+- [x] read-p.tst
 - [x] readonly-p.tst
 - [x] redir-p.tst
 - [x] return-p.tst
@@ -125,7 +125,7 @@ Legend:
 - [x] test-p.tst
 - [x] testtty-p.tst
 - [x] tilde-p.tst
-- [ ] trap-p.tst
+- [x] trap-p.tst
 - [x] umask-p.tst
 - [x] unset-p.tst
 - [x] until-p.tst

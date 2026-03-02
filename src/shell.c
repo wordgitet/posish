@@ -1610,7 +1610,49 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
                 command_start_line = line_no;
             }
             append_command(&command, &command_len, &command_cap, line);
-            if (needs_more_input(command, &command_len)) {
+            bool need_more;
+
+            need_more = needs_more_input(command, &command_len);
+            {
+                char *alias_preview;
+                bool alias_need_more;
+                bool raw_trailing_backslash_nl;
+
+                raw_trailing_backslash_nl =
+                    command_len >= 2 &&
+                    command[command_len - 2] == '\\' &&
+                    command[command_len - 1] == '\n';
+
+                alias_preview = exec_alias_expand_preview(state, command);
+                if (alias_preview != NULL) {
+                    size_t alias_len;
+
+                    alias_len = strlen(alias_preview);
+                    if (strstr(alias_preview, "<<") != NULL) {
+                        alias_need_more =
+                            needs_more_input(alias_preview, &alias_len) != 0;
+                    } else {
+                        alias_need_more = exec_alias_preview_needs_more(alias_preview);
+                    }
+                    if (raw_trailing_backslash_nl) {
+                        /*
+                         * Preserve explicit physical line continuation.
+                         * Alias preview can request more input but must not
+                         * force execution before the continued line arrives.
+                         */
+                        need_more = need_more || alias_need_more;
+                    } else {
+                        /*
+                         * Alias expansion can close/open compound syntax, so
+                         * preview should decide command completeness in that
+                         * case.
+                         */
+                        need_more = alias_need_more;
+                    }
+                    free(alias_preview);
+                }
+            }
+            if (need_more) {
                 line_no++;
                 continue;
             }
@@ -1632,7 +1674,44 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
             line_no++;
         }
         if (command_len > 0) {
-            if (needs_more_input(command, &command_len)) {
+            bool need_more;
+
+            need_more = needs_more_input(command, &command_len);
+            {
+                char *alias_preview;
+                bool raw_trailing_backslash_nl;
+
+                raw_trailing_backslash_nl =
+                    command_len >= 2 &&
+                    command[command_len - 2] == '\\' &&
+                    command[command_len - 1] == '\n';
+
+                alias_preview = exec_alias_expand_preview(state, command);
+                if (alias_preview != NULL) {
+                    size_t alias_len;
+
+                    alias_len = strlen(alias_preview);
+                    if (strstr(alias_preview, "<<") != NULL) {
+                        if (raw_trailing_backslash_nl) {
+                            need_more = need_more ||
+                                        (needs_more_input(alias_preview, &alias_len) != 0);
+                        } else {
+                            need_more =
+                                needs_more_input(alias_preview, &alias_len) != 0;
+                        }
+                    } else {
+                        if (raw_trailing_backslash_nl) {
+                            need_more = need_more ||
+                                        exec_alias_preview_needs_more(alias_preview);
+                        } else {
+                            need_more =
+                                exec_alias_preview_needs_more(alias_preview);
+                        }
+                    }
+                    free(alias_preview);
+                }
+            }
+            if (need_more) {
                 posish_error_at("<input>", line_no, 1, "syntax",
                                 "unexpected EOF while looking for matching quote");
                 state->last_status = 2;
