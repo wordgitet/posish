@@ -1494,6 +1494,214 @@ static int trap_signal_number(const char *spec) {
     return -1;
 }
 
+static bool trap_signal_spec_is_decimal(const char *spec) {
+    char *end;
+    long n;
+
+    if (spec == NULL || spec[0] == '\0') {
+        return false;
+    }
+
+    n = strtol(spec, &end, 10);
+    return *end == '\0' && n > 0 && n <= NSIG;
+}
+
+static const char *trap_signal_name(int signo) {
+    switch (signo) {
+#ifdef SIGHUP
+    case SIGHUP: return "HUP";
+#endif
+#ifdef SIGINT
+    case SIGINT: return "INT";
+#endif
+#ifdef SIGQUIT
+    case SIGQUIT: return "QUIT";
+#endif
+#ifdef SIGTERM
+    case SIGTERM: return "TERM";
+#endif
+#ifdef SIGCHLD
+    case SIGCHLD: return "CHLD";
+#endif
+#ifdef SIGPIPE
+    case SIGPIPE: return "PIPE";
+#endif
+#ifdef SIGUSR1
+    case SIGUSR1: return "USR1";
+#endif
+#ifdef SIGUSR2
+    case SIGUSR2: return "USR2";
+#endif
+#ifdef SIGALRM
+    case SIGALRM: return "ALRM";
+#endif
+#ifdef SIGABRT
+    case SIGABRT: return "ABRT";
+#endif
+#ifdef SIGBUS
+    case SIGBUS: return "BUS";
+#endif
+#ifdef SIGFPE
+    case SIGFPE: return "FPE";
+#endif
+#ifdef SIGILL
+    case SIGILL: return "ILL";
+#endif
+#ifdef SIGSEGV
+    case SIGSEGV: return "SEGV";
+#endif
+#ifdef SIGTRAP
+    case SIGTRAP: return "TRAP";
+#endif
+#ifdef SIGPOLL
+    case SIGPOLL: return "POLL";
+#endif
+#ifdef SIGPROF
+    case SIGPROF: return "PROF";
+#endif
+#ifdef SIGSYS
+    case SIGSYS: return "SYS";
+#endif
+#ifdef SIGVTALRM
+    case SIGVTALRM: return "VTALRM";
+#endif
+#ifdef SIGXCPU
+    case SIGXCPU: return "XCPU";
+#endif
+#ifdef SIGXFSZ
+    case SIGXFSZ: return "XFSZ";
+#endif
+#ifdef SIGCONT
+    case SIGCONT: return "CONT";
+#endif
+#ifdef SIGTSTP
+    case SIGTSTP: return "TSTP";
+#endif
+#ifdef SIGTTIN
+    case SIGTTIN: return "TTIN";
+#endif
+#ifdef SIGTTOU
+    case SIGTTOU: return "TTOU";
+#endif
+#ifdef SIGURG
+    case SIGURG: return "URG";
+#endif
+    default:
+        return NULL;
+    }
+}
+
+static char *trap_quote_action(const char *action) {
+    size_t i;
+    size_t out_len;
+    char *out;
+    size_t j;
+
+    out_len = 2;
+    for (i = 0; action[i] != '\0'; i++) {
+        if (action[i] == '\'') {
+            out_len += 4;
+        } else {
+            out_len++;
+        }
+    }
+
+    out = malloc(out_len + 1);
+    if (out == NULL) {
+        perror("malloc");
+        return NULL;
+    }
+
+    j = 0;
+    out[j++] = '\'';
+    for (i = 0; action[i] != '\0'; i++) {
+        if (action[i] == '\'') {
+            memcpy(out + j, "'\\''", 4);
+            j += 4;
+        } else {
+            out[j++] = action[i];
+        }
+    }
+    out[j++] = '\'';
+    out[j] = '\0';
+    return out;
+}
+
+static int trap_print_entry(const char *spec, const char *action, bool print_all) {
+    char *quoted;
+
+    if (action == NULL) {
+        if (!print_all) {
+            return 0;
+        }
+        printf("trap -- - %s\n", spec);
+        return 0;
+    }
+
+    quoted = trap_quote_action(action);
+    if (quoted == NULL) {
+        return 1;
+    }
+    printf("trap -- %s %s\n", quoted, spec);
+    free(quoted);
+    return 0;
+}
+
+static int trap_print_selected(const struct shell_state *state, bool print_all,
+                               char *const argv[], size_t start_index) {
+    int status;
+    size_t i;
+
+    status = 0;
+    if (argv[start_index] == NULL) {
+        int signo;
+
+        if (trap_print_entry("EXIT", state->exit_trap, print_all) != 0) {
+            status = 1;
+        }
+        for (signo = 1; signo < NSIG; signo++) {
+            const char *name;
+
+            name = trap_signal_name(signo);
+            if (name == NULL) {
+                continue;
+            }
+            if (trap_print_entry(name, state->signal_traps[signo], print_all) !=
+                0) {
+                status = 1;
+            }
+        }
+        return status;
+    }
+
+    for (i = start_index; argv[i] != NULL; i++) {
+        int signo;
+        const char *name;
+
+        if (strcmp(argv[i], "EXIT") == 0 || strcmp(argv[i], "0") == 0) {
+            if (trap_print_entry("EXIT", state->exit_trap, print_all) != 0) {
+                status = 1;
+            }
+            continue;
+        }
+
+        signo = trap_signal_number(argv[i]);
+        if (signo < 0) {
+            posish_errorf("trap: invalid signal: %s", argv[i]);
+            status = 1;
+            continue;
+        }
+        name = trap_signal_name(signo);
+        if (name == NULL) {
+            continue;
+        }
+        if (trap_print_entry(name, state->signal_traps[signo], print_all) != 0) {
+            status = 1;
+        }
+    }
+    return status;
+}
+
 static int trap_set_signal_action(int signo, void (*handler)(int)) {
     if (handler == SIG_IGN) {
         return signals_set_ignored(signo);
@@ -1548,23 +1756,58 @@ static void trap_restore_default_or_inherited_ignore(const struct shell_state *s
 }
 
 static int builtin_trap(struct shell_state *state, char *const argv[]) {
+    size_t argc;
+    size_t argi;
     size_t i;
     int status;
     const char *action;
 
-    if (argv[1] == NULL) {
-        return 0;
+    argc = 0;
+    while (argv[argc] != NULL) {
+        argc++;
     }
 
-    if (argv[2] == NULL) {
+    if (argv[1] == NULL) {
+        return trap_print_selected(state, false, argv, 1);
+    }
+
+    argi = 1;
+
+    if (strcmp(argv[argi], "-p") == 0) {
+        argi++;
+        if (argv[argi] != NULL && strcmp(argv[argi], "--") == 0) {
+            argi++;
+        }
+        return trap_print_selected(state, true, argv, argi);
+    }
+
+    if (strcmp(argv[argi], "--") == 0) {
+        argi++;
+        if (argv[argi] == NULL) {
+            return trap_print_selected(state, false, argv, argi);
+        }
+    } else if (argv[argi] != NULL && argv[argi + 1] == NULL) {
+        /*
+         * `trap SIGNAL` is historically interpreted as printing the trap for
+         * that signal in many shells.
+         */
+        return trap_print_selected(state, false, argv, argi);
+    }
+
+    action = argv[argi];
+    argi++;
+    if (trap_signal_spec_is_decimal(action)) {
+        action = "-";
+        argi--;
+    }
+    if (argv[argi] == NULL) {
         posish_errorf("trap: missing condition");
         return 2;
     }
 
-    action = argv[1];
     trace_log(POSISH_TRACE_TRAPS, "trap action='%s'", action);
     status = 0;
-    for (i = 2; argv[i] != NULL; i++) {
+    for (i = argi; argv[i] != NULL; i++) {
         if (strcmp(argv[i], "EXIT") == 0 || strcmp(argv[i], "0") == 0) {
             if (strcmp(action, "-") == 0) {
                 free(state->exit_trap);

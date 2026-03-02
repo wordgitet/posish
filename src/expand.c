@@ -699,17 +699,16 @@ static bool inherited_ignore_locked(const struct shell_state *state,
 static void reset_signal_traps_for_cmdsub(struct shell_state *state) {
   int signo;
 
-  for (signo = 1; signo < NSIG; signo++) {
-    if (state->signal_traps[signo] != NULL) {
-      if (state->signal_traps[signo][0] == '\0') {
-        (void)signals_set_ignored(signo);
-      } else {
-        state->signal_traps[signo] = NULL;
-        if (inherited_ignore_locked(state, signo)) {
-          (void)signals_set_ignored(signo);
-        } else {
-          (void)signals_set_default(signo);
-        }
+    for (signo = 1; signo < NSIG; signo++) {
+        if (state->signal_traps[signo] != NULL) {
+            if (state->signal_traps[signo][0] == '\0') {
+                (void)signals_set_ignored(signo);
+            } else {
+                if (inherited_ignore_locked(state, signo)) {
+                    (void)signals_set_ignored(signo);
+                } else {
+                    (void)signals_set_default(signo);
+                }
       }
     } else if (state->signal_cleared[signo]) {
       (void)signals_set_default(signo);

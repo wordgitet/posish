@@ -486,6 +486,21 @@ static bool has_unsupported_syntax(const char *source) {
     return false;
 }
 
+static bool is_reserved_word_as_command(const char *word) {
+    static const char *const reserved[] = {
+        "if",   "then", "elif", "else", "fi",   "do",   "done",
+        "case", "esac", "for",  "while", "until", "in",  "!",
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(reserved) / sizeof(reserved[0]); i++) {
+        if (strcmp(word, reserved[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool is_name_start_char(char ch) {
     return isalpha((unsigned char)ch) || ch == '_';
 }
@@ -1016,6 +1031,14 @@ static void reset_signal_traps_for_child(struct shell_state *state) {
         apply_child_signal_disposition(state, &state->signal_traps[signo], signo,
                                        true);
     }
+}
+
+static void reset_exit_trap_for_child(struct shell_state *state) {
+    /*
+     * Parent EXIT traps are not inherited by child shell environments. A child
+     * may still install its own EXIT trap and run it before exiting.
+     */
+    state->exit_trap = NULL;
 }
 
 void exec_prepare_signals_for_exec_child(const struct shell_state *state) {
@@ -1989,6 +2012,15 @@ static int execute_simple_command(struct shell_state *state, const char *source,
 
     in_vec.items = raw_words.items + assign_count;
     in_vec.len = raw_words.len - assign_count;
+    if (in_vec.len > 0 && is_reserved_word_as_command(in_vec.items[0])) {
+        posish_errorf("syntax error near unexpected token `%s'", in_vec.items[0]);
+        if (!state->interactive) {
+            state->should_exit = true;
+            state->exit_status = 2;
+        }
+        status = 2;
+        goto done;
+    }
     if (in_vec.len > 0) {
         size_t decl_prefix_len;
         size_t wi;
@@ -2145,6 +2177,8 @@ static int execute_simple_command(struct shell_state *state, const char *source,
                 local_state = *state;
                 local_state.should_exit = false;
                 local_state.exit_status = 0;
+                local_state.running_signal_trap = false;
+                local_state.running_exit_trap = false;
                 local_state.main_context = false;
                 redir_saw_cmdsub = false;
                 redir_last_cmdsub_status = 0;
@@ -2310,6 +2344,10 @@ static int execute_simple_command(struct shell_state *state, const char *source,
             if (apply_redirections(&redirs, false, state->noclobber, NULL) !=
                 0) {
                 status = 1;
+                if (special_name && !state->interactive) {
+                    state->should_exit = true;
+                    state->exit_status = status;
+                }
                 goto done;
             }
 
@@ -2321,6 +2359,10 @@ static int execute_simple_command(struct shell_state *state, const char *source,
             if (apply_redirections(&redirs, true, state->noclobber,
                                    &fd_backups) != 0) {
                 status = 1;
+                if (special_name && !state->interactive) {
+                    state->should_exit = true;
+                    state->exit_status = status;
+                }
                 fd_backup_restore(&fd_backups);
                 goto done;
             }
@@ -2532,10 +2574,15 @@ static int run_subshell_command(struct shell_state *parent_state,
         local_state = *parent_state;
         local_state.should_exit = false;
         local_state.exit_status = 0;
+        local_state.running_signal_trap = false;
+        local_state.running_exit_trap = false;
         local_state.main_context = false;
         reset_signal_traps_for_child(&local_state);
+        reset_exit_trap_for_child(&local_state);
 
         st = execute_program_text(&local_state, source);
+        shell_run_pending_traps(&local_state);
+        shell_run_exit_trap(&local_state);
         if (local_state.should_exit) {
             st = local_state.exit_status;
         }
@@ -2550,7 +2597,10 @@ static int run_subshell_command(struct shell_state *parent_state,
     for (;;) {
         if (waitpid(pid, &status, WUNTRACED) < 0) {
             if (errno == EINTR) {
-                shell_run_pending_traps(parent_state);
+                /*
+                 * Defer trap execution until the foreground subshell finishes.
+                 * This keeps trap side effects ordered after child output.
+                 */
                 continue;
             }
             perror("waitpid");
@@ -2626,9 +2676,11 @@ static int run_async_list(struct shell_state *state, const char *source) {
         local_state.should_exit = false;
         local_state.exit_status = 0;
         local_state.running_signal_trap = false;
+        local_state.running_exit_trap = false;
         local_state.in_async_context = true;
         local_state.main_context = false;
         reset_signal_traps_for_child(&local_state);
+        reset_exit_trap_for_child(&local_state);
 
         /*
          * With job control disabled (+m), asynchronous lists run with INT/QUIT
@@ -2668,6 +2720,8 @@ static int run_async_list(struct shell_state *state, const char *source) {
          * single and-or segment.
          */
         st = execute_program_text(&local_state, source);
+        shell_run_pending_traps(&local_state);
+        shell_run_exit_trap(&local_state);
         if (local_state.should_exit) {
             st = local_state.exit_status;
         }
@@ -3123,6 +3177,10 @@ while_done:
             if (vars_set_assignment(state, for_name, for_expanded.items[i], true) !=
                 0) {
                 status = 1;
+                if (!state->interactive) {
+                    state->should_exit = true;
+                    state->exit_status = status;
+                }
                 break;
             }
 
@@ -3232,6 +3290,8 @@ static void exec_child_command(struct shell_state *parent_state, const char *sou
     local_state = *parent_state;
     local_state.should_exit = false;
     local_state.exit_status = 0;
+    local_state.running_signal_trap = false;
+    local_state.running_exit_trap = false;
     local_state.main_context = false;
 
     status = execute_command_atom(&local_state, source, true);

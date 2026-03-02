@@ -19,6 +19,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#define POSISH_ALIAS_ENV_PREFIX "POSISH_ALIAS_"
+
 struct heredoc_marker {
     char *delimiter;
     bool strip_tabs;
@@ -1215,6 +1217,53 @@ static bool trap_clear_keeps_ignore(const struct shell_state *state, int signo) 
     return inherited_ignore_locked(state, signo);
 }
 
+static const char *trap_resolve_alias_command(const char *command) {
+    size_t start;
+    size_t end;
+    size_t i;
+    size_t name_len;
+    size_t key_len;
+    char *key;
+    const char *value;
+
+    start = 0;
+    while (command[start] == ' ' || command[start] == '\t' ||
+           command[start] == '\n') {
+        start++;
+    }
+    end = strlen(command);
+    while (end > start &&
+           (command[end - 1] == ' ' || command[end - 1] == '\t' ||
+            command[end - 1] == '\n')) {
+        end--;
+    }
+    if (end == start) {
+        return NULL;
+    }
+
+    if (!(isalpha((unsigned char)command[start]) || command[start] == '_')) {
+        return NULL;
+    }
+    for (i = start + 1; i < end; i++) {
+        if (!(isalnum((unsigned char)command[i]) || command[i] == '_')) {
+            return NULL;
+        }
+    }
+
+    name_len = end - start;
+    key_len = strlen(POSISH_ALIAS_ENV_PREFIX) + name_len;
+    key = malloc(key_len + 1);
+    if (key == NULL) {
+        return NULL;
+    }
+    memcpy(key, POSISH_ALIAS_ENV_PREFIX, strlen(POSISH_ALIAS_ENV_PREFIX));
+    memcpy(key + strlen(POSISH_ALIAS_ENV_PREFIX), command + start, name_len);
+    key[key_len] = '\0';
+    value = getenv(key);
+    free(key);
+    return value;
+}
+
 void shell_state_init(struct shell_state *state) {
     int signo;
 
@@ -1391,6 +1440,8 @@ void shell_run_pending_traps(struct shell_state *state) {
         bool saved_trap_status_valid;
         int saved_trap_status;
         char *command;
+        const char *run_command;
+        const char *alias_value;
 
         signo = signals_take_next_pending();
         if (signo <= 0 || signo >= NSIG) {
@@ -1407,6 +1458,8 @@ void shell_run_pending_traps(struct shell_state *state) {
 
         trace_log(POSISH_TRACE_TRAPS, "run signal trap signo=%d command=%s",
                   signo, command);
+        alias_value = trap_resolve_alias_command(command);
+        run_command = alias_value != NULL ? alias_value : command;
 
         saved_last_status = state->last_status;
         saved_should_exit = state->should_exit;
@@ -1417,7 +1470,7 @@ void shell_run_pending_traps(struct shell_state *state) {
         state->should_exit = false;
         state->trap_entry_status = saved_last_status;
         state->trap_entry_status_valid = true;
-        (void)shell_run_command(state, command);
+        (void)shell_run_command(state, run_command);
         state->trap_entry_status_valid = saved_trap_status_valid;
         state->trap_entry_status = saved_trap_status;
         trace_log(POSISH_TRACE_TRAPS,
@@ -1486,6 +1539,10 @@ int shell_run_command(struct shell_state *state, const char *command) {
 
     if (parse_program(command, &program) != 0) {
         state->last_status = 2;
+        if (!state->interactive) {
+            state->should_exit = true;
+            state->exit_status = 2;
+        }
         return state->last_status;
     }
 
