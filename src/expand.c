@@ -8,6 +8,7 @@
 #include "arith.h"
 #include "error.h"
 #include "options.h"
+#include "shell.h"
 #include "signals.h"
 #include "vars.h"
 
@@ -15,6 +16,7 @@
 #include <errno.h>
 #include <fnmatch.h>
 #include <glob.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +27,9 @@
 #define QUOTED_IFS_SPACE '\x81'
 #define QUOTED_IFS_TAB '\x82'
 #define QUOTED_IFS_NEWLINE '\x83'
+#define QUOTED_GLOB_STAR '\x84'
+#define QUOTED_GLOB_QMARK '\x85'
+#define QUOTED_GLOB_LBRACK '\x86'
 #define PATTERN_LIT_STAR '\x12'
 #define PATTERN_LIT_QMARK '\x13'
 #define PATTERN_LIT_LBRACK '\x14'
@@ -233,13 +238,384 @@ static size_t skip_token_line_continuations(const char *in, size_t pos) {
 }
 
 static int expand_token(const char *in, struct shell_state *state, char **out,
-                        bool dquote_mode);
+                        bool dquote_mode, bool assignment_context);
+
+static bool is_name_start_char_local(char ch) {
+  return isalpha((unsigned char)ch) || ch == '_';
+}
+
+static bool is_name_char_local(char ch) {
+  return isalnum((unsigned char)ch) || ch == '_';
+}
+
+static bool assignment_value_start(const char *token, size_t *value_start) {
+  size_t i;
+
+  if (token[0] == '\0' || !is_name_start_char_local(token[0])) {
+    return false;
+  }
+
+  i = 1;
+  while (token[i] != '\0' && token[i] != '=') {
+    if (!is_name_char_local(token[i])) {
+      return false;
+    }
+    i++;
+  }
+  if (token[i] != '=') {
+    return false;
+  }
+
+  *value_start = i + 1;
+  return true;
+}
+
+static bool is_tilde_user_char(char ch) {
+  return isalnum((unsigned char)ch) || ch == '_' || ch == '-' || ch == '.';
+}
+
+static void append_tilde_literal_char(char **buf, size_t *len, size_t *cap,
+                                      char ch) {
+  if (ch == ' ') {
+    append_char(buf, len, cap, QUOTED_IFS_SPACE);
+    return;
+  }
+  if (ch == '\t') {
+    append_char(buf, len, cap, QUOTED_IFS_TAB);
+    return;
+  }
+  if (ch == '\n') {
+    append_char(buf, len, cap, QUOTED_IFS_NEWLINE);
+    return;
+  }
+  if (ch == '*') {
+    append_char(buf, len, cap, QUOTED_GLOB_STAR);
+    return;
+  }
+  if (ch == '?') {
+    append_char(buf, len, cap, QUOTED_GLOB_QMARK);
+    return;
+  }
+  if (ch == '[') {
+    append_char(buf, len, cap, QUOTED_GLOB_LBRACK);
+    return;
+  }
+  append_char(buf, len, cap, ch);
+}
+
+static void append_tilde_literal(char **buf, size_t *len, size_t *cap,
+                                 const char *value) {
+  size_t i;
+
+  for (i = 0; value[i] != '\0'; i++) {
+    append_tilde_literal_char(buf, len, cap, value[i]);
+  }
+}
+
+static bool try_tilde_expansion(const char *in, size_t *i, bool assignment_context,
+                                char **buf, size_t *len, size_t *cap) {
+  size_t name_start;
+  size_t name_end;
+  char delim;
+  const char *home;
+  char *name;
+  struct passwd *pw;
+
+  if (in[*i] != '~') {
+    return false;
+  }
+
+  name_start = *i + 1;
+  name_end = name_start;
+  while (is_tilde_user_char(in[name_end])) {
+    name_end++;
+  }
+
+  delim = in[name_end];
+  if (delim != '\0' && delim != '/' && !(assignment_context && delim == ':')) {
+    return false;
+  }
+
+  if (name_end == name_start) {
+    home = getenv("HOME");
+    if (home == NULL) {
+      return false;
+    }
+    append_tilde_literal(buf, len, cap, home);
+  } else {
+    name = arena_xmalloc((name_end - name_start) + 1);
+    memcpy(name, in + name_start, name_end - name_start);
+    name[name_end - name_start] = '\0';
+    pw = getpwnam(name);
+    free(name);
+    if (pw == NULL || pw->pw_dir == NULL) {
+      return false;
+    }
+    append_tilde_literal(buf, len, cap, pw->pw_dir);
+  }
+
+  if (delim == '/' && *len > 0 && (*buf)[*len - 1] == '/') {
+    name_end++;
+  }
+  *i = name_end;
+  return true;
+}
+
+static bool find_command_substitution_close(const char *in, size_t start,
+                                            size_t *close_out) {
+  size_t i;
+  char quote;
+  bool dollar_single;
+  bool in_comment;
+
+  if (in[start] != '$' || in[start + 1] != '(') {
+    return false;
+  }
+
+  quote = '\0';
+  dollar_single = false;
+  in_comment = false;
+  for (i = start + 2; in[i] != '\0'; i++) {
+    size_t inner_len;
+    char *inner;
+    char *inner_with_candidate;
+    bool in_candidate_comment;
+    int need_more;
+    char ch;
+
+    ch = in[i];
+    if (in_comment) {
+      if (ch == '\n') {
+        in_comment = false;
+      }
+      continue;
+    }
+    if (dollar_single) {
+      if (ch == '\\' && in[i + 1] != '\0') {
+        i++;
+        continue;
+      }
+      if (ch == '\'') {
+        dollar_single = false;
+      }
+      continue;
+    }
+    if (quote == '\'') {
+      if (ch == '\'') {
+        quote = '\0';
+      }
+      continue;
+    }
+    if (quote == '"') {
+      if (ch == '\\' && in[i + 1] != '\0') {
+        i++;
+        continue;
+      }
+      if (ch == '"') {
+        quote = '\0';
+      }
+      continue;
+    }
+    if (ch == '\\' && in[i + 1] != '\0') {
+      i++;
+      continue;
+    }
+    if (ch == '$' && in[i + 1] == '\'') {
+      dollar_single = true;
+      i++;
+      continue;
+    }
+    if (ch == '\'' || ch == '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch == '#' && (i == start + 2 || isspace((unsigned char)in[i - 1]) ||
+                      in[i - 1] == ';' || in[i - 1] == '&' ||
+                      in[i - 1] == '|' || in[i - 1] == '(' ||
+                      in[i - 1] == ')' || in[i - 1] == '{' ||
+                      in[i - 1] == '}')) {
+      in_comment = true;
+      continue;
+    }
+
+    if (ch != ')') {
+      continue;
+    }
+
+    inner_len = i - (start + 2);
+    inner = arena_xmalloc(inner_len + 1);
+    if (inner_len > 0) {
+      memcpy(inner, in + start + 2, inner_len);
+    }
+    inner[inner_len] = '\0';
+
+    need_more = shell_needs_more_input_text(inner, inner_len);
+    inner_with_candidate = arena_xmalloc(inner_len + 2);
+    if (inner_len > 0) {
+      memcpy(inner_with_candidate, in + start + 2, inner_len);
+    }
+    inner_with_candidate[inner_len] = ')';
+    inner_with_candidate[inner_len + 1] = '\0';
+    in_candidate_comment =
+        shell_position_in_comment(inner_with_candidate, inner_len + 1, inner_len);
+    free(inner_with_candidate);
+    free(inner);
+
+    if (!in_candidate_comment && need_more == 0) {
+      *close_out = i;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static size_t skip_command_subst_token(const char *token, size_t pos) {
+  size_t i;
+  int depth;
+  char quote;
+
+  if (token[pos] != '$' || token[pos + 1] != '(') {
+    return pos + 1;
+  }
+
+  i = pos + 2;
+  depth = 1;
+  quote = '\0';
+  while (token[i] != '\0') {
+    char ch;
+
+    ch = token[i];
+    if (quote == '\0') {
+      if (ch == '\\' && token[i + 1] != '\0') {
+        i += 2;
+        continue;
+      }
+      if (ch == '\'' || ch == '"') {
+        quote = ch;
+        i++;
+        continue;
+      }
+      if (ch == '(') {
+        depth++;
+      } else if (ch == ')') {
+        depth--;
+        if (depth == 0) {
+          return i + 1;
+        }
+      }
+      i++;
+      continue;
+    }
+
+    if (quote == '\'' && ch == '\'') {
+      quote = '\0';
+    } else if (quote == '"' && ch == '"') {
+      quote = '\0';
+    } else if (ch == '\\' && token[i + 1] != '\0') {
+      i += 2;
+      continue;
+    }
+    i++;
+  }
+
+  return i;
+}
+
+static size_t skip_braced_param_token(const char *token, size_t pos) {
+  size_t i;
+  int depth;
+  char quote;
+
+  if (token[pos] != '$' || token[pos + 1] != '{') {
+    return pos + 1;
+  }
+
+  i = pos + 2;
+  depth = 1;
+  quote = '\0';
+  while (token[i] != '\0') {
+    char ch;
+
+    ch = token[i];
+    if (quote == '\0') {
+      if (ch == '\\' && token[i + 1] != '\0') {
+        i += 2;
+        continue;
+      }
+      if (ch == '\'' || ch == '"') {
+        quote = ch;
+        i++;
+        continue;
+      }
+      if (ch == '{') {
+        depth++;
+      } else if (ch == '}') {
+        depth--;
+        if (depth == 0) {
+          return i + 1;
+        }
+      }
+      i++;
+      continue;
+    }
+
+    if (quote == '\'' && ch == '\'') {
+      quote = '\0';
+    } else if (quote == '"' && ch == '"') {
+      quote = '\0';
+    } else if (ch == '\\' && token[i + 1] != '\0') {
+      i += 2;
+      continue;
+    }
+    i++;
+  }
+
+  return i;
+}
+
+static size_t skip_backtick_token(const char *token, size_t pos) {
+  size_t i;
+
+  if (token[pos] != '`') {
+    return pos + 1;
+  }
+
+  i = pos + 1;
+  while (token[i] != '\0') {
+    if (token[i] == '\\' && token[i + 1] != '\0') {
+      i += 2;
+      continue;
+    }
+    if (token[i] == '`') {
+      return i + 1;
+    }
+    i++;
+  }
+  return i;
+}
 
 static bool token_is_unquoted(const char *token) {
   size_t i;
 
   i = 0;
   while (token[i] != '\0') {
+    if (token[i] == '$' && token[i + 1] == '(') {
+      i = skip_command_subst_token(token, i);
+      continue;
+    }
+    if (token[i] == '$' && token[i + 1] == '{') {
+      i = skip_braced_param_token(token, i);
+      continue;
+    }
+    if (token[i] == '`') {
+      i = skip_backtick_token(token, i);
+      continue;
+    }
+    if (token[i] == '$' && token[i + 1] == '\'') {
+      /* Dollar-single-quote is a quoting form and suppresses splitting. */
+      return false;
+    }
     if (token[i] == '\\' && token[i + 1] != '\0') {
       i += 2;
       continue;
@@ -262,6 +638,23 @@ static bool token_has_glob_meta(const char *token) {
       continue;
     }
     if (token[i] == '*' || token[i] == '?' || token[i] == '[') {
+      return true;
+    }
+    i++;
+  }
+  return false;
+}
+
+static bool token_has_runtime_expansion(const char *token) {
+  size_t i;
+
+  i = 0;
+  while (token[i] != '\0') {
+    if (token[i] == '\\' && token[i + 1] != '\0') {
+      i += 2;
+      continue;
+    }
+    if (token[i] == '$' || token[i] == '`') {
       return true;
     }
     i++;
@@ -413,6 +806,73 @@ static int run_command_substitution(struct shell_state *state, const char *cmd,
   return 0;
 }
 
+static char *normalize_backquote_command_text(const char *raw) {
+  size_t i;
+  char quote;
+  bool pseudo_dquote;
+  char *out;
+  size_t len;
+  size_t cap;
+
+  i = 0;
+  quote = '\0';
+  pseudo_dquote = false;
+  out = NULL;
+  len = 0;
+  cap = 0;
+
+  while (raw[i] != '\0') {
+    if (raw[i] == '\\' && raw[i + 1] != '\0') {
+      char next;
+      size_t j;
+      bool has_matching_escaped_quote;
+
+      next = raw[i + 1];
+      has_matching_escaped_quote = false;
+      if (next == '"' && quote == '\0' && !pseudo_dquote) {
+        j = i + 2;
+        while (raw[j] != '\0' && !isspace((unsigned char)raw[j])) {
+          if (raw[j] == '\\' && raw[j + 1] == '"') {
+            has_matching_escaped_quote = true;
+            break;
+          }
+          if (raw[j] == '\\' && raw[j + 1] != '\0') {
+            j += 2;
+            continue;
+          }
+          j++;
+        }
+      }
+
+      if (next == '$' || next == '`' || next == '\\' || next == '\n' ||
+          (next == '"' && quote == '\0' &&
+           (pseudo_dquote || has_matching_escaped_quote))) {
+        if (next != '\n') {
+          append_char(&out, &len, &cap, next);
+        }
+        if (next == '"' && quote == '\0') {
+          pseudo_dquote = !pseudo_dquote;
+        }
+        i += 2;
+        continue;
+      }
+    }
+
+    append_char(&out, &len, &cap, raw[i]);
+    if (quote == '\0' && (raw[i] == '\'' || raw[i] == '"')) {
+      quote = raw[i];
+    } else if (quote != '\0' && raw[i] == quote) {
+      quote = '\0';
+    }
+    i++;
+  }
+
+  if (out == NULL) {
+    out = arena_xstrdup("");
+  }
+  return out;
+}
+
 static int run_arithmetic_expansion(const char *expr, char **out_value,
                                     int *status_out,
                                     struct shell_state *state) {
@@ -420,7 +880,7 @@ static int run_arithmetic_expansion(const char *expr, char **out_value,
   long value;
   char text[64];
 
-  if (expand_token(expr, state, &expanded_expr, false) != 0) {
+  if (expand_token(expr, state, &expanded_expr, false, false) != 0) {
     return -1;
   }
 
@@ -603,7 +1063,7 @@ static int append_expanded_fragment(const char *expr, size_t start, size_t elen,
   memcpy(word, expr + start, wlen);
   word[wlen] = '\0';
 
-  rc = expand_token(word, state, &expanded_word, in_double_quotes);
+  rc = expand_token(word, state, &expanded_word, in_double_quotes, false);
   if (rc != 0) {
     free(word);
     return -1;
@@ -629,7 +1089,7 @@ static int expand_fragment_to_string(const char *expr, size_t start, size_t elen
   memcpy(word, expr + start, wlen);
   word[wlen] = '\0';
 
-  rc = expand_token(word, state, &expanded, in_double_quotes);
+  rc = expand_token(word, state, &expanded, in_double_quotes, false);
   free(word);
   if (rc != 0) {
     return rc;
@@ -764,7 +1224,7 @@ static int expand_pattern_fragment(const char *expr, size_t start, size_t elen,
   marked = mark_pattern_escapes(word);
   free(word);
 
-  rc = expand_token(marked, state, &expanded, false);
+  rc = expand_token(marked, state, &expanded, false, false);
   free(marked);
   if (rc != 0) {
     return rc;
@@ -1180,6 +1640,12 @@ static void restore_quoted_ifs_markers(char *s) {
       s[i] = '\t';
     } else if (s[i] == QUOTED_IFS_NEWLINE) {
       s[i] = '\n';
+    } else if (s[i] == QUOTED_GLOB_STAR) {
+      s[i] = '*';
+    } else if (s[i] == QUOTED_GLOB_QMARK) {
+      s[i] = '?';
+    } else if (s[i] == QUOTED_GLOB_LBRACK) {
+      s[i] = '[';
     }
   }
 }
@@ -1257,31 +1723,42 @@ static int split_and_append_fields(const char *expanded, struct token_vec *out) 
 }
 
 static int expand_token(const char *in, struct shell_state *state, char **out,
-                        bool dquote_mode) {
+                        bool dquote_mode, bool assignment_context) {
   size_t i;
+  size_t assign_value_pos;
+  bool assign_mode;
+  bool tilde_allowed;
   char *buf;
   size_t len;
   size_t cap;
   char quote;
 
   i = 0;
+  assign_value_pos = 0;
+  assign_mode = !dquote_mode && assignment_context &&
+                assignment_value_start(in, &assign_value_pos);
+  tilde_allowed = !dquote_mode && !assign_mode;
   buf = NULL;
   len = 0;
   cap = 0;
   quote = '\0';
 
-  /* Basic tilde expansion at the start of an unquoted word. */
-  if (!dquote_mode && in[0] == '~' && (in[1] == '\0' || in[1] == '/')) {
-    const char *home;
-
-    home = getenv("HOME");
-    if (home != NULL) {
-      append_str(&buf, &len, &cap, home);
-      i = 1;
+  if (assign_mode && assign_value_pos > 0) {
+    while (i < assign_value_pos) {
+      append_char(&buf, &len, &cap, in[i]);
+      i++;
     }
+    tilde_allowed = true;
   }
 
   while (in[i] != '\0') {
+    if (quote == '\0' && tilde_allowed && in[i] == '~') {
+      if (try_tilde_expansion(in, &i, assign_mode, &buf, &len, &cap)) {
+        tilde_allowed = false;
+        continue;
+      }
+    }
+
     if (quote == '\'') {
       if (in[i] == '\'') {
         quote = '\0';
@@ -1314,11 +1791,17 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
     } else {
       if (!dquote_mode && in[i] == '\'') {
         quote = '\'';
+        if (assign_mode) {
+          tilde_allowed = false;
+        }
         i++;
         continue;
       }
       if (in[i] == '"') {
         quote = '"';
+        if (assign_mode) {
+          tilde_allowed = false;
+        }
         i++;
         continue;
       }
@@ -1356,6 +1839,9 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
           continue;
         }
         append_char(&buf, &len, &cap, in[i]);
+        if (assign_mode) {
+          tilde_allowed = false;
+        }
         i++;
         continue;
       }
@@ -1509,52 +1995,11 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
         }
 
         size_t j;
-        int depth;
-        char quote;
         char *cmd;
         char *value;
         int cmd_status;
 
-        j = next + 1;
-        depth = 1;
-        quote = '\0';
-        while (in[j] != '\0' && depth > 0) {
-          char ch;
-
-          ch = in[j];
-          if (quote == '\0') {
-            if (ch == '\\' && in[j + 1] != '\0') {
-              j += 2;
-              continue;
-            }
-            if (ch == '\'' || ch == '"') {
-              quote = ch;
-              j++;
-              continue;
-            }
-            if (ch == '(') {
-              depth++;
-            } else if (ch == ')') {
-              depth--;
-              if (depth == 0) {
-                break;
-              }
-            }
-          } else if (quote == '\'' && ch == '\'') {
-            quote = '\0';
-          } else if (quote == '"') {
-            if (ch == '\\' && in[j + 1] != '\0') {
-              j += 2;
-              continue;
-            }
-            if (ch == '"') {
-              quote = '\0';
-            }
-          }
-          j++;
-        }
-
-        if (in[j] != ')' || depth != 0) {
+        if (!find_command_substitution_close(in, next - 1, &j)) {
           posish_errorf("unterminated command substitution");
           free(buf);
           return -1;
@@ -1614,6 +2059,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
     if (in[i] == '`') {
       size_t j;
       char *cmd;
+      char *normalized_cmd;
       char *value;
       int cmd_status;
 
@@ -1638,6 +2084,9 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
       cmd = arena_xmalloc((j - (i + 1)) + 1);
       memcpy(cmd, in + i + 1, j - (i + 1));
       cmd[j - (i + 1)] = '\0';
+      normalized_cmd = normalize_backquote_command_text(cmd);
+      free(cmd);
+      cmd = normalized_cmd;
 
       if (run_command_substitution(state, cmd, &value, &cmd_status) != 0) {
         free(cmd);
@@ -1655,6 +2104,15 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
     }
 
     append_char(&buf, &len, &cap, in[i]);
+    if (assign_mode) {
+      if (quote == '\0' && in[i] == ':') {
+        tilde_allowed = true;
+      } else {
+        tilde_allowed = false;
+      }
+    } else {
+      tilde_allowed = false;
+    }
     i++;
   }
 
@@ -1831,52 +2289,11 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
         }
 
         size_t j;
-        int depth;
-        char quote;
         char *cmd;
         char *value;
         int cmd_status;
 
-        j = i + 2;
-        depth = 1;
-        quote = '\0';
-        while (in[j] != '\0' && depth > 0) {
-          char ch;
-
-          ch = in[j];
-          if (quote == '\0') {
-            if (ch == '\\' && in[j + 1] != '\0') {
-              j += 2;
-              continue;
-            }
-            if (ch == '\'' || ch == '"') {
-              quote = ch;
-              j++;
-              continue;
-            }
-            if (ch == '(') {
-              depth++;
-            } else if (ch == ')') {
-              depth--;
-              if (depth == 0) {
-                break;
-              }
-            }
-          } else if (quote == '\'' && ch == '\'') {
-            quote = '\0';
-          } else if (quote == '"') {
-            if (ch == '\\' && in[j + 1] != '\0') {
-              j += 2;
-              continue;
-            }
-            if (ch == '"') {
-              quote = '\0';
-            }
-          }
-          j++;
-        }
-
-        if (in[j] != ')' || depth != 0) {
+        if (!find_command_substitution_close(in, i, &j)) {
           posish_errorf("unterminated command substitution");
           free(buf);
           return -1;
@@ -1936,6 +2353,7 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
     if (in[i] == '`') {
       size_t j;
       char *cmd;
+      char *normalized_cmd;
       char *value;
       int cmd_status;
 
@@ -1960,6 +2378,9 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
       cmd = arena_xmalloc((j - (i + 1)) + 1);
       memcpy(cmd, in + i + 1, j - (i + 1));
       cmd[j - (i + 1)] = '\0';
+      normalized_cmd = normalize_backquote_command_text(cmd);
+      free(cmd);
+      cmd = normalized_cmd;
 
       if (run_command_substitution(state, cmd, &value, &cmd_status) != 0) {
         free(cmd);
@@ -2013,7 +2434,12 @@ int expand_words(const struct token_vec *in, struct token_vec *out,
       continue;
     }
 
-    if (expand_token(in->items[i], state, &expanded, false) != 0) {
+    size_t ignored;
+    bool assignment_word;
+
+    assignment_word = assignment_value_start(in->items[i], &ignored);
+    if (expand_token(in->items[i], state, &expanded, false, assignment_word) !=
+        0) {
       size_t j;
       for (j = 0; j < out->len; j++) {
         free(out->items[j]);
@@ -2031,7 +2457,7 @@ int expand_words(const struct token_vec *in, struct token_vec *out,
     if (split_fields && token_is_unquoted(in->items[i])) {
       int count;
 
-      if (expanded[0] == '\0') {
+      if (expanded[0] == '\0' && token_has_runtime_expansion(in->items[i])) {
         free(expanded);
         continue;
       }
@@ -2042,10 +2468,8 @@ int expand_words(const struct token_vec *in, struct token_vec *out,
       }
     }
 
-    restore_quoted_ifs_markers(expanded);
-
-	    if (split_fields && !state->noglob && token_is_unquoted(in->items[i]) &&
-	        token_has_glob_meta(expanded)) {
+    if (split_fields && !state->noglob && token_is_unquoted(in->items[i]) &&
+        token_has_glob_meta(expanded)) {
       glob_t g;
       int grc;
 
@@ -2069,6 +2493,7 @@ int expand_words(const struct token_vec *in, struct token_vec *out,
       }
     }
 
+    restore_quoted_ifs_markers(expanded);
     out->items = xrealloc(out->items, sizeof(*out->items) * (out->len + 1));
     out->items[out->len++] = expanded;
   }
