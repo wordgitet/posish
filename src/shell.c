@@ -792,7 +792,8 @@ static int needs_more_input(char *buf, size_t *len) {
                 command_position = false;
                 continue;
             }
-            if (ch == '#' && hash_starts_comment(buf, i)) {
+            if (ch == '#' && param_depth == 0 && paren_depth == 0 &&
+                brace_depth == 0 && hash_starts_comment(buf, i)) {
                 while (i < *len && buf[i] != '\n') {
                     i++;
                 }

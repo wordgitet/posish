@@ -16,7 +16,11 @@ static ssize_t vars_find_unexported(const struct shell_state *state,
                                     const char *name);
 
 void vars_init(void) {
-    /* Placeholder for shell variable storage and scope management. */
+    /*
+     * POSIX shells initialize IFS to <space><tab><newline> regardless of
+     * inherited environment so field splitting has a predictable baseline.
+     */
+    (void)setenv("IFS", " \t\n", 1);
 }
 
 bool vars_is_name_valid(const char *name) {
