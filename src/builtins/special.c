@@ -890,6 +890,77 @@ static int split_assignment(const char *word, char **name_out, const char **valu
     return 0;
 }
 
+static void append_mem(char **buf, size_t *len, size_t *cap, const char *data,
+                       size_t data_len) {
+    if (*len + data_len + 1 > *cap) {
+        size_t new_cap;
+
+        new_cap = *cap == 0 ? 32 : *cap;
+        while (*len + data_len + 1 > new_cap) {
+            new_cap *= 2;
+        }
+        *buf = realloc(*buf, new_cap);
+        if (*buf == NULL) {
+            perror("realloc");
+            exit(EXIT_FAILURE);
+        }
+        *cap = new_cap;
+    }
+
+    memcpy(*buf + *len, data, data_len);
+    *len += data_len;
+    (*buf)[*len] = '\0';
+}
+
+static char *expand_decl_assignment_tilde(const char *value) {
+    const char *home;
+    size_t i;
+    size_t start;
+    char *out;
+    size_t out_len;
+    size_t out_cap;
+
+    home = getenv("HOME");
+    if (home == NULL || value == NULL || value[0] == '\0') {
+        return arena_xstrdup(value == NULL ? "" : value);
+    }
+
+    out = NULL;
+    out_len = 0;
+    out_cap = 0;
+    start = 0;
+
+    for (i = 0;; i++) {
+        if (value[i] == ':' || value[i] == '\0') {
+            size_t seg_len;
+
+            seg_len = i - start;
+            if (seg_len > 0 && value[start] == '~' &&
+                (seg_len == 1 || value[start + 1] == '/')) {
+                append_mem(&out, &out_len, &out_cap, home, strlen(home));
+                if (seg_len > 1) {
+                    append_mem(&out, &out_len, &out_cap, value + start + 1,
+                               seg_len - 1);
+                }
+            } else if (seg_len > 0) {
+                append_mem(&out, &out_len, &out_cap, value + start, seg_len);
+            }
+
+            if (value[i] == ':') {
+                append_mem(&out, &out_len, &out_cap, ":", 1);
+                start = i + 1;
+                continue;
+            }
+            break;
+        }
+    }
+
+    if (out == NULL) {
+        out = arena_xstrdup("");
+    }
+    return out;
+}
+
 static bool command_is_blank(const char *command) {
     size_t i;
 
@@ -1117,9 +1188,13 @@ static int builtin_export(struct shell_state *state, char *const argv[]) {
             continue;
         }
         if (split_assignment(argv[i], &name, &value) == 0) {
-            if (vars_set_with_mode(state, name, value, true, true) != 0) {
+            char *tilde_value;
+
+            tilde_value = expand_decl_assignment_tilde(value);
+            if (vars_set_with_mode(state, name, tilde_value, true, true) != 0) {
                 status = 1;
             }
+            free(tilde_value);
             free(name);
             continue;
         }
@@ -1288,9 +1363,13 @@ static int builtin_readonly(struct shell_state *state, char *const argv[]) {
             continue;
         }
         if (split_assignment(argv[i], &name, &value) == 0) {
-            if (vars_mark_readonly(state, name, value, true) != 0) {
+            char *tilde_value;
+
+            tilde_value = expand_decl_assignment_tilde(value);
+            if (vars_mark_readonly(state, name, tilde_value, true) != 0) {
                 status = 1;
             }
+            free(tilde_value);
             free(name);
             continue;
         }

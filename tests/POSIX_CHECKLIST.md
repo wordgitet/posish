@@ -15,16 +15,16 @@ Legend:
 - [x] async-p.tst
 - [x] bg-p.tst
 - [x] break-p.tst
-- [ ] builtins-p.tst
-- [ ] case-p.tst
-- [ ] cd-p.tst
-- [ ] cmdsub-p.tst
+- [x] builtins-p.tst
+- [x] case-p.tst
+- [x] cd-p.tst
+- [x] cmdsub-p.tst
 - [x] command-p.tst
-- [ ] comment-p.tst
+- [x] comment-p.tst
 - [x] continue-p.tst
-- [ ] declutil-p.tst
+- [x] declutil-p.tst
 - [x] dot-p.tst
-- [ ] errexit-p.tst
+- [x] errexit-p.tst
 - [ ] error-p.tst
 - [x] eval-p.tst
 - [x] exec-p.tst
@@ -33,28 +33,28 @@ Legend:
 - [x] fg-p.tst
 - [x] fnmatch-p.tst
 - [x] for-p.tst
-- [ ] fsplit-p.tst
+- [x] fsplit-p.tst
 - [x] function-p.tst
-- [ ] getopts-p.tst
+- [x] getopts-p.tst
 - [x] grouping-p.tst
 - [x] if-p.tst
-- [ ] input-p.tst
+- [x] input-p.tst
 - [x] job-p.tst
 - [x] kill1-p.tst
 - [x] kill2-p.tst
 - [x] kill3-p.tst
 - [x] kill4-p.tst
-- [ ] lineno-p.tst
+- [x] lineno-p.tst
 - [x] nop-p.tst
 - [x] option-p.tst
 - [ ] param-p.tst
 - [x] path-p.tst
-- [ ] pipeline-p.tst
+- [x] pipeline-p.tst
 - [x] ppid-p.tst
 - [x] quote-p.tst
 - [ ] read-p.tst
 - [x] readonly-p.tst
-- [ ] redir-p.tst
+- [x] redir-p.tst
 - [x] return-p.tst
 - [x] set-p.tst
 - [x] shift-p.tst
@@ -121,10 +121,10 @@ Legend:
 - [x] sigurg7-p.tst
 - [x] sigurg8-p.tst
 - [x] simple-p.tst
-- [ ] startup-p.tst
+- [x] startup-p.tst
 - [x] test-p.tst
 - [x] testtty-p.tst
-- [ ] tilde-p.tst
+- [x] tilde-p.tst
 - [ ] trap-p.tst
 - [x] umask-p.tst
 - [x] unset-p.tst

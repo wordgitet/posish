@@ -21,6 +21,7 @@ struct shell_state {
     bool cmdsub_performed;
     pid_t shell_pid;
     bool errexit;
+    bool errexit_ignored;
     bool should_exit;
     int exit_status;
     int last_handled_signal;
@@ -75,5 +76,7 @@ void shell_run_pending_traps(struct shell_state *state);
 int shell_run_command(struct shell_state *state, const char *command);
 int shell_run_file(struct shell_state *state, const char *path);
 int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive);
+int shell_needs_more_input_text(const char *buf, size_t len);
+bool shell_position_in_comment(const char *buf, size_t len, size_t pos);
 
 #endif

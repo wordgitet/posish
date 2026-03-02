@@ -14,6 +14,7 @@
 #include "trace.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -139,7 +140,7 @@ static size_t skip_balanced_parens(const char *buf, size_t i, size_t len) {
         }
         i++;
     }
-    return len;
+    return len + 1;
 }
 
 static size_t skip_braced_param(const char *buf, size_t i, size_t len,
@@ -164,6 +165,9 @@ static size_t skip_braced_param(const char *buf, size_t i, size_t len,
                     i++;
                 }
                 i = skip_balanced_parens(buf, i, len);
+                if (i > len) {
+                    return len;
+                }
                 continue;
             }
             if (ch == '$' && i + 1 < len && buf[i + 1] == '{') {
@@ -318,6 +322,10 @@ static bool collect_heredoc_markers(const char *buf, size_t len,
                     i++;
                 }
                 i = skip_balanced_parens(buf, i, len);
+                if (i > len) {
+                    free_heredoc_markers(markers, count);
+                    return false;
+                }
                 continue;
             }
             if (ch == '$' && i + 1 < len && buf[i + 1] == '{') {
@@ -529,22 +537,115 @@ static bool keyword_boundary(char ch) {
 }
 
 static bool hash_starts_comment(const char *source, size_t pos) {
-    long i;
-
     if (source[pos] != '#') {
         return false;
     }
 
-    i = (long)pos - 1;
-    while (i >= 0 && (source[i] == ' ' || source[i] == '\t')) {
-        i--;
-    }
-    if (i < 0) {
+    if (pos == 0) {
         return true;
     }
-    return source[i] == '\n' || source[i] == ';' || source[i] == '&' ||
-           source[i] == '|' || source[i] == '(' || source[i] == ')' ||
-           source[i] == '{' || source[i] == '}';
+    return isspace((unsigned char)source[pos - 1]) || source[pos - 1] == ';' ||
+           source[pos - 1] == '&' || source[pos - 1] == '|' ||
+           source[pos - 1] == '(' || source[pos - 1] == ')' ||
+           source[pos - 1] == '{' || source[pos - 1] == '}';
+}
+
+static bool line_has_comment_before(const char *buf, size_t line_start,
+                                    size_t line_end, size_t *comment_pos_out) {
+    size_t i;
+    int quote;
+    int param_depth;
+
+    i = line_start;
+    quote = 0;
+    param_depth = 0;
+    while (i < line_end) {
+        char ch;
+
+        ch = buf[i];
+        if (quote == 0) {
+            if (ch == '\\' && i + 1 < line_end) {
+                i += 2;
+                continue;
+            }
+            if (ch == '\'' || ch == '"') {
+                quote = ch;
+                i++;
+                continue;
+            }
+            if (ch == '$' && i + 1 < line_end && buf[i + 1] == '{') {
+                param_depth++;
+                i += 2;
+                continue;
+            }
+            if (ch == '}' && param_depth > 0) {
+                param_depth--;
+                i++;
+                continue;
+            }
+            if (ch == '#' && param_depth == 0 && hash_starts_comment(buf, i)) {
+                if (comment_pos_out != NULL) {
+                    *comment_pos_out = i;
+                }
+                return true;
+            }
+            i++;
+            continue;
+        }
+
+        if (quote == '\'' && ch == '\'') {
+            quote = 0;
+        } else if (quote == '"' && ch == '\\' && i + 1 < line_end) {
+            i += 2;
+            continue;
+        } else if (quote == '"' && ch == '"') {
+            quote = 0;
+        }
+        i++;
+    }
+
+    return false;
+}
+
+static bool trailing_backslash_newline_is_comment(const char *buf, size_t len) {
+    size_t line_start;
+    size_t comment_pos;
+
+    if (len < 2 || buf[len - 2] != '\\' || buf[len - 1] != '\n') {
+        return false;
+    }
+
+    line_start = len - 2;
+    while (line_start > 0 && buf[line_start - 1] != '\n') {
+        line_start--;
+    }
+    return line_has_comment_before(buf, line_start, len - 1, &comment_pos);
+}
+
+static size_t trim_end_ignoring_trailing_comment(const char *buf, size_t len) {
+    size_t end;
+    size_t line_start;
+    size_t comment_pos;
+
+    end = len;
+    while (end > 0 && isspace((unsigned char)buf[end - 1])) {
+        end--;
+    }
+    if (end == 0) {
+        return 0;
+    }
+
+    line_start = end;
+    while (line_start > 0 && buf[line_start - 1] != '\n') {
+        line_start--;
+    }
+    if (line_has_comment_before(buf, line_start, end, &comment_pos)) {
+        end = comment_pos;
+        while (end > 0 && isspace((unsigned char)buf[end - 1])) {
+            end--;
+        }
+    }
+    return end;
 }
 
 static bool looks_like_function_header_only_input(const char *buf, size_t len) {
@@ -767,19 +868,37 @@ static int needs_more_input(char *buf, size_t *len) {
                 i += 2;
                 continue;
             }
-            if (ch == '$' && i + 1 < *len && buf[i + 1] == '\'') {
-                i = skip_dollar_single_quote(buf, i, *len);
-                if (i > *len) {
-                    return 1;
+            if (ch == '$' && i + 1 < *len) {
+                size_t next;
+
+                next = skip_line_continuations_limited(buf, i + 1, *len);
+                if (next < *len && buf[next] == '\'') {
+                    i = next - 1;
+                    i = skip_dollar_single_quote(buf, i, *len);
+                    if (i > *len) {
+                        return 1;
+                    }
+                    command_position = false;
+                    continue;
                 }
-                command_position = false;
-                continue;
-            }
-            if (ch == '$' && i + 1 < *len && buf[i + 1] == '{') {
-                param_depth++;
-                command_position = false;
-                i += 2;
-                continue;
+                if (next < *len && buf[next] == '(') {
+                    i = next + 1;
+                    if (i < *len && buf[i] == '(') {
+                        i++;
+                    }
+                    i = skip_balanced_parens(buf, i, *len);
+                    if (i > *len) {
+                        return 1;
+                    }
+                    command_position = false;
+                    continue;
+                }
+                if (next < *len && buf[next] == '{') {
+                    param_depth++;
+                    command_position = false;
+                    i = next + 1;
+                    continue;
+                }
             }
             if (ch == '}' && param_depth > 0) {
                 param_depth--;
@@ -942,12 +1061,20 @@ static int needs_more_input(char *buf, size_t *len) {
                 i++;
             }
             i = skip_balanced_parens(buf, i, *len);
+            if (i > *len) {
+                return 1;
+            }
             continue;
         }
-        if (quote == '"' && ch == '$' && i + 1 < *len && buf[i + 1] == '{') {
-            i += 2;
-            i = skip_braced_param(buf, i, *len, true);
-            continue;
+        if (quote == '"' && ch == '$' && i + 1 < *len) {
+            size_t next;
+
+            next = skip_line_continuations_limited(buf, i + 1, *len);
+            if (next < *len && buf[next] == '{') {
+                i = next + 1;
+                i = skip_braced_param(buf, i, *len, true);
+                continue;
+            }
         }
         if (quote == '"' && ch == '`') {
             i = skip_backtick_subst(buf, i, *len);
@@ -980,16 +1107,14 @@ static int needs_more_input(char *buf, size_t *len) {
     if (looks_like_function_header_only_input(buf, *len)) {
         return 1;
     }
-    if (*len >= 2 && buf[*len - 2] == '\\' && buf[*len - 1] == '\n') {
+    if (*len >= 2 && buf[*len - 2] == '\\' && buf[*len - 1] == '\n' &&
+        !trailing_backslash_newline_is_comment(buf, *len)) {
         return 1;
     }
     {
         size_t end;
 
-        end = *len;
-        while (end > 0 && isspace((unsigned char)buf[end - 1])) {
-            end--;
-        }
+        end = trim_end_ignoring_trailing_comment(buf, *len);
         if (end > 0) {
             if (buf[end - 1] == '|') {
                 return 1;
@@ -1000,6 +1125,60 @@ static int needs_more_input(char *buf, size_t *len) {
         }
     }
     return heredoc_needs_more_input(buf, *len) ? 1 : 0;
+}
+
+int shell_needs_more_input_text(const char *buf, size_t len) {
+    char *tmp;
+    size_t tmp_len;
+    int rc;
+
+    tmp = malloc(len + 1);
+    if (tmp == NULL) {
+        perror("malloc");
+        return 1;
+    }
+    memcpy(tmp, buf, len);
+    tmp[len] = '\0';
+    tmp_len = len;
+    rc = needs_more_input(tmp, &tmp_len);
+    free(tmp);
+    return rc;
+}
+
+bool shell_position_in_comment(const char *buf, size_t len, size_t pos) {
+    size_t line_start;
+    size_t i;
+    size_t line_end;
+    size_t comment_pos;
+
+    if (pos >= len) {
+        return false;
+    }
+
+    line_start = pos;
+    while (line_start > 0 && buf[line_start - 1] != '\n') {
+        line_start--;
+    }
+
+    line_end = pos;
+    while (line_end < len && buf[line_end] != '\n') {
+        line_end++;
+    }
+
+    comment_pos = line_end;
+    if (!line_has_comment_before(buf, line_start, line_end, &comment_pos)) {
+        return false;
+    }
+    if (comment_pos >= line_end) {
+        return false;
+    }
+
+    for (i = comment_pos; i < line_end; i++) {
+        if (i == pos) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static void append_command(char **buf, size_t *len, size_t *cap,
@@ -1045,6 +1224,7 @@ void shell_state_init(struct shell_state *state) {
     /* Keep $$ stable across subshell/cmdsub contexts for POSIX semantics. */
     state->shell_pid = getpid();
     state->errexit = false;
+    state->errexit_ignored = false;
     state->should_exit = false;
     state->exit_status = 0;
     state->last_handled_signal = 0;
@@ -1134,6 +1314,7 @@ void shell_state_destroy(struct shell_state *state) {
     state->positional_count = 0;
     state->explicit_non_interactive = false;
     state->parent_was_interactive = false;
+    state->errexit_ignored = false;
     state->in_async_context = false;
     state->main_context = true;
     state->last_async_pid = -1;
@@ -1490,11 +1671,16 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
 int shell_run_file(struct shell_state *state, const char *path) {
     FILE *fp;
     int status;
+    int open_errno;
 
     fp = fopen(path, "r");
     if (fp == NULL) {
+        open_errno = errno;
         perror(path);
-        return 1;
+        if (open_errno == ENOENT) {
+            return 127;
+        }
+        return 126;
     }
 
     status = shell_run_stream(state, fp, false);

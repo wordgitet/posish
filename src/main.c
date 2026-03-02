@@ -164,6 +164,12 @@ int main(int argc, char **argv) {
                 }
                 command = argv[i];
                 i++;
+                if ((strcmp(command, "-") == 0 || strcmp(command, "--") == 0) &&
+                    i < argc) {
+                    /* POSIX: leading -/-- after -c is ignored as command name. */
+                    command = argv[i];
+                    i++;
+                }
                 break;
             }
             continue;
@@ -175,6 +181,16 @@ int main(int argc, char **argv) {
         run_interactive = force_interactive;
     } else {
         run_interactive = (command == NULL && i >= argc && isatty(STDIN_FILENO));
+    }
+
+    if (command == NULL && !read_stdin_script && i < argc &&
+        strcmp(argv[i], "-") == 0) {
+        /*
+         * A lone "-" operand is ignored and stdin is read as the script
+         * source, matching the startup test-suite contract.
+         */
+        read_stdin_script = true;
+        i++;
     }
 
     /*
@@ -194,7 +210,7 @@ int main(int argc, char **argv) {
     shell_refresh_signal_policy(&state);
 
     if (command != NULL) {
-        (void)set_initial_positional_params(&state, argc, argv, i);
+        (void)set_initial_positional_params(&state, argc, argv, i + 1);
     } else if (read_stdin_script) {
         (void)set_initial_positional_params(&state, argc, argv, i);
     } else if (i < argc) {
