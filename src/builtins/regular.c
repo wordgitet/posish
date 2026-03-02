@@ -25,6 +25,10 @@
 
 #define POSISH_ALIAS_ENV_PREFIX "POSISH_ALIAS_"
 
+static size_t getopts_nextchar_index = 0;
+static unsigned long getopts_last_optind = 1;
+static char *getopts_last_optstring = NULL;
+
 static int wait_status_to_shell_status(int status) {
     if (WIFEXITED(status)) {
         return WEXITSTATUS(status);
@@ -1107,11 +1111,220 @@ static int builtin_unalias(char *const argv[]) {
     return status;
 }
 
-static int builtin_getopts(char *const argv[]) {
-    if (argv[1] == NULL || argv[2] == NULL) {
+static int getopts_set_var(struct shell_state *state, const char *name,
+                           const char *value) {
+    return vars_set_with_mode(state, name, value, true, false);
+}
+
+static int getopts_unset_var(struct shell_state *state, const char *name) {
+    return vars_unset(state, name);
+}
+
+static int getopts_set_char_var(struct shell_state *state, const char *name,
+                                char ch) {
+    char value[2];
+
+    value[0] = ch;
+    value[1] = '\0';
+    return getopts_set_var(state, name, value);
+}
+
+static unsigned long getopts_read_optind(void) {
+    const char *value;
+    char *end;
+    unsigned long parsed;
+
+    value = getenv("OPTIND");
+    if (value == NULL || value[0] == '\0') {
         return 1;
     }
+
+    errno = 0;
+    parsed = strtoul(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed == 0) {
+        return 1;
+    }
+    return parsed;
+}
+
+static int builtin_getopts(struct shell_state *state, char *const argv[]) {
+    const char *optstring;
+    const char *varname;
+    char *const *arg_list;
+    size_t arg_count;
+    bool silent_mode;
+    unsigned long optind;
+    const char *current;
+    char optch;
+    const char *spec;
+    const char *match;
+    char optind_text[32];
+
+    if (argv[1] == NULL || argv[2] == NULL) {
+        posish_errorf("getopts: missing operands");
+        return 1;
+    }
+
+    optstring = argv[1];
+    varname = argv[2];
+    if (!vars_is_name_valid(varname)) {
+        posish_errorf("getopts: invalid variable name: %s", varname);
+        return 1;
+    }
+
+    if (argv[3] != NULL) {
+        size_t i;
+
+        arg_list = argv + 3;
+        arg_count = 0;
+        for (i = 3; argv[i] != NULL; i++) {
+            arg_count++;
+        }
+    } else {
+        arg_list = state->positional_params;
+        arg_count = state->positional_count;
+    }
+
+    optind = getopts_read_optind();
+    if (getopts_last_optstring == NULL ||
+        strcmp(getopts_last_optstring, optstring) != 0 ||
+        optind != getopts_last_optind) {
+        free(getopts_last_optstring);
+        getopts_last_optstring = arena_xstrdup(optstring);
+        getopts_nextchar_index = 0;
+    }
+
+    silent_mode = optstring[0] == ':';
+    spec = silent_mode ? optstring + 1 : optstring;
+
+    for (;;) {
+        if (getopts_nextchar_index == 0) {
+            if (optind == 0) {
+                optind = 1;
+            }
+            if (optind > arg_count) {
+                goto end_of_options;
+            }
+
+            current = arg_list[optind - 1];
+            if (current[0] != '-' || current[1] == '\0') {
+                goto end_of_options;
+            }
+            if (strcmp(current, "--") == 0) {
+                optind++;
+                goto end_of_options;
+            }
+            getopts_nextchar_index = 1;
+        }
+
+        current = arg_list[optind - 1];
+        optch = current[getopts_nextchar_index];
+        if (optch == '\0') {
+            optind++;
+            getopts_nextchar_index = 0;
+            continue;
+        }
+        getopts_nextchar_index++;
+        break;
+    }
+
+    match = strchr(spec, optch);
+    if (match == NULL || optch == ':') {
+        if (current[getopts_nextchar_index] == '\0') {
+            optind++;
+            getopts_nextchar_index = 0;
+        }
+
+        if (getopts_set_char_var(state, varname, '?') != 0) {
+            return 1;
+        }
+        if (silent_mode) {
+            if (getopts_set_char_var(state, "OPTARG", optch) != 0) {
+                return 1;
+            }
+        } else {
+            (void)getopts_unset_var(state, "OPTARG");
+            posish_errorf("getopts: illegal option -- %c", optch);
+        }
+    } else if (match[1] == ':') {
+        const char *optarg_value;
+
+        if (current[getopts_nextchar_index] != '\0') {
+            optarg_value = current + getopts_nextchar_index;
+            optind++;
+            getopts_nextchar_index = 0;
+        } else if (optind < arg_count) {
+            optarg_value = arg_list[optind];
+            optind += 2;
+            getopts_nextchar_index = 0;
+        } else {
+            optind++;
+            getopts_nextchar_index = 0;
+            if (silent_mode) {
+                if (getopts_set_char_var(state, varname, ':') != 0) {
+                    return 1;
+                }
+                if (getopts_set_char_var(state, "OPTARG", optch) != 0) {
+                    return 1;
+                }
+            } else {
+                if (getopts_set_char_var(state, varname, '?') != 0) {
+                    return 1;
+                }
+                (void)getopts_unset_var(state, "OPTARG");
+                posish_errorf("getopts: option requires an argument -- %c",
+                              optch);
+            }
+            snprintf(optind_text, sizeof(optind_text), "%lu", optind);
+            if (getopts_set_var(state, "OPTIND", optind_text) != 0) {
+                return 1;
+            }
+            getopts_last_optind = optind;
+            return 0;
+        }
+
+        if (getopts_set_char_var(state, varname, optch) != 0) {
+            return 1;
+        }
+        if (getopts_set_var(state, "OPTARG", optarg_value) != 0) {
+            return 1;
+        }
+    } else {
+        if (current[getopts_nextchar_index] == '\0') {
+            optind++;
+            getopts_nextchar_index = 0;
+        }
+        if (getopts_set_char_var(state, varname, optch) != 0) {
+            return 1;
+        }
+        if (getopts_unset_var(state, "OPTARG") != 0 &&
+            vars_is_readonly(state, "OPTARG")) {
+            return 1;
+        }
+    }
+
+    snprintf(optind_text, sizeof(optind_text), "%lu", optind);
+    if (getopts_set_var(state, "OPTIND", optind_text) != 0) {
+        return 1;
+    }
+    getopts_last_optind = optind;
     return 0;
+
+end_of_options:
+    if (getopts_set_char_var(state, varname, '?') != 0) {
+        return 1;
+    }
+    if (getopts_unset_var(state, "OPTARG") != 0 &&
+        vars_is_readonly(state, "OPTARG")) {
+        return 1;
+    }
+    snprintf(optind_text, sizeof(optind_text), "%lu", optind);
+    if (getopts_set_var(state, "OPTIND", optind_text) != 0) {
+        return 1;
+    }
+    getopts_nextchar_index = 0;
+    getopts_last_optind = optind;
+    return 1;
 }
 
 static int builtin_hash(char *const argv[]) {
@@ -1552,7 +1765,7 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
     }
     if (strcmp(argv[0], "getopts") == 0) {
         *handled = true;
-        return builtin_getopts(argv);
+        return builtin_getopts(state, argv);
     }
     if (strcmp(argv[0], "hash") == 0) {
         *handled = true;

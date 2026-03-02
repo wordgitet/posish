@@ -21,6 +21,9 @@ void vars_init(void) {
      * inherited environment so field splitting has a predictable baseline.
      */
     (void)setenv("IFS", " \t\n", 1);
+    /* OPTIND starts at 1 for getopts parsing state in each fresh shell. */
+    (void)setenv("OPTIND", "1", 1);
+    (void)unsetenv("OPTARG");
 }
 
 bool vars_is_name_valid(const char *name) {
