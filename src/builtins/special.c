@@ -1271,18 +1271,212 @@ static int builtin_eval(struct shell_state *state, char *const argv[]) {
     return status;
 }
 
-static int builtin_read(struct shell_state *state, char *const argv[]) {
-    char *line;
-    size_t cap;
-    ssize_t nread;
-    int status;
+/* Marker used internally so escaped characters survive read-field splitting. */
+#define READ_ESC_MARK '\x1e'
+
+static void read_buf_append(char **buf, size_t *len, size_t *cap, char ch) {
+    if (*len + 1 >= *cap) {
+        size_t new_cap;
+        char *new_buf;
+
+        new_cap = *cap == 0 ? 64 : (*cap * 2);
+        new_buf = realloc(*buf, new_cap);
+        if (new_buf == NULL) {
+            perror("realloc");
+            free(*buf);
+            *buf = NULL;
+            *len = 0;
+            *cap = 0;
+            return;
+        }
+        *buf = new_buf;
+        *cap = new_cap;
+    }
+    (*buf)[(*len)++] = ch;
+}
+
+static bool read_is_ifs_char(const char *ifs, char ch) {
     size_t i;
 
-    line = NULL;
-    cap = 0;
+    for (i = 0; ifs[i] != '\0'; i++) {
+        if (ifs[i] == ch) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool read_is_ifs_whitespace(const char *ifs, char ch) {
+    if (ch != ' ' && ch != '\t' && ch != '\n') {
+        return false;
+    }
+    return read_is_ifs_char(ifs, ch);
+}
+
+static bool read_char_is_delim(const char *s, size_t len, size_t pos,
+                               const char *ifs) {
+    if (pos >= len) {
+        return false;
+    }
+    if (s[pos] == READ_ESC_MARK && pos + 1 < len) {
+        return false;
+    }
+    return read_is_ifs_char(ifs, s[pos]);
+}
+
+static bool read_char_is_ifs_ws(const char *s, size_t len, size_t pos,
+                                const char *ifs) {
+    if (pos >= len) {
+        return false;
+    }
+    if (s[pos] == READ_ESC_MARK && pos + 1 < len) {
+        return false;
+    }
+    return read_is_ifs_whitespace(ifs, s[pos]);
+}
+
+static size_t read_advance_one(const char *s, size_t len, size_t pos) {
+    if (pos < len && s[pos] == READ_ESC_MARK && pos + 1 < len) {
+        return pos + 2;
+    }
+    return pos + 1;
+}
+
+static size_t read_skip_ifs_ws(const char *s, size_t len, size_t pos,
+                               const char *ifs) {
+    while (pos < len && read_char_is_ifs_ws(s, len, pos, ifs)) {
+        pos++;
+    }
+    return pos;
+}
+
+static size_t read_consume_delimiter(const char *s, size_t len, size_t pos,
+                                     const char *ifs) {
+    if (pos >= len || !read_char_is_delim(s, len, pos, ifs)) {
+        return pos;
+    }
+
+    if (read_char_is_ifs_ws(s, len, pos, ifs)) {
+        pos = read_skip_ifs_ws(s, len, pos, ifs);
+        if (pos < len && read_char_is_delim(s, len, pos, ifs) &&
+            !read_char_is_ifs_ws(s, len, pos, ifs)) {
+            pos++;
+            pos = read_skip_ifs_ws(s, len, pos, ifs);
+        }
+        return pos;
+    }
+
+    pos++;
+    pos = read_skip_ifs_ws(s, len, pos, ifs);
+    return pos;
+}
+
+static char *read_unescape_segment(const char *s, size_t start, size_t end) {
+    char *out;
+    size_t i;
+    size_t j;
+
+    out = malloc((end - start) + 1);
+    if (out == NULL) {
+        perror("malloc");
+        return NULL;
+    }
+
+    j = 0;
+    for (i = start; i < end; i++) {
+        if (s[i] == READ_ESC_MARK && i + 1 < end) {
+            out[j++] = s[i + 1];
+            i++;
+            continue;
+        }
+        out[j++] = s[i];
+    }
+    out[j] = '\0';
+    return out;
+}
+
+static size_t read_trim_trailing_ifs_ws(const char *s, size_t start, size_t end,
+                                        const char *ifs) {
+    size_t pos;
+    size_t last_non_ws_end;
+
+    pos = start;
+    last_non_ws_end = start;
+    while (pos < end) {
+        if (s[pos] == READ_ESC_MARK && pos + 1 < end) {
+            pos += 2;
+            last_non_ws_end = pos;
+            continue;
+        }
+        if (!read_is_ifs_whitespace(ifs, s[pos])) {
+            last_non_ws_end = pos + 1;
+        }
+        pos++;
+    }
+    return last_non_ws_end;
+}
+
+static size_t read_trim_single_trailing_ifs_nonws(const char *s, size_t start,
+                                                  size_t end, const char *ifs) {
+    size_t pos;
+    size_t last_nonws_pos;
+    size_t nonws_count;
+    size_t trim_start;
+
+    last_nonws_pos = 0;
+    nonws_count = 0;
+    for (pos = start; pos < end;) {
+        if (s[pos] == READ_ESC_MARK && pos + 1 < end) {
+            pos += 2;
+            continue;
+        }
+        if (read_is_ifs_char(ifs, s[pos]) && !read_is_ifs_whitespace(ifs, s[pos])) {
+            nonws_count++;
+            last_nonws_pos = pos;
+        }
+        pos++;
+    }
+
+    if (nonws_count != 1 || last_nonws_pos + 1 != end) {
+        return end;
+    }
+
+    trim_start = last_nonws_pos;
+    while (trim_start > start) {
+        size_t p;
+
+        p = trim_start - 1;
+        if (p > start && s[p - 1] == READ_ESC_MARK) {
+            break;
+        }
+        if (!read_is_ifs_whitespace(ifs, s[p])) {
+            break;
+        }
+        trim_start--;
+    }
+    return trim_start;
+}
+
+static int builtin_read(struct shell_state *state, char *const argv[]) {
+    bool raw_mode;
+    int delimiter;
+    size_t i;
+    size_t var_count;
+    char *line;
+    size_t len;
+    size_t cap;
+    bool hit_delim;
+    bool saw_any;
+    int read_status;
+    const char *ifs_env;
+    const char *ifs;
+    int assign_status;
+
+    raw_mode = false;
+    delimiter = '\n';
     i = 1;
     while (argv[i] != NULL) {
-        size_t j;
+        const char *opt;
 
         if (strcmp(argv[i], "--") == 0) {
             i++;
@@ -1292,33 +1486,214 @@ static int builtin_read(struct shell_state *state, char *const argv[]) {
             break;
         }
 
-        for (j = 1; argv[i][j] != '\0'; j++) {
-            if (argv[i][j] != 'r') {
-                posish_errorf("read: invalid option: -%c", argv[i][j]);
-                return 2;
+        opt = argv[i] + 1;
+        while (*opt != '\0') {
+            if (*opt == 'r') {
+                raw_mode = true;
+                opt++;
+                continue;
             }
+            if (*opt == 'd') {
+                if (opt[1] != '\0') {
+                    delimiter = (unsigned char)opt[1];
+                    opt += 2;
+                } else {
+                    i++;
+                    if (argv[i] == NULL || argv[i][0] == '\0') {
+                        posish_errorf("read: option -d requires an argument");
+                        return 2;
+                    }
+                    delimiter = (unsigned char)argv[i][0];
+                    opt++;
+                }
+                continue;
+            }
+            posish_errorf("read: invalid option: -%c", *opt);
+            return 2;
         }
         i++;
     }
 
-    clearerr(stdin);
-    nread = getline(&line, &cap, stdin);
-    if (nread < 0) {
-        free(line);
-        return 1;
-    }
-    if (nread > 0 && line[nread - 1] == '\n') {
-        line[nread - 1] = '\0';
+    var_count = 0;
+    while (argv[i + var_count] != NULL) {
+        var_count++;
     }
 
-    if (argv[i] == NULL) {
-        free(line);
-        return 0;
+    line = NULL;
+    len = 0;
+    cap = 0;
+    hit_delim = false;
+    saw_any = false;
+
+    for (;;) {
+        unsigned char ch;
+        ssize_t nread;
+
+        nread = read(STDIN_FILENO, &ch, 1);
+        if (nread == 0) {
+            break;
+        }
+        if (nread < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("read");
+            free(line);
+            return 1;
+        }
+        saw_any = true;
+
+        if (!raw_mode && ch == (unsigned char)'\\') {
+            unsigned char next;
+            ssize_t next_read;
+
+            next_read = read(STDIN_FILENO, &next, 1);
+            if (next_read == 0) {
+                break;
+            }
+            if (next_read < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                perror("read");
+                free(line);
+                return 1;
+            }
+            saw_any = true;
+            if (next == (unsigned char)'\n') {
+                continue;
+            }
+            read_buf_append(&line, &len, &cap, READ_ESC_MARK);
+            if (line == NULL) {
+                return 1;
+            }
+            read_buf_append(&line, &len, &cap, (char)next);
+            if (line == NULL) {
+                return 1;
+            }
+            continue;
+        }
+
+        if ((int)ch == delimiter) {
+            hit_delim = true;
+            break;
+        }
+
+        read_buf_append(&line, &len, &cap, (char)ch);
+        if (line == NULL) {
+            return 1;
+        }
     }
 
-    status = vars_set(state, argv[i], line, true);
+    if (line == NULL) {
+        line = malloc(1);
+        if (line == NULL) {
+            perror("malloc");
+            return 1;
+        }
+    }
+    line[len] = '\0';
+
+    read_status = hit_delim ? 0 : 1;
+    if (!saw_any && len == 0) {
+        read_status = 1;
+    }
+
+    ifs_env = getenv("IFS");
+    if (ifs_env == NULL) {
+        ifs = " \t\n";
+    } else {
+        ifs = ifs_env;
+    }
+
+    assign_status = 0;
+    if (var_count == 0) {
+        char *value;
+
+        value = read_unescape_segment(line, 0, len);
+        if (value == NULL) {
+            free(line);
+            return 1;
+        }
+        assign_status = vars_set_assignment(state, "REPLY", value, true);
+        free(value);
+    } else if (ifs[0] == '\0') {
+        size_t vi;
+
+        for (vi = 0; vi < var_count; vi++) {
+            char *value;
+
+            if (vi == 0) {
+                value = read_unescape_segment(line, 0, len);
+            } else {
+                value = strdup("");
+            }
+            if (value == NULL) {
+                perror("malloc");
+                assign_status = 1;
+                break;
+            }
+            if (vars_set_assignment(state, argv[i + vi], value, true) != 0) {
+                assign_status = 1;
+                free(value);
+                break;
+            }
+            free(value);
+        }
+    } else {
+        size_t pos;
+        size_t vi;
+
+        pos = read_skip_ifs_ws(line, len, 0, ifs);
+        for (vi = 0; vi < var_count; vi++) {
+            char *value;
+
+            if (vi + 1 < var_count) {
+                size_t start;
+                size_t end;
+
+                if (pos >= len) {
+                    value = strdup("");
+                } else if (read_char_is_delim(line, len, pos, ifs)) {
+                    value = strdup("");
+                    pos = read_consume_delimiter(line, len, pos, ifs);
+                } else {
+                    start = pos;
+                    while (pos < len && !read_char_is_delim(line, len, pos, ifs)) {
+                        pos = read_advance_one(line, len, pos);
+                    }
+                    end = pos;
+                    value = read_unescape_segment(line, start, end);
+                    if (pos < len) {
+                        pos = read_consume_delimiter(line, len, pos, ifs);
+                    }
+                }
+            } else {
+                size_t end;
+
+                end = read_trim_trailing_ifs_ws(line, pos, len, ifs);
+                end = read_trim_single_trailing_ifs_nonws(line, pos, end, ifs);
+                value = read_unescape_segment(line, pos, end);
+            }
+
+            if (value == NULL) {
+                assign_status = 1;
+                break;
+            }
+            if (vars_set_assignment(state, argv[i + vi], value, true) != 0) {
+                assign_status = 1;
+                free(value);
+                break;
+            }
+            free(value);
+        }
+    }
+
     free(line);
-    return status;
+    if (assign_status != 0) {
+        return assign_status;
+    }
+    return read_status;
 }
 
 static int builtin_readonly(struct shell_state *state, char *const argv[]) {
