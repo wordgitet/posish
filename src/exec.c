@@ -222,6 +222,56 @@ static void env_restore_vec_free(struct env_restore_vec *restore) {
     restore->len = 0;
 }
 
+static char *alias_env_key(const char *name) {
+    size_t len;
+    char *key;
+
+    len = strlen(name);
+    key = arena_xmalloc(len + 14);
+    memcpy(key, "POSISH_ALIAS_", 13);
+    memcpy(key + 13, name, len + 1);
+    return key;
+}
+
+static char *lookup_alias_value_dup(const char *name) {
+    char *key;
+    const char *value;
+    char *dup;
+
+    if (name == NULL || name[0] == '\0') {
+        return NULL;
+    }
+
+    key = alias_env_key(name);
+    value = getenv(key);
+    free(key);
+    if (value == NULL || value[0] == '\0') {
+        return NULL;
+    }
+
+    dup = arena_xstrdup(value);
+    return dup;
+}
+
+static bool is_plain_command_word_for_alias(const char *word) {
+    size_t i;
+
+    if (word == NULL || word[0] == '\0') {
+        return false;
+    }
+    if (strchr(word, '/') != NULL) {
+        return false;
+    }
+
+    for (i = 0; word[i] != '\0'; i++) {
+        if (word[i] == '\'' || word[i] == '"' || word[i] == '\\' ||
+            word[i] == '$' || word[i] == '`') {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void trace_simple_words(struct shell_state *state, char *const words[],
                                size_t count) {
     const char *raw_ps4;
@@ -460,6 +510,28 @@ static bool is_assignment_word(const char *word) {
     }
 
     return word[i] == '=';
+}
+
+static size_t declaration_utility_prefix_len(const struct word_vec *raw_words,
+                                             size_t assign_count) {
+    if (assign_count >= raw_words->len) {
+        return 0;
+    }
+
+    if (strcmp(raw_words->items[assign_count], "export") == 0 ||
+        strcmp(raw_words->items[assign_count], "readonly") == 0) {
+        return 1;
+    }
+
+    if (assign_count + 2 < raw_words->len &&
+        strcmp(raw_words->items[assign_count], "command") == 0 &&
+        strcmp(raw_words->items[assign_count + 1], "command") == 0 &&
+        (strcmp(raw_words->items[assign_count + 2], "export") == 0 ||
+         strcmp(raw_words->items[assign_count + 2], "readonly") == 0)) {
+        return 3;
+    }
+
+    return 0;
 }
 
 static int split_assignment(const char *word, char **name_out, const char **value_out) {
@@ -1167,6 +1239,90 @@ static bool looks_like_function_header_only(const char *source) {
     return source[i] == '\0';
 }
 
+static bool program_contains_quoted_heredoc(const char *source) {
+    size_t i;
+    char quote;
+
+    i = 0;
+    quote = '\0';
+    while (source[i] != '\0') {
+        char ch;
+
+        ch = source[i];
+        if (quote == '\0') {
+            if (ch == '\\' && source[i + 1] != '\0') {
+                i += 2;
+                continue;
+            }
+            if (ch == '\'' || ch == '"') {
+                quote = ch;
+                i++;
+                continue;
+            }
+            if (ch == '<' && source[i + 1] == '<') {
+                size_t j;
+                bool saw_quote_or_backslash;
+
+                j = i + 2;
+                if (source[j] == '-') {
+                    j++;
+                }
+                while (source[j] == ' ' || source[j] == '\t') {
+                    j++;
+                }
+                saw_quote_or_backslash = false;
+                while (source[j] != '\0' && !isspace((unsigned char)source[j]) &&
+                       source[j] != ';' && source[j] != '&' && source[j] != '|' &&
+                       source[j] != '<' && source[j] != '>') {
+                    if (source[j] == '\'' || source[j] == '"' || source[j] == '\\') {
+                        saw_quote_or_backslash = true;
+                    }
+                    if (source[j] == '\\' && source[j + 1] != '\0') {
+                        j += 2;
+                        continue;
+                    }
+                    if (source[j] == '\'' || source[j] == '"') {
+                        char q;
+
+                        q = source[j++];
+                        while (source[j] != '\0' && source[j] != q) {
+                            if (q == '"' && source[j] == '\\' &&
+                                source[j + 1] != '\0') {
+                                j += 2;
+                                continue;
+                            }
+                            j++;
+                        }
+                        if (source[j] == q) {
+                            j++;
+                        }
+                        continue;
+                    }
+                    j++;
+                }
+                if (saw_quote_or_backslash) {
+                    return true;
+                }
+                i = j;
+                continue;
+            }
+        } else if (quote == '\'' && ch == '\'') {
+            quote = '\0';
+        } else if (quote == '"') {
+            if (ch == '\\' && source[i + 1] != '\0') {
+                i += 2;
+                continue;
+            }
+            if (ch == '"') {
+                quote = '\0';
+            }
+        }
+        i++;
+    }
+
+    return false;
+}
+
 static bool has_pending_flow_control(const struct shell_state *state) {
     return state->break_levels > 0 || state->continue_levels > 0 ||
            state->return_requested;
@@ -1805,16 +1961,78 @@ static int execute_simple_command(struct shell_state *state, const char *source,
         assign_count++;
     }
 
+    if (allow_builtin && assign_count < raw_words.len &&
+        is_plain_command_word_for_alias(raw_words.items[assign_count])) {
+        char *alias_value;
+
+        alias_value = lookup_alias_value_dup(raw_words.items[assign_count]);
+        if (alias_value != NULL && strchr(alias_value, ' ') == NULL &&
+            strchr(alias_value, '\t') == NULL &&
+            strchr(alias_value, '\n') == NULL) {
+            size_t li;
+
+            for (li = 0; li < lexed.len; li++) {
+                if (lexed.items[li] == raw_words.items[assign_count]) {
+                    free(lexed.items[li]);
+                    lexed.items[li] = alias_value;
+                    raw_words.items[assign_count] = alias_value;
+                    break;
+                }
+            }
+            if (li == lexed.len) {
+                free(alias_value);
+            }
+        } else {
+            free(alias_value);
+        }
+    }
+
     in_vec.items = raw_words.items + assign_count;
     in_vec.len = raw_words.len - assign_count;
     if (in_vec.len > 0) {
-        if (expand_words(&in_vec, &cmd_expanded, state, true) != 0) {
-            status = 2;
-            goto done;
-        }
-        if (state->cmdsub_performed) {
-            saw_cmdsub = true;
-            last_cmdsub_status = state->last_cmdsub_status;
+        size_t decl_prefix_len;
+        size_t wi;
+
+        decl_prefix_len = declaration_utility_prefix_len(&raw_words, assign_count);
+        for (wi = 0; wi < in_vec.len; wi++) {
+            struct token_vec one_in;
+            struct token_vec one_out;
+            bool split_fields;
+            size_t oi;
+
+            one_in.items = &in_vec.items[wi];
+            one_in.len = 1;
+            one_out.items = NULL;
+            one_out.len = 0;
+
+            split_fields = true;
+            if (decl_prefix_len > 0 && wi >= decl_prefix_len &&
+                is_assignment_word(in_vec.items[wi])) {
+                /*
+                 * Declaration utilities treat assignment operands as a single
+                 * word after expansion (no field splitting/pathname expansion).
+                 */
+                split_fields = false;
+            }
+
+            if (expand_words(&one_in, &one_out, state, split_fields) != 0) {
+                lexer_free_tokens(&cmd_expanded);
+                status = 2;
+                goto done;
+            }
+            if (state->cmdsub_performed) {
+                saw_cmdsub = true;
+                last_cmdsub_status = state->last_cmdsub_status;
+            }
+            if (one_out.len > 0) {
+                cmd_expanded.items = arena_xrealloc(
+                    cmd_expanded.items,
+                    sizeof(*cmd_expanded.items) * (cmd_expanded.len + one_out.len));
+                for (oi = 0; oi < one_out.len; oi++) {
+                    cmd_expanded.items[cmd_expanded.len++] = one_out.items[oi];
+                }
+            }
+            free(one_out.items);
         }
     }
 
@@ -2491,6 +2709,131 @@ static int run_brace_group_command(struct shell_state *state, const char *body,
     return status;
 }
 
+static bool split_case_redirection_suffix(const char *source, char **core_out,
+                                          char **suffix_out) {
+    size_t i;
+    int case_depth;
+    int paren_depth;
+    int brace_depth;
+    char quote;
+    size_t end_pos;
+
+    *core_out = NULL;
+    *suffix_out = NULL;
+
+    i = 0;
+    while (isspace((unsigned char)source[i])) {
+        i++;
+    }
+    if (strncmp(source + i, "case", 4) != 0 || !keyword_boundary(source[i + 4])) {
+        return false;
+    }
+
+    case_depth = 0;
+    paren_depth = 0;
+    brace_depth = 0;
+    quote = '\0';
+    end_pos = 0;
+
+    for (i = 0; source[i] != '\0'; i++) {
+        char ch;
+
+        ch = source[i];
+        if (quote == '\0') {
+            if (ch == '\\' && source[i + 1] != '\0') {
+                i++;
+                continue;
+            }
+            if (ch == '\'' || ch == '"') {
+                quote = ch;
+                continue;
+            }
+            if (paren_depth == 0 && brace_depth == 0 &&
+                (isalpha((unsigned char)ch) || ch == '_') &&
+                word_starts_command_position(source, i)) {
+                size_t j;
+                size_t boundary;
+                char keyword[16];
+                size_t kwlen;
+
+                j = i;
+                kwlen = 0;
+                while (source[j] != '\0') {
+                    if (source[j] == '\\' && source[j + 1] == '\n') {
+                        j += 2;
+                        continue;
+                    }
+                    if (!isalnum((unsigned char)source[j]) && source[j] != '_') {
+                        break;
+                    }
+                    if (kwlen + 1 < sizeof(keyword)) {
+                        keyword[kwlen] = source[j];
+                    }
+                    kwlen++;
+                    j++;
+                }
+                boundary = skip_continuations_forward(source, j);
+                if (keyword_boundary(source[boundary]) && source[boundary] != ')') {
+                    if (kwlen == 4 && strncmp(keyword, "case", 4) == 0) {
+                        case_depth++;
+                    } else if (kwlen == 4 && strncmp(keyword, "esac", 4) == 0 &&
+                               case_depth > 0) {
+                        case_depth--;
+                        if (case_depth == 0) {
+                            end_pos = boundary;
+                            break;
+                        }
+                    }
+                }
+                i = j - 1;
+                continue;
+            }
+            if (ch == '(') {
+                paren_depth++;
+                continue;
+            }
+            if (ch == ')' && paren_depth > 0) {
+                paren_depth--;
+                continue;
+            }
+            if (ch == '{') {
+                brace_depth++;
+                continue;
+            }
+            if (ch == '}' && brace_depth > 0) {
+                brace_depth--;
+                continue;
+            }
+        } else if (quote == '\'' && ch == '\'') {
+            quote = '\0';
+        } else if (quote == '"') {
+            if (ch == '\\' && source[i + 1] != '\0') {
+                i++;
+                continue;
+            }
+            if (ch == '"') {
+                quote = '\0';
+            }
+        }
+    }
+
+    if (case_depth != 0 || end_pos == 0) {
+        return false;
+    }
+
+    *core_out = dup_trimmed_slice(source, 0, end_pos);
+    *suffix_out = dup_trimmed_slice(source, end_pos, strlen(source));
+    if ((*suffix_out)[0] == '\0') {
+        free(*core_out);
+        free(*suffix_out);
+        *core_out = NULL;
+        *suffix_out = NULL;
+        return false;
+    }
+
+    return true;
+}
+
 static int execute_command_atom(struct shell_state *state, const char *source,
                                 bool allow_builtin) {
     char *collapsed;
@@ -2512,6 +2855,8 @@ static int execute_command_atom(struct shell_state *state, const char *source,
     char *for_words;
     char *for_body;
     char *for_redir_suffix;
+    char *case_core;
+    char *case_redir_suffix;
     bool while_is_until;
     bool for_implicit_words;
     int status;
@@ -2548,6 +2893,8 @@ static int execute_command_atom(struct shell_state *state, const char *source,
     for_words = NULL;
     for_body = NULL;
     for_redir_suffix = NULL;
+    case_core = NULL;
+    case_redir_suffix = NULL;
     while_is_until = false;
     for_implicit_words = false;
     inner = NULL;
@@ -2815,6 +3162,43 @@ for_done:
         return status;
     }
 
+    if (split_case_redirection_suffix(trimmed, &case_core, &case_redir_suffix)) {
+        struct redir_vec case_redirs;
+        struct fd_backup_vec case_backups;
+
+        case_redirs.items = NULL;
+        case_redirs.len = 0;
+        case_backups.items = NULL;
+        case_backups.len = 0;
+        status = 2;
+
+        if (parse_redirections_from_source(case_redir_suffix, state,
+                                           &case_redirs) != 0) {
+            goto case_done;
+        }
+        if (apply_redirections(&case_redirs, true, state->noclobber,
+                               &case_backups) != 0) {
+            fd_backup_restore(&case_backups);
+            status = 1;
+            goto case_done;
+        }
+
+        if (try_execute_case_command(state, case_core, &status,
+                                     execute_program_text)) {
+            fd_backup_restore(&case_backups);
+        } else {
+            fd_backup_restore(&case_backups);
+            status = 2;
+        }
+
+case_done:
+        redir_vec_free(&case_redirs);
+        free(case_core);
+        free(case_redir_suffix);
+        free(trimmed);
+        return status;
+    }
+
     if (try_execute_case_command(state, trimmed, &status, execute_program_text)) {
         free(trimmed);
         return status;
@@ -2868,6 +3252,9 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
     char quote;
     int paren_depth;
     int brace_depth;
+    int if_depth;
+    int case_depth;
+    int loop_depth;
     char **commands;
     size_t cmd_len;
     pid_t *pids;
@@ -2905,6 +3292,9 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
     quote = '\0';
     paren_depth = 0;
     brace_depth = 0;
+    if_depth = 0;
+    case_depth = 0;
+    loop_depth = 0;
     start = 0;
 
     for (i = 0;; i++) {
@@ -2921,6 +3311,59 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
                 i++;
                 continue;
             }
+            if (paren_depth == 0 && brace_depth == 0 &&
+                (isalpha((unsigned char)ch) || ch == '_') &&
+                word_starts_command_position(cursor, i)) {
+                size_t j;
+                size_t boundary;
+                char keyword[16];
+                size_t kwlen;
+
+                j = i;
+                kwlen = 0;
+                while (cursor[j] != '\0') {
+                    if (cursor[j] == '\\' && cursor[j + 1] == '\n') {
+                        j += 2;
+                        continue;
+                    }
+                    if (!isalnum((unsigned char)cursor[j]) && cursor[j] != '_') {
+                        break;
+                    }
+                    if (kwlen + 1 < sizeof(keyword)) {
+                        keyword[kwlen] = cursor[j];
+                    }
+                    kwlen++;
+                    j++;
+                }
+                boundary = skip_continuations_forward(cursor, j);
+                if (keyword_boundary(cursor[boundary]) &&
+                    cursor[boundary] != ')') {
+                    if (kwlen == 2 && strncmp(keyword, "if", 2) == 0) {
+                        if_depth++;
+                    } else if (kwlen == 2 && strncmp(keyword, "fi", 2) == 0 &&
+                               if_depth > 0) {
+                        if_depth--;
+                    } else if (kwlen == 4 && strncmp(keyword, "case", 4) == 0) {
+                        case_depth++;
+                    } else if (kwlen == 4 && strncmp(keyword, "esac", 4) == 0 &&
+                               case_depth > 0) {
+                        case_depth--;
+                    } else if (case_depth == 0) {
+                        if ((kwlen == 5 && strncmp(keyword, "while", 5) == 0) ||
+                            (kwlen == 5 && strncmp(keyword, "until", 5) == 0) ||
+                            (kwlen == 3 && strncmp(keyword, "for", 3) == 0)) {
+                            loop_depth++;
+                        } else if (kwlen == 4 &&
+                                   strncmp(keyword, "done", 4) == 0 &&
+                                   loop_depth > 0 &&
+                                   keyword_preceded_by_list_separator(cursor, i)) {
+                            loop_depth--;
+                        }
+                    }
+                }
+                i = j - 1;
+                continue;
+            }
             if (ch == '\'' || ch == '"') {
                 quote = ch;
             } else if (ch == '(') {
@@ -2931,7 +3374,9 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
                 brace_depth++;
             } else if (ch == '}' && brace_depth > 0) {
                 brace_depth--;
-            } else if (paren_depth == 0 && brace_depth == 0 && ch == '|' &&
+            } else if (paren_depth == 0 && brace_depth == 0 &&
+                       if_depth == 0 && case_depth == 0 && loop_depth == 0 &&
+                       ch == '|' &&
                        cursor[i + 1] != '|' &&
                        !(i > 0 && cursor[i - 1] == '|') &&
                        !(i > 0 && cursor[i - 1] == '>')) {
@@ -2976,12 +3421,20 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
 
     if (cmd_len == 1) {
         int status;
+        bool ignored;
 
         status = execute_command_atom(state, commands[0], true);
+        /*
+         * Preserve set -e suppression from nested execution contexts
+         * (for example the left side of && inside grouping/if bodies).
+         */
+        ignored = state->errexit_ignored;
+        state->errexit_ignored = status != 0 && ignored;
         state->last_status = status;
         free_string_vec(commands, cmd_len);
         free(work);
         if (negate) {
+            state->errexit_ignored = true;
             state->last_status = status == 0 ? 1 : 0;
             return state->last_status;
         }
@@ -3146,9 +3599,11 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
     free(work);
 
     if (negate) {
+        state->errexit_ignored = true;
         state->last_status = last_status == 0 ? 1 : 0;
         return state->last_status;
     }
+    state->errexit_ignored = false;
     state->last_status = last_status;
     return last_status;
 }
@@ -3168,6 +3623,7 @@ static int execute_andor(struct shell_state *state, const char *source) {
     size_t part_len;
     size_t op_len;
     int status;
+    bool errexit_ignored;
 
     normalized = collapse_line_continuations(source);
     source = normalized;
@@ -3193,6 +3649,7 @@ static int execute_andor(struct shell_state *state, const char *source) {
     case_depth = 0;
     loop_depth = 0;
     start = 0;
+    errexit_ignored = false;
 
     for (i = 0;; i++) {
         char ch;
@@ -3251,7 +3708,8 @@ static int execute_andor(struct shell_state *state, const char *source) {
                     j++;
                 }
                 boundary = skip_continuations_forward(source, j);
-                if (keyword_boundary(source[boundary])) {
+                if (keyword_boundary(source[boundary]) &&
+                    source[boundary] != ')') {
                     if (kwlen == 2 && strncmp(keyword, "if", 2) == 0) {
                         if_depth++;
                     } else if (kwlen == 2 && strncmp(keyword, "fi", 2) == 0 &&
@@ -3352,10 +3810,12 @@ static int execute_andor(struct shell_state *state, const char *source) {
     }
 
     status = execute_pipeline(state, parts[0]);
+    errexit_ignored = state->errexit_ignored;
     if (state->should_exit || has_pending_flow_control(state)) {
         free_string_vec(parts, part_len);
         free(ops);
         free(normalized);
+        state->errexit_ignored = status != 0 && errexit_ignored;
         return status;
     }
 
@@ -3363,10 +3823,18 @@ static int execute_andor(struct shell_state *state, const char *source) {
         if (ops[i] == ANDOR_AND) {
             if (status == 0) {
                 status = execute_pipeline(state, parts[i + 1]);
+                errexit_ignored = state->errexit_ignored;
+            } else {
+                /*
+                 * set -e is suppressed for a non-final command that failed on
+                 * the left side of && and short-circuited the list.
+                 */
+                errexit_ignored = true;
             }
         } else {
             if (status != 0) {
                 status = execute_pipeline(state, parts[i + 1]);
+                errexit_ignored = state->errexit_ignored;
             }
         }
         if (state->should_exit) {
@@ -3380,6 +3848,7 @@ static int execute_andor(struct shell_state *state, const char *source) {
     free_string_vec(parts, part_len);
     free(ops);
     free(normalized);
+    state->errexit_ignored = status != 0 && errexit_ignored;
     return status;
 }
 
@@ -3466,7 +3935,8 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                     j++;
                 }
                 boundary = skip_continuations_forward(source, j);
-                if (keyword_boundary(source[boundary])) {
+                if (keyword_boundary(source[boundary]) &&
+                    source[boundary] != ')') {
                     if (kwlen == 2 && strncmp(keyword, "if", 2) == 0) {
                         if_depth++;
                     } else if (kwlen == 2 && strncmp(keyword, "fi", 2) == 0 &&
@@ -3578,6 +4048,7 @@ static int execute_program_text(struct shell_state *state, const char *source) {
 
                 /* Keep $LINENO aligned to each top-level command start. */
                 set_lineno_for_command(source, start);
+                state->errexit_ignored = false;
                 if (skip_next_done && strcmp(part, "done") == 0) {
                     skip_next_done = false;
                     status = 0;
@@ -3615,13 +4086,15 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                     if (heredoc_rc != 0) {
                         status = 1;
                         state->last_status = status;
-                        if (status != 0 && state->errexit && !state->interactive) {
+                        if (status != 0 && state->errexit && !state->interactive &&
+                            !state->errexit_ignored) {
                             state->should_exit = true;
                             state->exit_status = status;
                         }
                     } else if (heredoc_handled) {
                         state->last_status = status;
-                        if (status != 0 && state->errexit && !state->interactive) {
+                        if (status != 0 && state->errexit && !state->interactive &&
+                            !state->errexit_ignored) {
                             state->should_exit = true;
                             state->exit_status = status;
                         }
@@ -3641,7 +4114,8 @@ static int execute_program_text(struct shell_state *state, const char *source) {
                     } else {
                         status = execute_andor(state, part);
                         state->last_status = status;
-                        if (status != 0 && state->errexit && !state->interactive) {
+                        if (status != 0 && state->errexit && !state->interactive &&
+                            !state->errexit_ignored) {
                             state->should_exit = true;
                             state->exit_status = status;
                         }
@@ -3681,7 +4155,15 @@ int exec_run_program(struct shell_state *state, const struct ast_program *progra
     char *cleaned;
     int status;
 
-    normalized = collapse_line_continuations(program->source);
+    if (program_contains_quoted_heredoc(program->source)) {
+        /*
+         * Preserve physical lines for quoted here-doc bodies so backslashes and
+         * continuations stay literal inside the body text.
+         */
+        normalized = arena_xstrdup(program->source);
+    } else {
+        normalized = collapse_line_continuations(program->source);
+    }
     cleaned = strip_comments(normalized);
     free(normalized);
     status = execute_program_text(state, cleaned);
