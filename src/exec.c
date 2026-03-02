@@ -272,6 +272,17 @@ static bool is_plain_command_word_for_alias(const char *word) {
     return true;
 }
 
+static bool alias_value_has_trailing_blank(const char *value) {
+    size_t len;
+
+    if (value == NULL || value[0] == '\0') {
+        return false;
+    }
+    len = strlen(value);
+    return len > 0 && (value[len - 1] == ' ' || value[len - 1] == '\t' ||
+                       value[len - 1] == '\n');
+}
+
 static void trace_simple_words(struct shell_state *state, char *const words[],
                                size_t count) {
     const char *raw_ps4;
@@ -1984,29 +1995,127 @@ static int execute_simple_command(struct shell_state *state, const char *source,
         assign_count++;
     }
 
-    if (allow_builtin && assign_count < raw_words.len &&
-        is_plain_command_word_for_alias(raw_words.items[assign_count])) {
-        char *alias_value;
+    if (allow_builtin && assign_count < raw_words.len) {
+        size_t alias_depth;
+        size_t alias_index;
+        bool pending_next_word;
+        char *alias_stack[64];
+        size_t alias_stack_len;
+        size_t si;
 
-        alias_value = lookup_alias_value_dup(raw_words.items[assign_count]);
-        if (alias_value != NULL && strchr(alias_value, ' ') == NULL &&
-            strchr(alias_value, '\t') == NULL &&
-            strchr(alias_value, '\n') == NULL) {
-            size_t li;
+        alias_depth = 0;
+        alias_index = assign_count;
+        pending_next_word = false;
+        alias_stack_len = 0;
 
-            for (li = 0; li < lexed.len; li++) {
-                if (lexed.items[li] == raw_words.items[assign_count]) {
-                    free(lexed.items[li]);
-                    lexed.items[li] = alias_value;
-                    raw_words.items[assign_count] = alias_value;
+        while (alias_index < raw_words.len && alias_depth < 128) {
+            bool blocked;
+            char *alias_value;
+            struct token_vec alias_words;
+            bool trailing_blank;
+            char *expanded_name;
+            size_t old_len;
+            size_t tail_count;
+            size_t new_len;
+
+            if (!is_plain_command_word_for_alias(raw_words.items[alias_index])) {
+                if (pending_next_word) {
+                    for (si = 0; si < alias_stack_len; si++) {
+                        free(alias_stack[si]);
+                    }
+                    alias_stack_len = 0;
+                    pending_next_word = false;
+                    alias_index++;
+                    continue;
+                }
+                break;
+            }
+
+            blocked = false;
+            for (si = 0; si < alias_stack_len; si++) {
+                if (strcmp(alias_stack[si], raw_words.items[alias_index]) == 0) {
+                    blocked = true;
                     break;
                 }
             }
-            if (li == lexed.len) {
-                free(alias_value);
+            if (blocked) {
+                if (pending_next_word) {
+                    for (si = 0; si < alias_stack_len; si++) {
+                        free(alias_stack[si]);
+                    }
+                    alias_stack_len = 0;
+                    pending_next_word = false;
+                    alias_index++;
+                    continue;
+                }
+                break;
             }
-        } else {
+
+            alias_value = lookup_alias_value_dup(raw_words.items[alias_index]);
+            if (alias_value == NULL) {
+                if (pending_next_word) {
+                    for (si = 0; si < alias_stack_len; si++) {
+                        free(alias_stack[si]);
+                    }
+                    alias_stack_len = 0;
+                    pending_next_word = false;
+                    alias_index++;
+                    continue;
+                }
+                break;
+            }
+
+            trailing_blank = alias_value_has_trailing_blank(alias_value);
+            expanded_name = arena_xstrdup(raw_words.items[alias_index]);
+            alias_words.items = NULL;
+            alias_words.len = 0;
+            if (lexer_split_words(alias_value, &alias_words) != 0) {
+                free(alias_value);
+                free(expanded_name);
+                for (si = 0; si < alias_stack_len; si++) {
+                    free(alias_stack[si]);
+                }
+                status = 2;
+                goto done;
+            }
             free(alias_value);
+
+            if (alias_words.len > 0) {
+                lexed.items = arena_xrealloc(
+                    lexed.items, sizeof(*lexed.items) * (lexed.len + alias_words.len));
+                for (si = 0; si < alias_words.len; si++) {
+                    lexed.items[lexed.len + si] = alias_words.items[si];
+                }
+                lexed.len += alias_words.len;
+            }
+
+            old_len = raw_words.len;
+            tail_count = old_len - (alias_index + 1);
+            new_len = old_len - 1 + alias_words.len;
+            raw_words.items = arena_xrealloc(raw_words.items,
+                                             sizeof(*raw_words.items) * new_len);
+            if (tail_count > 0 && alias_words.len != 1) {
+                memmove(raw_words.items + alias_index + alias_words.len,
+                        raw_words.items + alias_index + 1,
+                        sizeof(*raw_words.items) * tail_count);
+            }
+            for (si = 0; si < alias_words.len; si++) {
+                raw_words.items[alias_index + si] = alias_words.items[si];
+            }
+            raw_words.len = new_len;
+            free(alias_words.items);
+
+            if (alias_stack_len < sizeof(alias_stack) / sizeof(alias_stack[0])) {
+                alias_stack[alias_stack_len++] = expanded_name;
+            } else {
+                free(expanded_name);
+            }
+            alias_depth++;
+            pending_next_word = trailing_blank;
+        }
+
+        for (si = 0; si < alias_stack_len; si++) {
+            free(alias_stack[si]);
         }
     }
 

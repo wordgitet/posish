@@ -928,11 +928,8 @@ static bool alias_name_valid(const char *name) {
     if (name == NULL || name[0] == '\0') {
         return false;
     }
-    if (!(isalpha((unsigned char)name[0]) || name[0] == '_')) {
-        return false;
-    }
-    for (i = 1; name[i] != '\0'; i++) {
-        if (!(isalnum((unsigned char)name[i]) || name[i] == '_')) {
+    for (i = 0; name[i] != '\0'; i++) {
+        if (name[i] == '=' || isspace((unsigned char)name[i])) {
             return false;
         }
     }
@@ -956,16 +953,109 @@ static char *alias_env_key(const char *name) {
     return key;
 }
 
+static char *alias_quote_value(const char *value) {
+    size_t i;
+    size_t out_len;
+    char *out;
+    size_t pos;
+
+    out_len = 2;
+    for (i = 0; value[i] != '\0'; i++) {
+        if (value[i] == '\'') {
+            out_len += 4;
+        } else {
+            out_len++;
+        }
+    }
+
+    out = malloc(out_len + 1);
+    if (out == NULL) {
+        perror("malloc");
+        return NULL;
+    }
+
+    pos = 0;
+    out[pos++] = '\'';
+    for (i = 0; value[i] != '\0'; i++) {
+        if (value[i] == '\'') {
+            out[pos++] = '\'';
+            out[pos++] = '\\';
+            out[pos++] = '\'';
+            out[pos++] = '\'';
+        } else {
+            out[pos++] = value[i];
+        }
+    }
+    out[pos++] = '\'';
+    out[pos] = '\0';
+    return out;
+}
+
+static int alias_print_entry(const char *name, const char *value) {
+    char *quoted;
+
+    quoted = alias_quote_value(value);
+    if (quoted == NULL) {
+        return 1;
+    }
+    printf("%s=%s\n", name, quoted);
+    free(quoted);
+    return 0;
+}
+
 static int builtin_alias(char *const argv[]) {
     int status;
     size_t i;
 
-    if (argv[1] == NULL) {
+    i = 1;
+    if (argv[i] != NULL && strcmp(argv[i], "--") == 0) {
+        i++;
+    }
+
+    if (argv[i] == NULL) {
+        size_t prefix_len;
+        size_t k;
+
+        prefix_len = strlen(POSISH_ALIAS_ENV_PREFIX);
+        for (k = 0; environ[k] != NULL; k++) {
+            const char *eq;
+            const char *name;
+            const char *value;
+            size_t name_len;
+            char *name_buf;
+
+            if (strncmp(environ[k], POSISH_ALIAS_ENV_PREFIX, prefix_len) != 0) {
+                continue;
+            }
+
+            eq = strchr(environ[k], '=');
+            if (eq == NULL || (size_t)(eq - environ[k]) <= prefix_len) {
+                continue;
+            }
+
+            name = environ[k] + prefix_len;
+            name_len = (size_t)(eq - name);
+            value = eq + 1;
+
+            name_buf = malloc(name_len + 1);
+            if (name_buf == NULL) {
+                perror("malloc");
+                return 1;
+            }
+            memcpy(name_buf, name, name_len);
+            name_buf[name_len] = '\0';
+
+            if (alias_print_entry(name_buf, value) != 0) {
+                free(name_buf);
+                return 1;
+            }
+            free(name_buf);
+        }
         return 0;
     }
 
     status = 0;
-    for (i = 1; argv[i] != NULL; i++) {
+    for (; argv[i] != NULL; i++) {
         char *eq;
         char *name;
         char *key;
@@ -973,7 +1063,28 @@ static int builtin_alias(char *const argv[]) {
 
         eq = strchr(argv[i], '=');
         if (eq == NULL) {
-            status = 1;
+            if (!alias_name_valid(argv[i])) {
+                posish_errorf("alias: invalid name: %s", argv[i]);
+                status = 1;
+                continue;
+            }
+
+            key = alias_env_key(argv[i]);
+            if (key == NULL) {
+                return 1;
+            }
+            value = getenv(key);
+            if (value == NULL) {
+                posish_errorf("alias: %s: not found", argv[i]);
+                free(key);
+                status = 1;
+                continue;
+            }
+            if (alias_print_entry(argv[i], value) != 0) {
+                free(key);
+                return 1;
+            }
+            free(key);
             continue;
         }
 
@@ -1018,11 +1129,6 @@ static int builtin_unalias(char *const argv[]) {
     bool clear_all;
     size_t prefix_len;
 
-    if (argv[1] == NULL) {
-        posish_errorf("unalias: missing operand");
-        return 1;
-    }
-
     clear_all = false;
     i = 1;
     while (argv[i] != NULL && argv[i][0] == '-' && argv[i][1] != '\0') {
@@ -1037,6 +1143,11 @@ static int builtin_unalias(char *const argv[]) {
         }
         posish_errorf("unalias: invalid option: %s", argv[i]);
         return 2;
+    }
+
+    if (!clear_all && argv[i] == NULL) {
+        posish_errorf("unalias: missing operand");
+        return 1;
     }
 
     status = 0;
@@ -1100,6 +1211,12 @@ static int builtin_unalias(char *const argv[]) {
         key = alias_env_key(argv[i]);
         if (key == NULL) {
             return 1;
+        }
+        if (getenv(key) == NULL) {
+            posish_errorf("unalias: %s: not found", argv[i]);
+            free(key);
+            status = 1;
+            continue;
         }
         if (unsetenv(key) != 0) {
             perror("unsetenv");
