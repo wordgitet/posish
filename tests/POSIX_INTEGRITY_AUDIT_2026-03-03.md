@@ -62,8 +62,10 @@ Status at 2026-03-03:
 3. `Q3` implemented:
    - `shell.c` and `exec.c` now use one completeness engine via `shell_needs_more_input_text_mode(..., include_heredoc)`.
    - fixed trailing-backslash completeness detection regression found during `alias-p.tst` recheck.
-4. Remaining queue:
-   - `Q4` alias-boundary revalidation,
+4. `Q4` implemented:
+   - alias-boundary completeness logic in `shell_run_stream` is now centralized in one helper (`merge_need_more_with_alias_preview`),
+   - EOF and non-EOF stream paths now share identical alias-boundary behavior.
+5. Remaining queue:
    - `Q5` compatibility documentation.
 
 ## Findings
