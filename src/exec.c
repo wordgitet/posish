@@ -1111,18 +1111,119 @@ static int word_vec_push(struct word_vec *words, char *word) {
     return 0;
 }
 
+struct strip_heredoc_marker {
+    char *delimiter;
+    bool strip_tabs;
+};
+
+static void free_strip_heredoc_markers(struct strip_heredoc_marker *markers,
+                                       size_t count) {
+    size_t i;
+
+    if (markers == NULL) {
+        return;
+    }
+    for (i = 0; i < count; i++) {
+        free(markers[i].delimiter);
+    }
+    free(markers);
+}
+
+static char *unquote_strip_heredoc_delimiter(const char *raw, size_t len) {
+    size_t i;
+    size_t out_len;
+    char *out;
+
+    out = arena_xmalloc(len + 1);
+    out_len = 0;
+    i = 0;
+    while (i < len) {
+        char ch;
+
+        ch = raw[i];
+        if (ch == '\\' && i + 1 < len) {
+            out[out_len++] = raw[i + 1];
+            i += 2;
+            continue;
+        }
+        if (ch == '\'' || ch == '"') {
+            char q;
+
+            q = ch;
+            i++;
+            while (i < len && raw[i] != q) {
+                if (q == '"' && raw[i] == '\\' && i + 1 < len) {
+                    out[out_len++] = raw[i + 1];
+                    i += 2;
+                    continue;
+                }
+                out[out_len++] = raw[i];
+                i++;
+            }
+            if (i < len && raw[i] == q) {
+                i++;
+            }
+            continue;
+        }
+        out[out_len++] = ch;
+        i++;
+    }
+
+    out[out_len] = '\0';
+    return out;
+}
+
+static int push_strip_heredoc_marker(struct strip_heredoc_marker **markers,
+                                     size_t *count, size_t *cap,
+                                     const char *delimiter_raw,
+                                     size_t delimiter_raw_len,
+                                     bool strip_tabs) {
+    struct strip_heredoc_marker *grown;
+    char *unquoted;
+
+    if (*count == *cap) {
+        size_t new_cap;
+
+        new_cap = *cap == 0 ? 4 : *cap * 2;
+        grown = xrealloc(*markers, sizeof(**markers) * new_cap);
+        *markers = grown;
+        *cap = new_cap;
+    }
+
+    unquoted = unquote_strip_heredoc_delimiter(delimiter_raw, delimiter_raw_len);
+    if (unquoted[0] == '\0') {
+        free(unquoted);
+        return -1;
+    }
+
+    (*markers)[*count].delimiter = unquoted;
+    (*markers)[*count].strip_tabs = strip_tabs;
+    (*count)++;
+    return 0;
+}
+
 static char *strip_comments(const char *src) {
     size_t i;
     size_t j;
     char quote;
     char prev;
     int param_depth;
+    struct strip_heredoc_marker *markers;
+    size_t marker_count;
+    size_t marker_cap;
+    size_t marker_idx;
+    bool in_heredoc_body;
     char *out;
 
     out = arena_xmalloc(strlen(src) + 1);
     quote = '\0';
     prev = '\0';
     param_depth = 0;
+    markers = NULL;
+    marker_count = 0;
+    marker_cap = 0;
+    marker_idx = 0;
+    in_heredoc_body = false;
     i = 0;
     j = 0;
 
@@ -1130,6 +1231,55 @@ static char *strip_comments(const char *src) {
         char ch;
 
         ch = src[i];
+
+        if (in_heredoc_body) {
+            size_t line_start;
+            size_t line_end;
+            size_t cmp_start;
+            size_t delim_len;
+            bool delimiter_match;
+
+            line_start = i;
+            while (src[i] != '\0' && src[i] != '\n') {
+                i++;
+            }
+            line_end = i;
+
+            cmp_start = line_start;
+            if (markers[marker_idx].strip_tabs) {
+                while (cmp_start < line_end && src[cmp_start] == '\t') {
+                    cmp_start++;
+                }
+            }
+
+            delim_len = strlen(markers[marker_idx].delimiter);
+            delimiter_match = line_end - cmp_start == delim_len &&
+                              memcmp(src + cmp_start, markers[marker_idx].delimiter,
+                                     delim_len) == 0;
+
+            memcpy(out + j, src + line_start, line_end - line_start);
+            j += line_end - line_start;
+
+            if (src[i] == '\n') {
+                out[j++] = src[i++];
+                prev = '\n';
+            } else {
+                prev = line_end > line_start ? src[line_end - 1] : prev;
+            }
+
+            if (delimiter_match) {
+                marker_idx++;
+                if (marker_idx >= marker_count) {
+                    free_strip_heredoc_markers(markers, marker_count);
+                    markers = NULL;
+                    marker_count = 0;
+                    marker_cap = 0;
+                    marker_idx = 0;
+                    in_heredoc_body = false;
+                }
+            }
+            continue;
+        }
 
         if (quote == '\0') {
             if (ch == '$' && src[i + 1] == '\'') {
@@ -1172,6 +1322,67 @@ static char *strip_comments(const char *src) {
                 prev = out[j - 1];
                 continue;
             }
+            if (ch == '<' && src[i + 1] == '<') {
+                size_t op_start;
+                bool strip_tabs;
+                size_t delim_start;
+                size_t delim_end;
+                size_t k;
+
+                op_start = i;
+                i += 2;
+                strip_tabs = false;
+                if (src[i] == '-') {
+                    strip_tabs = true;
+                    i++;
+                }
+                while (src[i] == ' ' || src[i] == '\t') {
+                    i++;
+                }
+                delim_start = i;
+                while (src[i] != '\0') {
+                    if (isspace((unsigned char)src[i]) || src[i] == ';' ||
+                        src[i] == '&' || src[i] == '|' || src[i] == '<' ||
+                        src[i] == '>') {
+                        break;
+                    }
+                    if (src[i] == '\\' && src[i + 1] != '\0') {
+                        i += 2;
+                        continue;
+                    }
+                    if (src[i] == '\'' || src[i] == '"') {
+                        char q;
+
+                        q = src[i++];
+                        while (src[i] != '\0' && src[i] != q) {
+                            if (q == '"' && src[i] == '\\' &&
+                                src[i + 1] != '\0') {
+                                i += 2;
+                                continue;
+                            }
+                            i++;
+                        }
+                        if (src[i] == q) {
+                            i++;
+                        }
+                        continue;
+                    }
+                    i++;
+                }
+                delim_end = i;
+
+                if (delim_end > delim_start) {
+                    push_strip_heredoc_marker(&markers, &marker_count, &marker_cap,
+                                              src + delim_start,
+                                              delim_end - delim_start, strip_tabs);
+                }
+
+                for (k = op_start; k < i; k++) {
+                    out[j++] = src[k];
+                }
+                prev = out[j - 1];
+                continue;
+            }
             if (ch == '\'' || ch == '"') {
                 quote = ch;
                 out[j++] = src[i++];
@@ -1206,8 +1417,13 @@ static char *strip_comments(const char *src) {
 
         out[j++] = src[i++];
         prev = out[j - 1];
+
+        if (ch == '\n' && marker_count > 0 && marker_idx == 0) {
+            in_heredoc_body = true;
+        }
     }
 
+    free_strip_heredoc_markers(markers, marker_count);
     out[j] = '\0';
     return out;
 }
