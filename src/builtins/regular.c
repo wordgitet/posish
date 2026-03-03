@@ -705,6 +705,7 @@ static int builtin_test(char *const argv[]) {
     return posish_netbsd_test_builtin((int)argc, argv);
 }
 
+#if POSISH_TEST_HELPERS
 static int builtin_echoraw(char *const argv[]) {
     size_t i;
 
@@ -727,6 +728,7 @@ static int builtin_bracket(char *const argv[]) {
     putchar('\n');
     return 0;
 }
+#endif
 
 static char *pid_to_string(pid_t pid) {
     char buf[32];
@@ -1804,6 +1806,7 @@ static int builtin_bg(struct shell_state *state, char *const argv[]) {
     return status;
 }
 
+#if POSISH_TEST_HELPERS
 static int builtin_make_command(char *const argv[]) {
     size_t i;
 
@@ -1831,6 +1834,7 @@ static int builtin_make_command(char *const argv[]) {
     }
     return 0;
 }
+#endif
 
 int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handled) {
     int status;
@@ -1900,6 +1904,7 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
         *handled = true;
         return builtin_unalias(argv);
     }
+#if POSISH_TEST_HELPERS
     if (strcmp(argv[0], "echoraw") == 0) {
         *handled = true;
         return builtin_echoraw(argv);
@@ -1912,18 +1917,19 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
         *handled = true;
         return builtin_make_command(argv);
     }
+#endif
 
     *handled = false;
     return 0;
 }
 
 bool builtin_is_name(const char *name) {
-    static const char *const regular_names[] = {
-        "cd",      "true",      "false",      "test",   "[",
-        "kill",    "wait",      "fg",         "bg",     "umask",
-        "alias",   "command",   "read",       "getopts","hash",
-        "jobs",    "type",      "unalias",    "echoraw","bracket",
-        "make_command"};
+    static const char *const regular_names[] = {"cd",    "true",    "false",
+                                                 "test",  "[",       "kill",
+                                                 "wait",  "fg",      "bg",
+                                                 "umask", "alias",   "command",
+                                                 "read",  "getopts", "hash",
+                                                 "jobs",  "type",    "unalias"};
     size_t i;
 
     if (name == NULL || name[0] == '\0') {
@@ -1939,5 +1945,11 @@ bool builtin_is_name(const char *name) {
             return true;
         }
     }
+#if POSISH_TEST_HELPERS
+    if (strcmp(name, "echoraw") == 0 || strcmp(name, "bracket") == 0 ||
+        strcmp(name, "make_command") == 0) {
+        return true;
+    }
+#endif
     return false;
 }

@@ -76,6 +76,8 @@ void shell_run_pending_traps(struct shell_state *state);
 int shell_run_command(struct shell_state *state, const char *command);
 int shell_run_file(struct shell_state *state, const char *path);
 int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive);
+int shell_needs_more_input_text_mode(const char *buf, size_t len,
+                                     bool include_heredoc);
 int shell_needs_more_input_text(const char *buf, size_t len);
 bool shell_position_in_comment(const char *buf, size_t len, size_t pos);
 

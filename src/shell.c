@@ -827,7 +827,7 @@ static size_t skip_continuations_forward(const char *source, size_t pos) {
     return pos;
 }
 
-static int needs_more_input(char *buf, size_t *len) {
+static int needs_more_input(char *buf, size_t *len, bool include_heredoc) {
     size_t i;
     int quote;
     int paren_depth;
@@ -865,6 +865,9 @@ static int needs_more_input(char *buf, size_t *len) {
             if (ch == '\\' && i + 1 < *len && buf[i + 1] == '\n') {
                 i += 2;
                 continue;
+            }
+            if (ch == '\\' && i + 1 >= *len) {
+                return 1;
             }
             if (ch == '\\' && i + 1 < *len) {
                 i += 2;
@@ -1126,10 +1129,18 @@ static int needs_more_input(char *buf, size_t *len) {
             }
         }
     }
+    if (!include_heredoc) {
+        return 0;
+    }
     return heredoc_needs_more_input(buf, *len) ? 1 : 0;
 }
 
 int shell_needs_more_input_text(const char *buf, size_t len) {
+    return shell_needs_more_input_text_mode(buf, len, true);
+}
+
+int shell_needs_more_input_text_mode(const char *buf, size_t len,
+                                     bool include_heredoc) {
     char *tmp;
     size_t tmp_len;
     int rc;
@@ -1142,7 +1153,7 @@ int shell_needs_more_input_text(const char *buf, size_t len) {
     memcpy(tmp, buf, len);
     tmp[len] = '\0';
     tmp_len = len;
-    rc = needs_more_input(tmp, &tmp_len);
+    rc = needs_more_input(tmp, &tmp_len, include_heredoc);
     free(tmp);
     return rc;
 }
@@ -1612,7 +1623,7 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
             append_command(&command, &command_len, &command_cap, line);
             bool need_more;
 
-            need_more = needs_more_input(command, &command_len);
+            need_more = needs_more_input(command, &command_len, true);
             {
                 char *alias_preview;
                 bool alias_need_more;
@@ -1630,7 +1641,7 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
                     alias_len = strlen(alias_preview);
                     if (strstr(alias_preview, "<<") != NULL) {
                         alias_need_more =
-                            needs_more_input(alias_preview, &alias_len) != 0;
+                            needs_more_input(alias_preview, &alias_len, true) != 0;
                     } else {
                         alias_need_more = exec_alias_preview_needs_more(alias_preview);
                     }
@@ -1676,7 +1687,7 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
         if (command_len > 0) {
             bool need_more;
 
-            need_more = needs_more_input(command, &command_len);
+            need_more = needs_more_input(command, &command_len, true);
             {
                 char *alias_preview;
                 bool raw_trailing_backslash_nl;
@@ -1694,10 +1705,10 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
                     if (strstr(alias_preview, "<<") != NULL) {
                         if (raw_trailing_backslash_nl) {
                             need_more = need_more ||
-                                        (needs_more_input(alias_preview, &alias_len) != 0);
+                                        (needs_more_input(alias_preview, &alias_len, true) != 0);
                         } else {
                             need_more =
-                                needs_more_input(alias_preview, &alias_len) != 0;
+                                needs_more_input(alias_preview, &alias_len, true) != 0;
                         }
                     } else {
                         if (raw_trailing_backslash_nl) {
@@ -1763,7 +1774,7 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
             command_start_line = line_no;
         }
         append_command(&command, &command_len, &command_cap, line);
-        if (needs_more_input(command, &command_len)) {
+        if (needs_more_input(command, &command_len, true)) {
             secondary_prompt = true;
             line_no++;
             continue;
@@ -1787,7 +1798,7 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
         line_no++;
     }
 
-    if (command_len > 0 && needs_more_input(command, &command_len)) {
+    if (command_len > 0 && needs_more_input(command, &command_len, true)) {
         posish_error_at("<input>", line_no, 1, "syntax",
                         "unexpected EOF while looking for matching quote");
         state->last_status = 2;

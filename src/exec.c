@@ -1350,6 +1350,7 @@ static int shell_set_function(struct shell_state *state, const char *name,
                               const char *body) {
     int idx;
 
+#if POSISH_TEST_HELPERS
     /*
      * The imported POSIX helper functions `bracket` and `echoraw` are backed
      * by builtins in this milestone, so we intentionally ignore redefinition.
@@ -1358,6 +1359,7 @@ static int shell_set_function(struct shell_state *state, const char *name,
         strcmp(name, "make_command") == 0) {
         return 0;
     }
+#endif
 
     idx = find_function_index(state, name);
     if (idx >= 0) {
@@ -2083,6 +2085,7 @@ static bool has_pending_flow_control(const struct shell_state *state) {
 }
 
 static bool ignore_helper_function_declaration(const char *source) {
+#if POSISH_TEST_HELPERS
     size_t i;
 
     i = 0;
@@ -2098,6 +2101,10 @@ static bool ignore_helper_function_declaration(const char *source) {
         return false;
     }
     return keyword_boundary(source[i + 14]);
+#else
+    (void)source;
+    return false;
+#endif
 }
 
 static int find_redir_operator_pos(const char *token, size_t *pos_out) {
@@ -4619,181 +4626,14 @@ static int execute_andor(struct shell_state *state, const char *source) {
 
 static bool command_text_needs_more_input(const char *source,
                                           bool include_heredoc) {
-    size_t i;
-    char quote;
-    int paren_depth;
-    int brace_depth;
-    int if_depth;
-    int case_depth;
-    int loop_depth;
-    bool pending_heredoc;
-    bool trailing_operator;
+    size_t len;
 
-    quote = '\0';
-    paren_depth = 0;
-    brace_depth = 0;
-    if_depth = 0;
-    case_depth = 0;
-    loop_depth = 0;
-    pending_heredoc = false;
-    trailing_operator = false;
-
-    for (i = 0; source[i] != '\0'; i++) {
-        char ch;
-
-        ch = source[i];
-        if (quote == '\0') {
-            if (ch == '\\') {
-                if (source[i + 1] == '\0') {
-                    return true;
-                }
-                i++;
-                trailing_operator = false;
-                continue;
-            }
-            if (ch == '$' && source[i + 1] == '(') {
-                size_t end;
-
-                if (find_command_subst_end(source, i, &end)) {
-                    i = end;
-                    continue;
-                }
-            }
-            if (ch == '$' && source[i + 1] == '\'') {
-                size_t end;
-
-                if (find_dollar_single_quote_end(source, i, &end)) {
-                    i = end;
-                    continue;
-                }
-            }
-            if (ch == '\'' || ch == '"') {
-                quote = ch;
-                trailing_operator = false;
-                continue;
-            }
-            if (paren_depth == 0 && brace_depth == 0 &&
-                (isalpha((unsigned char)ch) || ch == '_') &&
-                word_starts_command_position(source, i)) {
-                size_t j;
-                size_t boundary;
-                char keyword[16];
-                size_t kwlen;
-
-                j = i;
-                kwlen = 0;
-                while (source[j] != '\0') {
-                    if (source[j] == '\\' && source[j + 1] == '\n') {
-                        j += 2;
-                        continue;
-                    }
-                    if (!isalnum((unsigned char)source[j]) && source[j] != '_') {
-                        break;
-                    }
-                    if (kwlen + 1 < sizeof(keyword)) {
-                        keyword[kwlen] = source[j];
-                    }
-                    kwlen++;
-                    j++;
-                }
-                boundary = skip_continuations_forward(source, j);
-                if (keyword_boundary(source[boundary]) &&
-                    source[boundary] != ')') {
-                    if (kwlen == 2 && strncmp(keyword, "if", 2) == 0) {
-                        if_depth++;
-                    } else if (kwlen == 2 && strncmp(keyword, "fi", 2) == 0 &&
-                               if_depth > 0) {
-                        if_depth--;
-                    } else if (kwlen == 4 && strncmp(keyword, "case", 4) == 0) {
-                        case_depth++;
-                    } else if (kwlen == 4 && strncmp(keyword, "esac", 4) == 0 &&
-                               case_depth > 0) {
-                        case_depth--;
-                    } else if (case_depth == 0) {
-                        if ((kwlen == 5 && strncmp(keyword, "while", 5) == 0) ||
-                            (kwlen == 5 && strncmp(keyword, "until", 5) == 0) ||
-                            (kwlen == 3 && strncmp(keyword, "for", 3) == 0)) {
-                            loop_depth++;
-                        } else if (kwlen == 4 &&
-                                   strncmp(keyword, "done", 4) == 0 &&
-                                   loop_depth > 0 &&
-                                   keyword_preceded_by_list_separator(source, i)) {
-                            loop_depth--;
-                        }
-                    }
-                }
-                i = j - 1;
-                trailing_operator = false;
-                continue;
-            }
-            if (ch == '(') {
-                paren_depth++;
-                trailing_operator = false;
-                continue;
-            }
-            if (ch == ')' && paren_depth > 0) {
-                paren_depth--;
-                trailing_operator = false;
-                continue;
-            }
-            if (ch == '{') {
-                brace_depth++;
-                trailing_operator = false;
-                continue;
-            }
-            if (ch == '}' && brace_depth > 0) {
-                brace_depth--;
-                trailing_operator = false;
-                continue;
-            }
-            if (paren_depth == 0 && brace_depth == 0 && ch == '<' &&
-                source[i + 1] == '<') {
-                pending_heredoc = true;
-                trailing_operator = false;
-                continue;
-            }
-            if (paren_depth == 0 && brace_depth == 0 &&
-                (ch == '|' || ch == '&')) {
-                if ((ch == '|' && source[i + 1] == '|') ||
-                    (ch == '&' && source[i + 1] == '&')) {
-                    trailing_operator = true;
-                    i++;
-                    continue;
-                }
-                if (!(ch == '&' && i > 0 && source[i - 1] == '>')) {
-                    trailing_operator = true;
-                    continue;
-                }
-            }
-            if (!isspace((unsigned char)ch)) {
-                trailing_operator = false;
-                continue;
-            }
-        } else if (quote == '\'' && ch == '\'') {
-            quote = '\0';
-        } else if (quote == '"') {
-            if (ch == '$' && source[i + 1] == '(') {
-                size_t end;
-
-                if (find_command_subst_end(source, i, &end)) {
-                    i = end;
-                    continue;
-                }
-            }
-            if (ch == '\\' && source[i + 1] != '\0') {
-                i++;
-                continue;
-            }
-            if (ch == '"') {
-                quote = '\0';
-            }
-        }
+    if (source == NULL) {
+        return false;
     }
 
-    return quote != '\0' || paren_depth != 0 || brace_depth != 0 || if_depth > 0 ||
-           case_depth > 0 || loop_depth > 0 || trailing_operator ||
-           looks_like_function_header_only(source) ||
-           (include_heredoc && pending_heredoc);
+    len = strlen(source);
+    return shell_needs_more_input_text_mode(source, len, include_heredoc) != 0;
 }
 
 char *exec_alias_expand_preview(struct shell_state *state, const char *source) {

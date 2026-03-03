@@ -4,7 +4,8 @@
 SHELL = /bin/sh
 
 CC = @CC@
-CPPFLAGS = @CPPFLAGS@ -D_POSIX_C_SOURCE=200809L -Iinclude -Isrc -include config.h
+POSISH_TEST_HELPERS ?= 0
+CPPFLAGS = @CPPFLAGS@ -D_POSIX_C_SOURCE=200809L -DPOSISH_TEST_HELPERS=$(POSISH_TEST_HELPERS) -Iinclude -Isrc -include config.h
 CFLAGS = @CFLAGS@ -Wall -Wextra -Wpedantic
 LDFLAGS = @LDFLAGS@
 LIBS = @LIBS@
