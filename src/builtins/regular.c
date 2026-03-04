@@ -284,13 +284,7 @@ static int builtin_cd(struct shell_state *state, char *const argv[]) {
                     end = p + strlen(p);
                 }
                 len = (size_t)(end - p);
-                prefix = malloc(len + 1);
-                if (prefix == NULL) {
-                    perror("malloc");
-                    arena_maybe_free(old_pwd);
-                    arena_maybe_free(resolved_path);
-                    return 1;
-                }
+                prefix = arena_xmalloc(len + 1);
                 memcpy(prefix, p, len);
                 prefix[len] = '\0';
 
