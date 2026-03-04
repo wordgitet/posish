@@ -122,6 +122,14 @@ test-sanitize-posix:
 		LDFLAGS="$(LDFLAGS) $(SAN_LDFLAGS)" \
 		test-posix TESTCASE_TIMEOUT=0
 
+test-stress-arena:
+	$(MAKE) clean
+	$(MAKE) all
+	@echo ">>> arena growth stress"
+	@TESTEE="`pwd`/$(TARGET)" ./tests/stress/arena_growth_stress.sh
+	@echo ">>> heredoc pressure stress"
+	@TESTEE="`pwd`/$(TARGET)" ./tests/stress/heredoc_pressure.sh
+
 test-smoke: $(TARGET)
 	@if [ -n "$(TESTEE)" ]; then testee="$(TESTEE)"; else testee="`pwd`/$(TARGET)"; fi; \
 	$(MAKE) -C tests/posix test-smoke \
@@ -222,4 +230,4 @@ clean:
 	rm -rf $(BUILD_DIR)
 	$(MAKE) -C tests/posix clean
 
-.PHONY: all clean build-sanitize test-sanitize-smoke test-sanitize-guards test-sanitize-posix test-posix test-smoke test-stop test-signal test-signal-contained test-regressions test-posix-rebaseline sync-posix-checklist rebaseline-fulltruth metrics
+.PHONY: all clean build-sanitize test-sanitize-smoke test-sanitize-guards test-sanitize-posix test-stress-arena test-posix test-smoke test-stop test-signal test-signal-contained test-regressions test-posix-rebaseline sync-posix-checklist rebaseline-fulltruth metrics
