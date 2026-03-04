@@ -69,14 +69,7 @@ static bool command_text_needs_more_input(const char *source,
 static bool looks_like_function_header_only(const char *source);
 
 static void *xrealloc(void *ptr, size_t size) {
-    void *p;
-
-    p = realloc(ptr, size);
-    if (p == NULL) {
-        perror("realloc");
-        exit(EXIT_FAILURE);
-    }
-    return p;
+    return arena_xrealloc(ptr, size);
 }
 
 static char *dup_trimmed_slice(const char *src, size_t start, size_t end) {
@@ -1586,9 +1579,9 @@ static int shell_set_function(struct shell_state *state, const char *name,
         return 0;
     }
 
-    state->functions = xrealloc(state->functions,
-                                sizeof(*state->functions) *
-                                    (state->function_count + 1));
+    state->functions = arena_realloc_in(
+        &state->arena_perm, state->functions,
+        sizeof(*state->functions) * (state->function_count + 1));
     state->functions[state->function_count].name =
         arena_strdup_in(&state->arena_perm, name);
     state->functions[state->function_count].body =
