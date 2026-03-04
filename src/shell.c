@@ -1533,9 +1533,7 @@ void shell_state_init(struct shell_state *state) {
 void shell_state_destroy(struct shell_state *state) {
     int signo;
 
-    arena_maybe_free(state->exit_trap);
     for (signo = 0; signo < NSIG; signo++) {
-        arena_maybe_free(state->signal_traps[signo]);
         state->signal_traps[signo] = NULL;
         state->signal_cleared[signo] = false;
     }

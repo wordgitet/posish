@@ -156,8 +156,6 @@ static int remove_shell_function(struct shell_state *state, const char *name) {
 
     for (i = 0; i < state->function_count; i++) {
         if (strcmp(state->functions[i].name, name) == 0) {
-            arena_maybe_free(state->functions[i].name);
-            arena_maybe_free(state->functions[i].body);
             if (i + 1 < state->function_count) {
                 memmove(&state->functions[i], &state->functions[i + 1],
                         sizeof(*state->functions) * (state->function_count - (i + 1)));
