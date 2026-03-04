@@ -9,6 +9,8 @@ CPPFLAGS = @CPPFLAGS@ -D_POSIX_C_SOURCE=200809L -DPOSISH_TEST_HELPERS=$(POSISH_T
 CFLAGS = @CFLAGS@ -Wall -Wextra -Wpedantic
 LDFLAGS = @LDFLAGS@
 LIBS = @LIBS@
+SAN_CFLAGS = -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined
+SAN_LDFLAGS = -fsanitize=address,undefined
 YASH_RUNNER = @YASH_RUNNER@
 
 BUILD_DIR = build
@@ -95,6 +97,30 @@ test-posix: $(TARGET)
 		YASH_RUNNER="$(YASH_RUNNER)" \
 		TESTEE="$$testee" \
 		TESTCASE_TIMEOUT="$(TESTCASE_TIMEOUT)"
+
+build-sanitize:
+	$(MAKE) clean
+	$(MAKE) CFLAGS="$(CFLAGS) $(SAN_CFLAGS)" \
+		LDFLAGS="$(LDFLAGS) $(SAN_LDFLAGS)" all
+
+test-sanitize-smoke:
+	$(MAKE) CFLAGS="$(CFLAGS) $(SAN_CFLAGS)" \
+		LDFLAGS="$(LDFLAGS) $(SAN_LDFLAGS)" test-smoke
+
+test-sanitize-guards:
+	$(MAKE) CFLAGS="$(CFLAGS) $(SAN_CFLAGS)" \
+		LDFLAGS="$(LDFLAGS) $(SAN_LDFLAGS)" test-smoke
+	$(MAKE) CFLAGS="$(CFLAGS) $(SAN_CFLAGS)" \
+		LDFLAGS="$(LDFLAGS) $(SAN_LDFLAGS)" test-regressions
+	$(MAKE) CFLAGS="$(CFLAGS) $(SAN_CFLAGS)" \
+		LDFLAGS="$(LDFLAGS) $(SAN_LDFLAGS)" test-stop
+	$(MAKE) CFLAGS="$(CFLAGS) $(SAN_CFLAGS)" \
+		LDFLAGS="$(LDFLAGS) $(SAN_LDFLAGS)" test-signal
+
+test-sanitize-posix:
+	$(MAKE) CFLAGS="$(CFLAGS) $(SAN_CFLAGS)" \
+		LDFLAGS="$(LDFLAGS) $(SAN_LDFLAGS)" \
+		test-posix TESTCASE_TIMEOUT=0
 
 test-smoke: $(TARGET)
 	@if [ -n "$(TESTEE)" ]; then testee="$(TESTEE)"; else testee="`pwd`/$(TARGET)"; fi; \
@@ -196,4 +222,4 @@ clean:
 	rm -rf $(BUILD_DIR)
 	$(MAKE) -C tests/posix clean
 
-.PHONY: all clean test-posix test-smoke test-stop test-signal test-signal-contained test-regressions test-posix-rebaseline sync-posix-checklist rebaseline-fulltruth metrics
+.PHONY: all clean build-sanitize test-sanitize-smoke test-sanitize-guards test-sanitize-posix test-posix test-smoke test-stop test-signal test-signal-contained test-regressions test-posix-rebaseline sync-posix-checklist rebaseline-fulltruth metrics
