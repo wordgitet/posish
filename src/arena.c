@@ -5,6 +5,7 @@
 #include "arena.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +41,7 @@ union arena_alloc_slot {
 
 static struct arena *g_current_arena = NULL;
 static struct arena_registry_entry *g_registry = NULL;
+static int g_arena_strict_mode = -1;
 
 static size_t align_up(size_t value, size_t alignment);
 static struct arena_block *arena_new_block(size_t capacity);
@@ -51,6 +53,7 @@ static void arena_register(struct arena *arena);
 static void arena_unregister(struct arena *arena);
 static bool arena_pointer_in_block(const struct arena_block *block, const void *ptr);
 static union arena_alloc_slot *arena_ptr_header(void *ptr);
+static bool arena_strict_mode_enabled(void);
 
 static size_t align_up(size_t value, size_t alignment) {
     size_t mask;
@@ -165,6 +168,23 @@ static union arena_alloc_slot *arena_ptr_header(void *ptr) {
 
     slot = (union arena_alloc_slot *)ptr;
     return slot - 1;
+}
+
+static bool arena_strict_mode_enabled(void) {
+    const char *env;
+
+    if (g_arena_strict_mode >= 0) {
+        return g_arena_strict_mode != 0;
+    }
+
+    env = getenv("POSISH_ARENA_STRICT");
+    if (env == NULL || env[0] == '\0' || strcmp(env, "0") == 0) {
+        g_arena_strict_mode = 0;
+        return false;
+    }
+
+    g_arena_strict_mode = 1;
+    return true;
 }
 
 void arena_init(struct arena *arena, size_t block_size) {
@@ -306,6 +326,11 @@ void *arena_realloc_in(struct arena *arena, void *ptr, size_t size) {
 
         old_slot = arena_ptr_header(ptr);
         if (old_slot->h.magic != ARENA_ALLOC_MAGIC || old_slot->h.owner == NULL) {
+            if (arena_strict_mode_enabled()) {
+                fprintf(stderr,
+                        "posish: arena strict mode: non-arena pointer passed to arena realloc\n");
+                abort();
+            }
             /*
              * Compatibility path while migrating callers: if a non-arena pointer
              * reaches arena realloc, keep behavior safe instead of crashing.
