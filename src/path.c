@@ -14,36 +14,27 @@
 char *path_getcwd_alloc(void) {
     size_t size;
     char *buf;
-    char *grown;
     char *result;
 
     size = 128;
-    buf = malloc(size);
-    if (buf == NULL) {
-        return NULL;
-    }
+    buf = arena_alloc_in(NULL, size);
     for (;;) {
         if (getcwd(buf, size) != NULL) {
             result = arena_xstrdup(buf);
-            free(buf);
+            arena_maybe_free(buf);
             return result;
         }
 
         if (errno != ERANGE) {
-            free(buf);
+            arena_maybe_free(buf);
             return NULL;
         }
         if (size > SIZE_MAX / 2) {
-            free(buf);
+            arena_maybe_free(buf);
             errno = ERANGE;
             return NULL;
         }
         size *= 2;
-        grown = realloc(buf, size);
-        if (grown == NULL) {
-            free(buf);
-            return NULL;
-        }
-        buf = grown;
+        buf = arena_realloc_in(NULL, buf, size);
     }
 }
