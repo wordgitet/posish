@@ -548,21 +548,21 @@ static bool case_pattern_list_matches(struct shell_state *state,
         match_pat = raw_pattern_to_fnmatch(raw_pat);
       } else {
         if (expand_case_word(raw_pat, state, &pat) != 0) {
-          free(raw_pat);
+          arena_maybe_free(raw_pat);
           return false;
         }
         if (is_fully_quoted_pattern(raw_pat)) {
           match_pat = escape_pattern_metacharacters(pat);
-          free(pat);
+          arena_maybe_free(pat);
         } else {
           match_pat = normalize_fnmatch_pattern(pat);
-          free(pat);
+          arena_maybe_free(pat);
         }
       }
-      free(raw_pat);
+      arena_maybe_free(raw_pat);
 
       rc = fnmatch(match_pat, word, 0);
-      free(match_pat);
+      arena_maybe_free(match_pat);
       if (rc == 0) {
         return true;
       }
@@ -660,11 +660,11 @@ bool try_execute_case_command(struct shell_state *state, const char *source,
 
   word_expr = dup_trimmed_slice(source, word_start, word_end);
   if (expand_case_word(word_expr, state, &word) != 0) {
-    free(word_expr);
+    arena_maybe_free(word_expr);
     *status_out = 2;
     return true;
   }
-  free(word_expr);
+  arena_maybe_free(word_expr);
 
   matched = false;
   force_execute = false;
@@ -692,7 +692,7 @@ bool try_execute_case_command(struct shell_state *state, const char *source,
         j++;
       }
       if (source[j] != '\0') {
-        free(word);
+        arena_maybe_free(word);
         *status_out = 2;
         return true;
       }
@@ -704,7 +704,7 @@ bool try_execute_case_command(struct shell_state *state, const char *source,
     }
     pat_start = i;
     if (!find_pattern_clause_close(source, i, &pat_end)) {
-      free(word);
+      arena_maybe_free(word);
       *status_out = 2;
       return true;
     }
@@ -781,7 +781,7 @@ bool try_execute_case_command(struct shell_state *state, const char *source,
       }
     }
     if (source[i] == '\0' && !clause_ended_with_esac) {
-      free(word);
+      arena_maybe_free(word);
       *status_out = 2;
       return true;
     }
@@ -806,14 +806,14 @@ bool try_execute_case_command(struct shell_state *state, const char *source,
       if (body[0] != '\0') {
         status = runner(state, body);
       }
-      free(body);
+      arena_maybe_free(body);
       matched = true;
       if (clause_ended_with_esac || terminator == CASE_TERM_END) {
-        free(patterns);
+        arena_maybe_free(patterns);
         break;
       }
       if (terminator == CASE_TERM_DBL_SEMI) {
-        free(patterns);
+        arena_maybe_free(patterns);
         break;
       }
       if (terminator == CASE_TERM_SEMI_AMP) {
@@ -828,7 +828,7 @@ bool try_execute_case_command(struct shell_state *state, const char *source,
         test_after_match = false;
       }
     }
-    free(patterns);
+    arena_maybe_free(patterns);
 
     if (terminator == CASE_TERM_DBL_SEMI_AMP) {
       i += 3;
@@ -838,7 +838,7 @@ bool try_execute_case_command(struct shell_state *state, const char *source,
     }
   }
 
-  free(word);
+  arena_maybe_free(word);
   *status_out = status;
   return true;
 }

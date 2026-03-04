@@ -16,12 +16,12 @@ char *path_getcwd_alloc(void) {
 
     size = 128;
     for (;;) {
-        buf = arena_xmalloc(size);
+        buf = arena_alloc_in(NULL, size);
         if (getcwd(buf, size) != NULL) {
             return buf;
         }
 
-        free(buf);
+        arena_maybe_free(buf);
         if (errno != ERANGE) {
             return NULL;
         }

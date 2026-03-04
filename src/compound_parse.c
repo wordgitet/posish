@@ -395,7 +395,7 @@ bool parse_simple_if(const char *source, char **cond_out, char **then_out,
             memcpy(rewritten, "if", 2);
             memcpy(rewritten + 2, else_body + 4, tail_len);
             memcpy(rewritten + 2 + tail_len, "\nfi", 4);
-            free(else_body);
+            arena_maybe_free(else_body);
             else_body = rewritten;
         } else if (strncmp(else_body, "else", 4) == 0 &&
                    keyword_boundary(else_body[4])) {
@@ -407,7 +407,7 @@ bool parse_simple_if(const char *source, char **cond_out, char **then_out,
                 j++;
             }
             trimmed_else = arena_xstrdup(else_body + j);
-            free(else_body);
+            arena_maybe_free(else_body);
             else_body = trimmed_else;
         }
         *else_out = else_body;
@@ -994,10 +994,10 @@ bool compound_needs_single_atom(const char *source) {
         matched = true;
     }
 
-    free(cond);
-    free(body);
-    free(name);
-    free(words);
-    free(trimmed);
+    arena_maybe_free(cond);
+    arena_maybe_free(body);
+    arena_maybe_free(name);
+    arena_maybe_free(words);
+    arena_maybe_free(trimmed);
     return matched;
 }

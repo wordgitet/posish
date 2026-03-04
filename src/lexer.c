@@ -189,9 +189,9 @@ void lexer_free_tokens(struct token_vec *tokens) {
     }
 
     for (i = 0; i < tokens->len; i++) {
-        free(tokens->items[i]);
+        arena_maybe_free(tokens->items[i]);
     }
-    free(tokens->items);
+    arena_maybe_free(tokens->items);
 
     tokens->items = NULL;
     tokens->len = 0;
@@ -234,7 +234,7 @@ int lexer_split_words(const char *line, struct token_vec *out) {
 
             if (quote != '\'' && ch == '$' && p[1] == '(') {
                 if (append_command_subst(&p, &buf, &len, &cap) != 0) {
-                    free(buf);
+                    arena_maybe_free(buf);
                     lexer_free_tokens(out);
                     return -1;
                 }
@@ -243,7 +243,7 @@ int lexer_split_words(const char *line, struct token_vec *out) {
             }
             if (quote != '\'' && ch == '$' && p[1] == '\'') {
                 if (append_dollar_single_quote(&p, &buf, &len, &cap) != 0) {
-                    free(buf);
+                    arena_maybe_free(buf);
                     lexer_free_tokens(out);
                     return -1;
                 }
@@ -253,7 +253,7 @@ int lexer_split_words(const char *line, struct token_vec *out) {
             if (quote != '\'' && ch == '$' && p[1] == '{') {
                 if (append_braced_param_subst(&p, &buf, &len, &cap,
                                               quote == '"') != 0) {
-                    free(buf);
+                    arena_maybe_free(buf);
                     lexer_free_tokens(out);
                     return -1;
                 }
@@ -262,7 +262,7 @@ int lexer_split_words(const char *line, struct token_vec *out) {
             }
             if (quote != '\'' && ch == '`') {
                 if (append_backtick_subst(&p, &buf, &len, &cap) != 0) {
-                    free(buf);
+                    arena_maybe_free(buf);
                     lexer_free_tokens(out);
                     return -1;
                 }
@@ -299,7 +299,7 @@ int lexer_split_words(const char *line, struct token_vec *out) {
             if (ch == '\\' && quote != '\'') {
                 if (p[1] == '\0') {
                     posish_errorf("trailing backslash in command");
-                    free(buf);
+                    arena_maybe_free(buf);
                     lexer_free_tokens(out);
                     return -1;
                 }
@@ -321,13 +321,13 @@ int lexer_split_words(const char *line, struct token_vec *out) {
 
         if (quote != 0) {
             posish_errorf("unterminated quote in command");
-            free(buf);
+            arena_maybe_free(buf);
             lexer_free_tokens(out);
             return -1;
         }
 
         if (!started) {
-            free(buf);
+            arena_maybe_free(buf);
             continue;
         }
 

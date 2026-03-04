@@ -62,15 +62,15 @@ static void heredoc_specs_free(struct heredoc_spec *specs, size_t count,
     size_t i;
 
     for (i = 0; i < count; i++) {
-        free(specs[i].delimiter);
-        free(specs[i].placeholder);
-        free(specs[i].body);
+        arena_maybe_free(specs[i].delimiter);
+        arena_maybe_free(specs[i].placeholder);
+        arena_maybe_free(specs[i].body);
         if (unlink_files && specs[i].temp_path != NULL) {
             unlink(specs[i].temp_path);
         }
-        free(specs[i].temp_path);
+        arena_maybe_free(specs[i].temp_path);
     }
-    free(specs);
+    arena_maybe_free(specs);
 }
 
 static int heredoc_specs_push(struct heredoc_spec **specs, size_t *count,
@@ -141,7 +141,7 @@ static int quote_remove_word(const char *word, char **out_word) {
 
     if (quote != '\0') {
         posish_errorf("unterminated heredoc delimiter quote");
-        free(buf);
+        arena_maybe_free(buf);
         return -1;
     }
 
@@ -183,7 +183,7 @@ static bool command_is_redirection_only(const char *command) {
         bool needs_word;
 
         if (parse_redir_token(tokens.items[i], &spec, &needs_word)) {
-            free(spec.path);
+            arena_maybe_free(spec.path);
             if (needs_word && i + 1 < tokens.len) {
                 i++;
             }
@@ -282,7 +282,7 @@ static int parse_command_heredocs(const char *command, char **base_command_out,
                     }
                     if (command[i] == '\0' || command[i] == '\n') {
                         posish_errorf("missing heredoc delimiter");
-                        free(base_command);
+                        arena_maybe_free(base_command);
                         heredoc_specs_free(specs, spec_count, true);
                         return -1;
                     }
@@ -326,7 +326,7 @@ static int parse_command_heredocs(const char *command, char **base_command_out,
                     }
                     if (delim_quote != '\0') {
                         posish_errorf("unterminated heredoc delimiter quote");
-                        free(base_command);
+                        arena_maybe_free(base_command);
                         heredoc_specs_free(specs, spec_count, true);
                         return -1;
                     }
@@ -334,7 +334,7 @@ static int parse_command_heredocs(const char *command, char **base_command_out,
                     word_end = i;
                     if (word_end == word_start) {
                         posish_errorf("missing heredoc delimiter");
-                        free(base_command);
+                        arena_maybe_free(base_command);
                         heredoc_specs_free(specs, spec_count, true);
                         return -1;
                     }
@@ -352,12 +352,12 @@ static int parse_command_heredocs(const char *command, char **base_command_out,
                              "__POSISH_HEREDOC_%zu__", spec_count);
                     spec.placeholder = arena_xstrdup(placeholder_name);
                     if (quote_remove_word(raw_delim, &spec.delimiter) != 0) {
-                        free(raw_delim);
-                        free(base_command);
+                        arena_maybe_free(raw_delim);
+                        arena_maybe_free(base_command);
                         heredoc_specs_free(specs, spec_count, true);
                         return -1;
                     }
-                    free(raw_delim);
+                    arena_maybe_free(raw_delim);
 
                     append_text(&base_command, &base_len, &base_cap, "<");
                     append_text(&base_command, &base_len, &base_cap,
@@ -453,6 +453,10 @@ static int expand_heredoc_text_isolated(const char *input,
 
         close(pipefd[0]);
         local_state = *state;
+        arena_init(&local_state.arena_perm, state->arena_perm.default_block_size);
+        arena_init(&local_state.arena_script, state->arena_script.default_block_size);
+        arena_init(&local_state.arena_cmd, state->arena_cmd.default_block_size);
+        arena_set_current(&local_state.arena_perm);
         if (expand_heredoc_text(input, &local_state, &expanded) != 0) {
             _exit(1);
         }
@@ -468,12 +472,12 @@ static int expand_heredoc_text_isolated(const char *input,
                 if (errno == EINTR) {
                     continue;
                 }
-                free(expanded);
+                arena_maybe_free(expanded);
                 _exit(1);
             }
             written += (size_t)nwritten;
         }
-        free(expanded);
+        arena_maybe_free(expanded);
         close(pipefd[1]);
         _exit(0);
     }
@@ -487,7 +491,7 @@ static int expand_heredoc_text_isolated(const char *input,
 
         if (len + 64 > cap) {
             cap *= 2;
-            buf = xrealloc(buf, cap);
+            buf = arena_xrealloc(buf, cap);
         }
 
         nread = read(pipefd[0], buf + len, cap - len - 1);
@@ -497,7 +501,7 @@ static int expand_heredoc_text_isolated(const char *input,
             }
             perror("read");
             close(pipefd[0]);
-            free(buf);
+            arena_maybe_free(buf);
             return -1;
         }
         if (nread == 0) {
@@ -514,13 +518,13 @@ static int expand_heredoc_text_isolated(const char *input,
                 continue;
             }
             perror("waitpid");
-            free(buf);
+            arena_maybe_free(buf);
             return -1;
         }
         break;
     }
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        free(buf);
+        arena_maybe_free(buf);
         return -1;
     }
 
@@ -556,7 +560,7 @@ static int consume_heredoc_bodies(struct shell_state *state, const char *source,
 
             if (source[pos] == '\0') {
                 *incomplete_out = true;
-                free(body);
+                arena_maybe_free(body);
                 return -1;
             }
 
@@ -594,7 +598,7 @@ static int consume_heredoc_bodies(struct shell_state *state, const char *source,
                 pos++;
             } else {
                 *incomplete_out = true;
-                free(body);
+                arena_maybe_free(body);
                 return -1;
             }
         }
@@ -609,10 +613,10 @@ static int consume_heredoc_bodies(struct shell_state *state, const char *source,
                  expand_heredoc_text_isolated(body, state, &expanded) != 0) ||
                 (!isolate_expansion_side_effects &&
                  expand_heredoc_text(body, state, &expanded) != 0)) {
-                free(body);
+                arena_maybe_free(body);
                 return -1;
             }
-            free(body);
+            arena_maybe_free(body);
             body = expanded;
         }
         specs[sidx].body = body;
@@ -718,7 +722,7 @@ static char *build_heredoc_command(const char *base_command,
         char *replaced;
 
         replaced = replace_all(out, specs[i].placeholder, specs[i].temp_path);
-        free(out);
+        arena_maybe_free(out);
         out = replaced;
     }
     return out;
@@ -746,7 +750,7 @@ int maybe_execute_heredoc_command(struct shell_state *state, const char *command
         return -1;
     }
     if (spec_count == 0) {
-        free(base_command);
+        arena_maybe_free(base_command);
         return 0;
     }
 
@@ -759,16 +763,16 @@ int maybe_execute_heredoc_command(struct shell_state *state, const char *command
         if (incomplete) {
             *handled = false;
             heredoc_specs_free(specs, spec_count, true);
-            free(base_command);
+            arena_maybe_free(base_command);
             return 0;
         }
         heredoc_specs_free(specs, spec_count, true);
-        free(base_command);
+        arena_maybe_free(base_command);
         return -1;
     }
     if (write_heredoc_tempfiles(specs, spec_count) != 0) {
         heredoc_specs_free(specs, spec_count, true);
-        free(base_command);
+        arena_maybe_free(base_command);
         return -1;
     }
 
@@ -777,7 +781,7 @@ int maybe_execute_heredoc_command(struct shell_state *state, const char *command
     *status_out = status;
 
     heredoc_specs_free(specs, spec_count, !preserve_tempfiles);
-    free(base_command);
-    free(rewritten);
+    arena_maybe_free(base_command);
+    arena_maybe_free(rewritten);
     return 0;
 }

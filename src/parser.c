@@ -22,6 +22,6 @@ void ast_program_free(struct ast_program *program) {
         return;
     }
 
-    free(program->source);
-    free(program);
+    arena_maybe_free(program->source);
+    arena_maybe_free(program);
 }

@@ -77,11 +77,12 @@ static int vars_add_unexported(struct shell_state *state, const char *name) {
         return 0;
     }
 
-    new_names = arena_xrealloc(state->unexported_names,
-                               sizeof(*state->unexported_names) *
-                                   (state->unexported_count + 1));
+    new_names = arena_realloc_in(&state->arena_perm, state->unexported_names,
+                                 sizeof(*state->unexported_names) *
+                                     (state->unexported_count + 1));
     state->unexported_names = new_names;
-    state->unexported_names[state->unexported_count++] = arena_xstrdup(name);
+    state->unexported_names[state->unexported_count++] =
+        arena_strdup_in(&state->arena_perm, name);
     return 0;
 }
 
@@ -94,7 +95,6 @@ static void vars_remove_unexported(struct shell_state *state, const char *name) 
         return;
     }
 
-    free(state->unexported_names[idx]);
     for (i = (size_t)idx + 1; i < state->unexported_count; i++) {
         state->unexported_names[i - 1] = state->unexported_names[i];
     }
@@ -108,11 +108,12 @@ static int vars_add_readonly(struct shell_state *state, const char *name) {
         return 0;
     }
 
-    new_names = arena_xrealloc(state->readonly_names,
-                               sizeof(*state->readonly_names) *
-                                   (state->readonly_count + 1));
+    new_names = arena_realloc_in(&state->arena_perm, state->readonly_names,
+                                 sizeof(*state->readonly_names) *
+                                     (state->readonly_count + 1));
     state->readonly_names = new_names;
-    state->readonly_names[state->readonly_count++] = arena_xstrdup(name);
+    state->readonly_names[state->readonly_count++] =
+        arena_strdup_in(&state->arena_perm, name);
     return 0;
 }
 

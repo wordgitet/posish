@@ -29,6 +29,20 @@ static size_t getopts_nextchar_index = 0;
 static unsigned long getopts_last_optind = 1;
 static char *getopts_last_optstring = NULL;
 
+static char *xstrdup_heap(const char *s) {
+    size_t n;
+    char *copy;
+
+    n = strlen(s) + 1;
+    copy = malloc(n);
+    if (copy == NULL) {
+        perror("malloc");
+        return NULL;
+    }
+    memcpy(copy, s, n);
+    return copy;
+}
+
 static int wait_status_to_shell_status(int status) {
     if (WIFEXITED(status)) {
         return WEXITSTATUS(status);
@@ -128,7 +142,7 @@ static char *cd_canonicalize_logical(const char *base, const char *path) {
         }
         if (len == 2 && start[0] == '.' && start[1] == '.') {
             if (seg_count > 0) {
-                free(segments[seg_count - 1]);
+                arena_maybe_free(segments[seg_count - 1]);
                 seg_count--;
             }
             cursor = end;
@@ -139,10 +153,10 @@ static char *cd_canonicalize_logical(const char *base, const char *path) {
         if (segment == NULL) {
             perror("malloc");
             for (i = 0; i < seg_count; i++) {
-                free(segments[i]);
+                arena_maybe_free(segments[i]);
             }
-            free(segments);
-            free(joined);
+            arena_maybe_free(segments);
+            arena_maybe_free(joined);
             return NULL;
         }
         memcpy(segment, start, len);
@@ -174,10 +188,10 @@ static char *cd_canonicalize_logical(const char *base, const char *path) {
     }
 
     for (i = 0; i < seg_count; i++) {
-        free(segments[i]);
+        arena_maybe_free(segments[i]);
     }
-    free(segments);
-    free(joined);
+    arena_maybe_free(segments);
+    arena_maybe_free(joined);
     return out;
 }
 
@@ -286,8 +300,8 @@ static int builtin_cd(struct shell_state *state, char *const argv[]) {
                 prefix = malloc(len + 1);
                 if (prefix == NULL) {
                     perror("malloc");
-                    free(old_pwd);
-                    free(resolved_path);
+                    arena_maybe_free(old_pwd);
+                    arena_maybe_free(resolved_path);
                     return 1;
                 }
                 memcpy(prefix, p, len);
@@ -299,14 +313,14 @@ static int builtin_cd(struct shell_state *state, char *const argv[]) {
                     candidate = cd_join_path(prefix, target);
                 }
                 if (candidate == NULL) {
-                    free(prefix);
-                    free(old_pwd);
-                    free(resolved_path);
+                    arena_maybe_free(prefix);
+                    arena_maybe_free(old_pwd);
+                    arena_maybe_free(resolved_path);
                     return 1;
                 }
 
                 if (stat(candidate, &st) == 0 && S_ISDIR(st.st_mode)) {
-                    free(resolved_path);
+                    arena_maybe_free(resolved_path);
                     resolved_path = candidate;
                     if (len > 0) {
                         print_path = true;
@@ -314,10 +328,10 @@ static int builtin_cd(struct shell_state *state, char *const argv[]) {
                     used_cdpath = true;
                     found_path = true;
                 } else {
-                    free(candidate);
+                    arena_maybe_free(candidate);
                 }
 
-                free(prefix);
+                arena_maybe_free(prefix);
                 if (found_path || *end == '\0') {
                     break;
                 }
@@ -331,15 +345,15 @@ static int builtin_cd(struct shell_state *state, char *const argv[]) {
     if (physical) {
         if (chdir(used_cdpath ? resolved_path : target) != 0) {
             perror("cd");
-            free(old_pwd);
-            free(resolved_path);
+            arena_maybe_free(old_pwd);
+            arena_maybe_free(resolved_path);
             return failure_status;
         }
         new_pwd = path_getcwd_alloc();
         if (new_pwd == NULL) {
             posish_errorf("cd: failed to determine current directory");
-            free(old_pwd);
-            free(resolved_path);
+            arena_maybe_free(old_pwd);
+            arena_maybe_free(resolved_path);
             return failure_status;
         }
     } else {
@@ -350,8 +364,8 @@ static int builtin_cd(struct shell_state *state, char *const argv[]) {
             old_pwd, raw_target);
         if (logical_target == NULL) {
             posish_errorf("cd: failed to build logical path");
-            free(old_pwd);
-            free(resolved_path);
+            arena_maybe_free(old_pwd);
+            arena_maybe_free(resolved_path);
             return failure_status;
         }
         /*
@@ -360,17 +374,17 @@ static int builtin_cd(struct shell_state *state, char *const argv[]) {
          */
         if (chdir(raw_target) != 0) {
             perror("cd");
-            free(old_pwd);
-            free(resolved_path);
-            free(logical_target);
+            arena_maybe_free(old_pwd);
+            arena_maybe_free(resolved_path);
+            arena_maybe_free(logical_target);
             return failure_status;
         }
         if (strcmp(logical_target, raw_target) != 0 &&
             chdir(logical_target) != 0) {
             perror("cd");
-            free(old_pwd);
-            free(resolved_path);
-            free(logical_target);
+            arena_maybe_free(old_pwd);
+            arena_maybe_free(resolved_path);
+            arena_maybe_free(logical_target);
             return failure_status;
         }
         new_pwd = logical_target;
@@ -378,17 +392,17 @@ static int builtin_cd(struct shell_state *state, char *const argv[]) {
     }
 
     if (vars_set(state, "OLDPWD", old_pwd, true) != 0) {
-        free(old_pwd);
-        free(resolved_path);
-        free(logical_target);
-        free(new_pwd);
+        arena_maybe_free(old_pwd);
+        arena_maybe_free(resolved_path);
+        arena_maybe_free(logical_target);
+        arena_maybe_free(new_pwd);
         return 1;
     }
     if (vars_set(state, "PWD", new_pwd, true) != 0) {
-        free(old_pwd);
-        free(resolved_path);
-        free(logical_target);
-        free(new_pwd);
+        arena_maybe_free(old_pwd);
+        arena_maybe_free(resolved_path);
+        arena_maybe_free(logical_target);
+        arena_maybe_free(new_pwd);
         return 1;
     }
 
@@ -396,10 +410,10 @@ static int builtin_cd(struct shell_state *state, char *const argv[]) {
         puts(new_pwd);
     }
 
-    free(old_pwd);
-    free(resolved_path);
-    free(logical_target);
-    free(new_pwd);
+    arena_maybe_free(old_pwd);
+    arena_maybe_free(resolved_path);
+    arena_maybe_free(logical_target);
+    arena_maybe_free(new_pwd);
     return 0;
 }
 
@@ -911,16 +925,16 @@ static int builtin_kill(char *const argv[]) {
 done:
     for (i = 0; i < argc; i++) {
         if (converted[i] != NULL && converted[i] != argv[i]) {
-            free(converted[i]);
+            arena_maybe_free(converted[i]);
         }
     }
     if (final_argv != NULL) {
         for (i = 0; i < final_argc; i++) {
             final_argv[i] = NULL;
         }
-        free(final_argv);
+        arena_maybe_free(final_argv);
     }
-    free(converted);
+    arena_maybe_free(converted);
     return status;
 }
 
@@ -1001,7 +1015,7 @@ static int alias_print_entry(const char *name, const char *value) {
         return 1;
     }
     printf("%s=%s\n", name, quoted);
-    free(quoted);
+    arena_maybe_free(quoted);
     return 0;
 }
 
@@ -1048,10 +1062,10 @@ static int builtin_alias(char *const argv[]) {
             name_buf[name_len] = '\0';
 
             if (alias_print_entry(name_buf, value) != 0) {
-                free(name_buf);
+                arena_maybe_free(name_buf);
                 return 1;
             }
-            free(name_buf);
+            arena_maybe_free(name_buf);
         }
         return 0;
     }
@@ -1078,15 +1092,15 @@ static int builtin_alias(char *const argv[]) {
             value = getenv(key);
             if (value == NULL) {
                 posish_errorf("alias: %s: not found", argv[i]);
-                free(key);
+                arena_maybe_free(key);
                 status = 1;
                 continue;
             }
             if (alias_print_entry(argv[i], value) != 0) {
-                free(key);
+                arena_maybe_free(key);
                 return 1;
             }
-            free(key);
+            arena_maybe_free(key);
             continue;
         }
 
@@ -1101,25 +1115,25 @@ static int builtin_alias(char *const argv[]) {
 
         if (!alias_name_valid(name)) {
             posish_errorf("alias: invalid name: %s", name);
-            free(name);
+            arena_maybe_free(name);
             status = 1;
             continue;
         }
 
         key = alias_env_key(name);
         if (key == NULL) {
-            free(name);
+            arena_maybe_free(name);
             return 1;
         }
         if (setenv(key, value, 1) != 0) {
             perror("setenv");
-            free(key);
-            free(name);
+            arena_maybe_free(key);
+            arena_maybe_free(name);
             return 1;
         }
 
-        free(key);
-        free(name);
+        arena_maybe_free(key);
+        arena_maybe_free(name);
     }
 
     return status;
@@ -1180,9 +1194,9 @@ static int builtin_unalias(char *const argv[]) {
             if (key == NULL) {
                 perror("malloc");
                 for (k = 0; k < key_count; k++) {
-                    free(keys[k]);
+                    arena_maybe_free(keys[k]);
                 }
-                free(keys);
+                arena_maybe_free(keys);
                 return 1;
             }
             memcpy(key, environ[k], len);
@@ -1196,9 +1210,9 @@ static int builtin_unalias(char *const argv[]) {
                 perror("unsetenv");
                 status = 1;
             }
-            free(keys[k]);
+            arena_maybe_free(keys[k]);
         }
-        free(keys);
+        arena_maybe_free(keys);
     }
 
     for (; argv[i] != NULL; i++) {
@@ -1216,16 +1230,16 @@ static int builtin_unalias(char *const argv[]) {
         }
         if (getenv(key) == NULL) {
             posish_errorf("unalias: %s: not found", argv[i]);
-            free(key);
+            arena_maybe_free(key);
             status = 1;
             continue;
         }
         if (unsetenv(key) != 0) {
             perror("unsetenv");
-            free(key);
+            arena_maybe_free(key);
             return 1;
         }
-        free(key);
+        arena_maybe_free(key);
     }
     return status;
 }
@@ -1308,8 +1322,11 @@ static int builtin_getopts(struct shell_state *state, char *const argv[]) {
     if (getopts_last_optstring == NULL ||
         strcmp(getopts_last_optstring, optstring) != 0 ||
         optind != getopts_last_optind) {
-        free(getopts_last_optstring);
-        getopts_last_optstring = arena_xstrdup(optstring);
+        arena_maybe_free(getopts_last_optstring);
+        getopts_last_optstring = xstrdup_heap(optstring);
+        if (getopts_last_optstring == NULL) {
+            return 1;
+        }
         getopts_nextchar_index = 0;
     }
 

@@ -20,9 +20,9 @@ void redir_vec_free(struct redir_vec *redirs) {
     size_t i;
 
     for (i = 0; i < redirs->len; i++) {
-        free(redirs->items[i].path);
+        arena_maybe_free(redirs->items[i].path);
     }
-    free(redirs->items);
+    arena_maybe_free(redirs->items);
     redirs->items = NULL;
     redirs->len = 0;
 }
@@ -80,7 +80,7 @@ void fd_backup_restore(struct fd_backup_vec *backups) {
         }
     }
 
-    free(backups->items);
+    arena_maybe_free(backups->items);
     backups->items = NULL;
     backups->len = 0;
 }

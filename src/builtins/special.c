@@ -156,8 +156,8 @@ static int remove_shell_function(struct shell_state *state, const char *name) {
 
     for (i = 0; i < state->function_count; i++) {
         if (strcmp(state->functions[i].name, name) == 0) {
-            free(state->functions[i].name);
-            free(state->functions[i].body);
+            arena_maybe_free(state->functions[i].name);
+            arena_maybe_free(state->functions[i].body);
             if (i + 1 < state->function_count) {
                 memmove(&state->functions[i], &state->functions[i + 1],
                         sizeof(*state->functions) * (state->function_count - (i + 1)));
@@ -204,13 +204,13 @@ static char *find_command_path(const char *name, bool use_standard_path) {
             absolute = malloc(clen + 1 + nlen + 1);
             if (absolute == NULL) {
                 perror("malloc");
-                free(cwd);
+                arena_maybe_free(cwd);
                 return NULL;
             }
             memcpy(absolute, cwd, clen);
             absolute[clen] = '/';
             memcpy(absolute + clen + 1, name, nlen + 1);
-            free(cwd);
+            arena_maybe_free(cwd);
             return absolute;
         }
         return NULL;
@@ -252,7 +252,7 @@ static char *find_command_path(const char *name, bool use_standard_path) {
         if (access(candidate, X_OK) == 0) {
             return candidate;
         }
-        free(candidate);
+        arena_maybe_free(candidate);
 
         if (*end == '\0') {
             break;
@@ -308,7 +308,7 @@ static char *find_dot_script_path(const char *name) {
         if (access(candidate, R_OK) == 0) {
             return candidate;
         }
-        free(candidate);
+        arena_maybe_free(candidate);
 
         if (colon == NULL) {
             break;
@@ -337,7 +337,7 @@ static char *command_alias_value_dup(const char *name) {
     memcpy(key, prefix, plen);
     memcpy(key + plen, name, nlen + 1);
     value = getenv(key);
-    free(key);
+    arena_maybe_free(key);
     if (value == NULL) {
         return NULL;
     }
@@ -370,7 +370,7 @@ static int builtin_command_describe(struct shell_state *state, char *const argv[
                 printf("%s() { %s; }\n", argv[i], path);
             }
             fflush(stdout);
-            free(path);
+            arena_maybe_free(path);
             continue;
         } else if (strcmp(argv[i], "test") == 0 || strcmp(argv[i], "[") == 0) {
             /* Keep test-suite gate semantics honest: report builtin nature. */
@@ -399,7 +399,7 @@ static int builtin_command_describe(struct shell_state *state, char *const argv[
             printf("%s\n", path);
         }
         fflush(stdout);
-        free(path);
+        arena_maybe_free(path);
     }
 
     return status;
@@ -495,7 +495,7 @@ static int builtin_command(struct shell_state *state, char *const argv[]) {
         }
         if (setenv("PATH", "/bin:/usr/bin", 1) != 0) {
             perror("setenv");
-            free(saved_path_copy);
+            arena_maybe_free(saved_path_copy);
             return 1;
         }
         restore_path = true;
@@ -555,7 +555,7 @@ done:
             }
         }
     }
-    free(saved_path_copy);
+    arena_maybe_free(saved_path_copy);
     return status;
 }
 
@@ -563,9 +563,9 @@ static void free_positional_parameters(struct shell_state *state) {
     size_t i;
 
     for (i = 0; i < state->positional_count; i++) {
-        free(state->positional_params[i]);
+        arena_maybe_free(state->positional_params[i]);
     }
-    free(state->positional_params);
+    arena_maybe_free(state->positional_params);
     state->positional_params = NULL;
     state->positional_count = 0;
 }
@@ -583,9 +583,10 @@ static void set_positional_parameters(struct shell_state *state, char *const arg
     }
 
     state->positional_params =
-        arena_xmalloc(sizeof(*state->positional_params) * count);
+        arena_alloc_in(&state->arena_perm, sizeof(*state->positional_params) * count);
     for (i = 0; i < count; i++) {
-        state->positional_params[i] = arena_xstrdup(argv[start_index + i]);
+        state->positional_params[i] =
+            arena_strdup_in(&state->arena_perm, argv[start_index + i]);
     }
     state->positional_count = count;
 }
@@ -627,7 +628,7 @@ static int builtin_shift(struct shell_state *state, char *const argv[]) {
     }
 
     for (i = 0; i < shift_count; i++) {
-        free(state->positional_params[i]);
+        arena_maybe_free(state->positional_params[i]);
     }
 
     remain = state->positional_count - shift_count;
@@ -637,7 +638,7 @@ static int builtin_shift(struct shell_state *state, char *const argv[]) {
     }
     state->positional_count = remain;
     if (remain == 0) {
-        free(state->positional_params);
+        arena_maybe_free(state->positional_params);
         state->positional_params = NULL;
     }
     return 0;
@@ -857,7 +858,7 @@ static int builtin_dot(struct shell_state *state, char *const argv[]) {
     status = shell_run_file(state, path);
     state->dot_depth--;
     state->interactive = saved_interactive;
-    free(path);
+    arena_maybe_free(path);
 
     if (state->return_requested) {
         status = state->return_status;
@@ -1035,18 +1036,18 @@ static int print_exported_variables(void) {
         memcpy(name, entry, nlen);
         name[nlen] = '\0';
         if (!vars_is_name_valid(name)) {
-            free(name);
+            arena_maybe_free(name);
             continue;
         }
 
         quoted = double_quote_for_eval(eq + 1);
         if (quoted == NULL) {
-            free(name);
+            arena_maybe_free(name);
             return 1;
         }
         printf("export %s=%s\n", name, quoted);
-        free(quoted);
-        free(name);
+        arena_maybe_free(quoted);
+        arena_maybe_free(name);
     }
     fflush(stdout);
 
@@ -1072,7 +1073,7 @@ static int print_readonly_variables(const struct shell_state *state) {
             return 1;
         }
         printf("readonly %s=%s\n", name, quoted);
-        free(quoted);
+        arena_maybe_free(quoted);
     }
     fflush(stdout);
 
@@ -1194,8 +1195,8 @@ static int builtin_export(struct shell_state *state, char *const argv[]) {
             if (vars_set_with_mode(state, name, tilde_value, true, true) != 0) {
                 status = 1;
             }
-            free(tilde_value);
-            free(name);
+            arena_maybe_free(tilde_value);
+            arena_maybe_free(name);
             continue;
         }
 
@@ -1262,12 +1263,12 @@ static int builtin_eval(struct shell_state *state, char *const argv[]) {
     command[pos] = '\0';
 
     if (command_is_blank(command)) {
-        free(command);
+        arena_maybe_free(command);
         return 0;
     }
 
     status = shell_run_command(state, command);
-    free(command);
+    arena_maybe_free(command);
     return status;
 }
 
@@ -1283,7 +1284,7 @@ static void read_buf_append(char **buf, size_t *len, size_t *cap, char ch) {
         new_buf = realloc(*buf, new_cap);
         if (new_buf == NULL) {
             perror("realloc");
-            free(*buf);
+            arena_maybe_free(*buf);
             *buf = NULL;
             *len = 0;
             *cap = 0;
@@ -1538,7 +1539,7 @@ static int builtin_read(struct shell_state *state, char *const argv[]) {
                 continue;
             }
             perror("read");
-            free(line);
+            arena_maybe_free(line);
             return 1;
         }
         saw_any = true;
@@ -1556,7 +1557,7 @@ static int builtin_read(struct shell_state *state, char *const argv[]) {
                     continue;
                 }
                 perror("read");
-                free(line);
+                arena_maybe_free(line);
                 return 1;
             }
             saw_any = true;
@@ -1612,11 +1613,11 @@ static int builtin_read(struct shell_state *state, char *const argv[]) {
 
         value = read_unescape_segment(line, 0, len);
         if (value == NULL) {
-            free(line);
+            arena_maybe_free(line);
             return 1;
         }
         assign_status = vars_set_assignment(state, "REPLY", value, true);
-        free(value);
+        arena_maybe_free(value);
     } else if (ifs[0] == '\0') {
         size_t vi;
 
@@ -1635,10 +1636,10 @@ static int builtin_read(struct shell_state *state, char *const argv[]) {
             }
             if (vars_set_assignment(state, argv[i + vi], value, true) != 0) {
                 assign_status = 1;
-                free(value);
+                arena_maybe_free(value);
                 break;
             }
-            free(value);
+            arena_maybe_free(value);
         }
     } else {
         size_t pos;
@@ -1682,14 +1683,14 @@ static int builtin_read(struct shell_state *state, char *const argv[]) {
             }
             if (vars_set_assignment(state, argv[i + vi], value, true) != 0) {
                 assign_status = 1;
-                free(value);
+                arena_maybe_free(value);
                 break;
             }
-            free(value);
+            arena_maybe_free(value);
         }
     }
 
-    free(line);
+    arena_maybe_free(line);
     if (assign_status != 0) {
         return assign_status;
     }
@@ -1744,8 +1745,8 @@ static int builtin_readonly(struct shell_state *state, char *const argv[]) {
             if (vars_mark_readonly(state, name, tilde_value, true) != 0) {
                 status = 1;
             }
-            free(tilde_value);
-            free(name);
+            arena_maybe_free(tilde_value);
+            arena_maybe_free(name);
             continue;
         }
 
@@ -2018,7 +2019,7 @@ static int trap_print_entry(const char *spec, const char *action, bool print_all
         return 1;
     }
     printf("trap -- %s %s\n", quoted, spec);
-    free(quoted);
+    arena_maybe_free(quoted);
     return 0;
 }
 
@@ -2102,7 +2103,7 @@ static int trap_set_signal_command(struct shell_state *state, int signo,
     }
     strcpy(copy, command);
 
-    free(state->signal_traps[signo]);
+    arena_maybe_free(state->signal_traps[signo]);
     state->signal_traps[signo] = copy;
     signals_clear_pending(signo);
     return 0;
@@ -2185,7 +2186,7 @@ static int builtin_trap(struct shell_state *state, char *const argv[]) {
     for (i = argi; argv[i] != NULL; i++) {
         if (strcmp(argv[i], "EXIT") == 0 || strcmp(argv[i], "0") == 0) {
             if (strcmp(action, "-") == 0) {
-                free(state->exit_trap);
+                arena_maybe_free(state->exit_trap);
                 state->exit_trap = NULL;
                 trace_log(POSISH_TRACE_TRAPS, "trap EXIT cleared");
             } else {
@@ -2198,7 +2199,7 @@ static int builtin_trap(struct shell_state *state, char *const argv[]) {
                 }
                 strcpy(command, action);
 
-                free(state->exit_trap);
+                arena_maybe_free(state->exit_trap);
                 state->exit_trap = command;
                 trace_log(POSISH_TRACE_TRAPS, "trap EXIT set command=%s",
                           state->exit_trap);
@@ -2215,7 +2216,7 @@ static int builtin_trap(struct shell_state *state, char *const argv[]) {
             }
 
             if (strcmp(action, "-") == 0) {
-                free(state->signal_traps[signo]);
+                arena_maybe_free(state->signal_traps[signo]);
                 state->signal_traps[signo] = NULL;
                 state->signal_cleared[signo] = !inherited_ignore_locked(state, signo);
                 signals_clear_pending(signo);
@@ -2240,7 +2241,7 @@ static int builtin_trap(struct shell_state *state, char *const argv[]) {
                  * In non-interactive shells, inherited SIG_IGN remains sticky.
                  */
                 if (inherited_ignore_locked(state, signo)) {
-                    free(state->signal_traps[signo]);
+                    arena_maybe_free(state->signal_traps[signo]);
                     state->signal_traps[signo] = NULL;
                     state->signal_cleared[signo] = false;
                     signals_clear_pending(signo);

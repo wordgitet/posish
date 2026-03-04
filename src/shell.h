@@ -5,6 +5,8 @@
 #ifndef POSISH_SHELL_H
 #define POSISH_SHELL_H
 
+#include "arena.h"
+
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -66,6 +68,9 @@ struct shell_state {
     size_t unexported_count;
     char **positional_params;
     size_t positional_count;
+    struct arena arena_perm;
+    struct arena arena_script;
+    struct arena arena_cmd;
 };
 
 void shell_state_init(struct shell_state *state);

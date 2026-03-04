@@ -210,13 +210,13 @@ static void free_string_vec(char **vec, size_t len) {
     size_t i;
 
     for (i = 0; i < len; i++) {
-        free(vec[i]);
+        arena_maybe_free(vec[i]);
     }
-    free(vec);
+    arena_maybe_free(vec);
 }
 
 static void word_vec_free(struct word_vec *words) {
-    free(words->items);
+    arena_maybe_free(words->items);
     words->items = NULL;
     words->len = 0;
 }
@@ -225,10 +225,10 @@ static void env_restore_vec_free(struct env_restore_vec *restore) {
     size_t i;
 
     for (i = 0; i < restore->len; i++) {
-        free(restore->items[i].name);
-        free(restore->items[i].old_value);
+        arena_maybe_free(restore->items[i].name);
+        arena_maybe_free(restore->items[i].old_value);
     }
-    free(restore->items);
+    arena_maybe_free(restore->items);
     restore->items = NULL;
     restore->len = 0;
 }
@@ -255,7 +255,7 @@ static char *lookup_alias_value_dup(const char *name) {
 
     key = alias_env_key(name);
     value = getenv(key);
-    free(key);
+    arena_maybe_free(key);
     if (value == NULL) {
         return NULL;
     }
@@ -311,11 +311,11 @@ static void alias_token_vec_free(struct alias_token_vec *vec) {
     size_t i;
 
     for (i = 0; i < vec->len; i++) {
-        free(vec->items[i].leading_ws);
-        free(vec->items[i].text);
-        free(vec->items[i].suppress_alias);
+        arena_maybe_free(vec->items[i].leading_ws);
+        arena_maybe_free(vec->items[i].text);
+        arena_maybe_free(vec->items[i].suppress_alias);
     }
-    free(vec->items);
+    arena_maybe_free(vec->items);
     vec->items = NULL;
     vec->len = 0;
 }
@@ -573,7 +573,7 @@ static int alias_tokenize_with_suppress(const char *text,
             if (alias_token_vec_push(out, input + ws_start, ws_len, input + i, op_len,
                                      true, suppress_alias) != 0) {
                 alias_token_vec_free(out);
-                free(normalized);
+                arena_maybe_free(normalized);
                 return -1;
             }
             i += op_len;
@@ -648,13 +648,13 @@ static int alias_tokenize_with_suppress(const char *text,
             if (alias_token_vec_push(out, input + ws_start, ws_len, input + start,
                                      i - start, false, suppress_alias) != 0) {
                 alias_token_vec_free(out);
-                free(normalized);
+                arena_maybe_free(normalized);
                 return -1;
             }
         }
     }
 
-    free(normalized);
+    arena_maybe_free(normalized);
     return 0;
 }
 
@@ -735,15 +735,15 @@ static int alias_token_vec_replace(struct alias_token_vec *vec, size_t index,
         memcpy(combined_ws, old_leading_ws, old_ws_len);
         memcpy(combined_ws + old_ws_len, new_items[index].leading_ws,
                next_ws_len + 1);
-        free(new_items[index].leading_ws);
+        arena_maybe_free(new_items[index].leading_ws);
         new_items[index].leading_ws = combined_ws;
     }
     vec->items = new_items;
     vec->len = new_len;
-    free(old_items);
-    free(old_leading_ws);
-    free(old_text);
-    free(old_suppress_alias);
+    arena_maybe_free(old_items);
+    arena_maybe_free(old_leading_ws);
+    arena_maybe_free(old_text);
+    arena_maybe_free(old_suppress_alias);
     return 0;
 }
 
@@ -917,15 +917,15 @@ static int rewrite_aliases_for_snippet(struct shell_state *state, const char *te
                             if (alias_tokenize_with_suppress(alias_value,
                                                              next_chain,
                                                              &repl) != 0) {
-                                free(next_chain);
-                                free(alias_value);
+                                arena_maybe_free(next_chain);
+                                arena_maybe_free(alias_value);
                                 alias_token_vec_free(&tokens);
                                 return -1;
                             }
-                            free(next_chain);
+                            arena_maybe_free(next_chain);
                             trailing_alias_blank =
                                 alias_value_has_trailing_blank(alias_value);
-                            free(alias_value);
+                            arena_maybe_free(alias_value);
 
                             if (repl.len == 0) {
                                 alias_token_vec_replace(&tokens, i, &repl);
@@ -1045,8 +1045,8 @@ static void trace_simple_words(struct shell_state *state, char *const words[],
     }
     fputc('\n', stderr);
     fflush(stderr);
-    free(expanded_ps4);
-    free(out.items);
+    arena_maybe_free(expanded_ps4);
+    arena_maybe_free(out.items);
 }
 
 static bool noexec_allows_set_toggle(const char *source) {
@@ -1124,9 +1124,9 @@ static void free_strip_heredoc_markers(struct strip_heredoc_marker *markers,
         return;
     }
     for (i = 0; i < count; i++) {
-        free(markers[i].delimiter);
+        arena_maybe_free(markers[i].delimiter);
     }
-    free(markers);
+    arena_maybe_free(markers);
 }
 
 static char *unquote_strip_heredoc_delimiter(const char *raw, size_t len) {
@@ -1192,7 +1192,7 @@ static int push_strip_heredoc_marker(struct strip_heredoc_marker **markers,
 
     unquoted = unquote_strip_heredoc_delimiter(delimiter_raw, delimiter_raw_len);
     if (unquoted[0] == '\0') {
-        free(unquoted);
+        arena_maybe_free(unquoted);
         return -1;
     }
 
@@ -1520,9 +1520,9 @@ static void free_positional_params(char **params, size_t count) {
     size_t i;
 
     for (i = 0; i < count; i++) {
-        free(params[i]);
+        arena_maybe_free(params[i]);
     }
-    free(params);
+    arena_maybe_free(params);
 }
 
 static void positional_push(struct shell_state *state, char *const argv[], size_t argc,
@@ -1538,10 +1538,12 @@ static void positional_push(struct shell_state *state, char *const argv[], size_
         return;
     }
 
-    state->positional_params = arena_xmalloc(sizeof(*state->positional_params) *
-                                             state->positional_count);
+    state->positional_params =
+        arena_alloc_in(&state->arena_script,
+                       sizeof(*state->positional_params) * state->positional_count);
     for (i = 0; i < state->positional_count; i++) {
-        state->positional_params[i] = arena_xstrdup(argv[i + 1]);
+        state->positional_params[i] =
+            arena_strdup_in(&state->arena_script, argv[i + 1]);
     }
 }
 
@@ -1579,16 +1581,18 @@ static int shell_set_function(struct shell_state *state, const char *name,
 
     idx = find_function_index(state, name);
     if (idx >= 0) {
-        free(state->functions[idx].body);
-        state->functions[idx].body = arena_xstrdup(body);
+        arena_maybe_free(state->functions[idx].body);
+        state->functions[idx].body = arena_strdup_in(&state->arena_perm, body);
         return 0;
     }
 
     state->functions = xrealloc(state->functions,
                                 sizeof(*state->functions) *
                                     (state->function_count + 1));
-    state->functions[state->function_count].name = arena_xstrdup(name);
-    state->functions[state->function_count].body = arena_xstrdup(body);
+    state->functions[state->function_count].name =
+        arena_strdup_in(&state->arena_perm, name);
+    state->functions[state->function_count].body =
+        arena_strdup_in(&state->arena_perm, body);
     state->function_count++;
     return 0;
 }
@@ -2110,8 +2114,8 @@ static bool try_execute_alt_parameter_command(struct shell_state *state,
         *status_out = 0;
     }
 
-    free(name);
-    free(word);
+    arena_maybe_free(name);
+    arena_maybe_free(word);
     return true;
 }
 
@@ -2541,16 +2545,16 @@ static int expand_redirection_operands(struct shell_state *state,
         if (out_vec.len != 1) {
             size_t j;
             for (j = 0; j < out_vec.len; j++) {
-                free(out_vec.items[j]);
+                arena_maybe_free(out_vec.items[j]);
             }
-            free(out_vec.items);
+            arena_maybe_free(out_vec.items);
             posish_errorf("ambiguous redirection");
             return 1;
         }
 
-        free(redirs->items[i].path);
+        arena_maybe_free(redirs->items[i].path);
         redirs->items[i].path = out_vec.items[0];
-        free(out_vec.items);
+        arena_maybe_free(out_vec.items);
 
         if (redirs->items[i].kind == REDIR_DUP_IN ||
             redirs->items[i].kind == REDIR_DUP_OUT) {
@@ -2560,7 +2564,7 @@ static int expand_redirection_operands(struct shell_state *state,
                               redirs->items[i].path);
                 return 1;
             }
-            free(redirs->items[i].path);
+            arena_maybe_free(redirs->items[i].path);
             redirs->items[i].path = NULL;
         }
     }
@@ -2591,10 +2595,10 @@ static int apply_persistent_assignments(struct shell_state *state,
                 state->should_exit = true;
                 state->exit_status = 1;
             }
-            free(name);
+            arena_maybe_free(name);
             return 1;
         }
-        free(name);
+        arena_maybe_free(name);
     }
 
     return 0;
@@ -2660,8 +2664,8 @@ static int apply_temporary_assignments(struct shell_state *state,
                 state->should_exit = true;
                 state->exit_status = 1;
             }
-            free(r.name);
-            free(r.old_value);
+            arena_maybe_free(r.name);
+            arena_maybe_free(r.old_value);
             restore_temporary_assignments(state, restore);
             env_restore_vec_free(restore);
             return 1;
@@ -2992,7 +2996,7 @@ static int execute_simple_command(struct shell_state *state, const char *source,
                     cmd_expanded.items[cmd_expanded.len++] = one_out.items[oi];
                 }
             }
-            free(one_out.items);
+            arena_maybe_free(one_out.items);
         }
     }
 
@@ -3065,10 +3069,10 @@ static int execute_simple_command(struct shell_state *state, const char *source,
             expanded.items[assign_expanded.len + i] = cmd_expanded.items[i];
         }
     }
-    free(assign_expanded.items);
+    arena_maybe_free(assign_expanded.items);
     assign_expanded.items = NULL;
     assign_expanded.len = 0;
-    free(cmd_expanded.items);
+    arena_maybe_free(cmd_expanded.items);
     cmd_expanded.items = NULL;
     cmd_expanded.len = 0;
 
@@ -3103,6 +3107,11 @@ static int execute_simple_command(struct shell_state *state, const char *source,
                 int st;
 
                 local_state = *state;
+                arena_init(&local_state.arena_perm, state->arena_perm.default_block_size);
+                arena_init(&local_state.arena_script,
+                           state->arena_script.default_block_size);
+                arena_init(&local_state.arena_cmd, state->arena_cmd.default_block_size);
+                arena_set_current(&local_state.arena_perm);
                 local_state.should_exit = false;
                 local_state.exit_status = 0;
                 local_state.running_signal_trap = false;
@@ -3226,7 +3235,7 @@ static int execute_simple_command(struct shell_state *state, const char *source,
         }
         fflush(NULL);
         fd_backup_restore(&fd_backups);
-        free(argv);
+        arena_maybe_free(argv);
         redir_vec_free(&redirs);
         word_vec_free(&words);
         lexer_free_tokens(&expanded);
@@ -3342,7 +3351,7 @@ done:
         status = state->last_cmdsub_status;
     }
 
-    free(argv);
+    arena_maybe_free(argv);
     redir_vec_free(&redirs);
     word_vec_free(&words);
     word_vec_free(&raw_words);
@@ -3601,6 +3610,10 @@ static int run_async_list(struct shell_state *state, const char *source) {
         }
 
         local_state = *state;
+        arena_init(&local_state.arena_perm, state->arena_perm.default_block_size);
+        arena_init(&local_state.arena_script, state->arena_script.default_block_size);
+        arena_init(&local_state.arena_cmd, state->arena_cmd.default_block_size);
+        arena_set_current(&local_state.arena_perm);
         local_state.should_exit = false;
         local_state.exit_status = 0;
         local_state.running_signal_trap = false;
@@ -3806,8 +3819,8 @@ static bool split_case_redirection_suffix(const char *source, char **core_out,
     *core_out = dup_trimmed_slice(source, 0, end_pos);
     *suffix_out = dup_trimmed_slice(source, end_pos, strlen(source));
     if ((*suffix_out)[0] == '\0') {
-        free(*core_out);
-        free(*suffix_out);
+        arena_maybe_free(*core_out);
+        arena_maybe_free(*suffix_out);
         *core_out = NULL;
         *suffix_out = NULL;
         return false;
@@ -3845,11 +3858,11 @@ static int execute_command_atom(struct shell_state *state, const char *source,
 
     trimmed = dup_slice(source, 0, strlen(source));
     collapsed = collapse_line_continuations(trimmed);
-    free(trimmed);
+    arena_maybe_free(trimmed);
     trimmed = dup_trimmed_slice(collapsed, 0, strlen(collapsed));
-    free(collapsed);
+    arena_maybe_free(collapsed);
     if (trimmed[0] == '\0') {
-        free(trimmed);
+        arena_maybe_free(trimmed);
         return 0;
     }
 
@@ -3858,7 +3871,7 @@ static int execute_command_atom(struct shell_state *state, const char *source,
      * scripts can turn execution back on. Everything else is parse-only.
      */
     if (state->noexec && !noexec_allows_set_toggle(trimmed)) {
-        free(trimmed);
+        arena_maybe_free(trimmed);
         return 0;
     }
 
@@ -3886,14 +3899,14 @@ static int execute_command_atom(struct shell_state *state, const char *source,
 
     if (parse_function_definition(trimmed, &fn_name, &fn_body)) {
         status = shell_set_function(state, fn_name, fn_body);
-        free(fn_name);
-        free(fn_body);
-        free(trimmed);
+        arena_maybe_free(fn_name);
+        arena_maybe_free(fn_body);
+        arena_maybe_free(trimmed);
         return status;
     }
 
     if (ignore_helper_function_declaration(trimmed)) {
-        free(trimmed);
+        arena_maybe_free(trimmed);
         return 0;
     }
 
@@ -3944,11 +3957,11 @@ if_done:
             fd_backup_restore(&if_backups);
         }
         redir_vec_free(&if_redir_vec);
-        free(if_redirs);
-        free(if_cond);
-        free(if_then);
-        free(if_else);
-        free(trimmed);
+        arena_maybe_free(if_redirs);
+        arena_maybe_free(if_cond);
+        arena_maybe_free(if_then);
+        arena_maybe_free(if_else);
+        arena_maybe_free(trimmed);
         return status;
     }
 
@@ -4021,10 +4034,10 @@ if_done:
         }
         redir_vec_free(&while_redir_vec);
 while_done:
-        free(while_redirs);
-        free(while_cond);
-        free(while_body);
-        free(trimmed);
+        arena_maybe_free(while_redirs);
+        arena_maybe_free(while_cond);
+        arena_maybe_free(while_body);
+        arena_maybe_free(trimmed);
         return status;
     }
 
@@ -4140,11 +4153,11 @@ for_done:
         redir_vec_free(&for_redirs);
         lexer_free_tokens(&for_expanded);
         redir_vec_free(&for_loop_redirs);
-        free(for_redir_suffix);
-        free(for_name);
-        free(for_words);
-        free(for_body);
-        free(trimmed);
+        arena_maybe_free(for_redir_suffix);
+        arena_maybe_free(for_name);
+        arena_maybe_free(for_words);
+        arena_maybe_free(for_body);
+        arena_maybe_free(trimmed);
         return status;
     }
 
@@ -4179,43 +4192,50 @@ for_done:
 
 case_done:
         redir_vec_free(&case_redirs);
-        free(case_core);
-        free(case_redir_suffix);
-        free(trimmed);
+        arena_maybe_free(case_core);
+        arena_maybe_free(case_redir_suffix);
+        arena_maybe_free(trimmed);
         return status;
     }
 
     if (try_execute_case_command(state, trimmed, &status, execute_program_text)) {
-        free(trimmed);
+        arena_maybe_free(trimmed);
         return status;
     }
 
     if (try_execute_alt_parameter_command(state, trimmed, &status)) {
-        free(trimmed);
+        arena_maybe_free(trimmed);
         return status;
     }
 
     if (unwrap_subshell_group(trimmed, &inner, &subshell_redirs)) {
         status = run_subshell_group_command(state, inner, subshell_redirs);
-        free(inner);
-        free(subshell_redirs);
+        arena_maybe_free(inner);
+        arena_maybe_free(subshell_redirs);
     } else if (unwrap_brace_group(trimmed, &brace_inner, &brace_redirs)) {
         status = run_brace_group_command(state, brace_inner, brace_redirs);
-        free(brace_inner);
-        free(brace_redirs);
+        arena_maybe_free(brace_inner);
+        arena_maybe_free(brace_redirs);
     } else {
         status = execute_simple_command(state, trimmed, allow_builtin);
     }
 
-    free(trimmed);
+    arena_maybe_free(trimmed);
     return status;
 }
 
 static void exec_child_command(struct shell_state *parent_state, const char *source) {
     struct shell_state local_state;
+    struct arena_mark child_mark;
     int status;
 
     local_state = *parent_state;
+    arena_init(&local_state.arena_perm, parent_state->arena_perm.default_block_size);
+    arena_init(&local_state.arena_script,
+               parent_state->arena_script.default_block_size);
+    arena_init(&local_state.arena_cmd, parent_state->arena_cmd.default_block_size);
+    arena_set_current(&local_state.arena_cmd);
+    arena_mark_take(&local_state.arena_cmd, &child_mark);
     local_state.should_exit = false;
     local_state.exit_status = 0;
     local_state.running_signal_trap = false;
@@ -4223,6 +4243,7 @@ static void exec_child_command(struct shell_state *parent_state, const char *sou
     local_state.main_context = false;
 
     status = execute_command_atom(&local_state, source, true);
+    arena_mark_rewind(&local_state.arena_cmd, &child_mark);
     if (local_state.should_exit) {
         status = local_state.exit_status;
     }
@@ -4255,7 +4276,7 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
 
     normalized = collapse_line_continuations(source);
     work = dup_trimmed_slice(normalized, 0, strlen(normalized));
-    free(normalized);
+    arena_maybe_free(normalized);
     cursor = work;
     negate = false;
 
@@ -4390,7 +4411,7 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
                 commands = xrealloc(commands, sizeof(*commands) * (cmd_len + 1));
                 commands[cmd_len++] = part;
             } else {
-                free(part);
+                arena_maybe_free(part);
             }
 
             if (ch == '\0') {
@@ -4402,8 +4423,8 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
     }
 
     if (cmd_len == 0) {
-        free(commands);
-        free(work);
+        arena_maybe_free(commands);
+        arena_maybe_free(work);
         return 0;
     }
 
@@ -4420,7 +4441,7 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
         state->errexit_ignored = status != 0 && ignored;
         state->last_status = status;
         free_string_vec(commands, cmd_len);
-        free(work);
+        arena_maybe_free(work);
         if (negate) {
             state->errexit_ignored = true;
             state->last_status = status == 0 ? 1 : 0;
@@ -4447,9 +4468,9 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
             if (pipe(pipefd) != 0) {
                 perror("pipe");
                 free_string_vec(commands, cmd_len);
-                free(pids);
-                free(command_statuses);
-                free(work);
+                arena_maybe_free(pids);
+                arena_maybe_free(command_statuses);
+                arena_maybe_free(work);
                 return 1;
             }
         }
@@ -4462,9 +4483,9 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
                 close(pipefd[1]);
             }
             free_string_vec(commands, cmd_len);
-            free(pids);
-            free(command_statuses);
-            free(work);
+            arena_maybe_free(pids);
+            arena_maybe_free(command_statuses);
+            arena_maybe_free(work);
             return 1;
         }
 
@@ -4582,9 +4603,9 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
     }
 
     free_string_vec(commands, cmd_len);
-    free(pids);
-    free(command_statuses);
-    free(work);
+    arena_maybe_free(pids);
+    arena_maybe_free(command_statuses);
+    arena_maybe_free(work);
 
     if (negate) {
         state->errexit_ignored = true;
@@ -4622,7 +4643,7 @@ static int execute_andor(struct shell_state *state, const char *source) {
      */
     if (compound_needs_single_atom(source)) {
         status = execute_pipeline(state, source);
-        free(normalized);
+        arena_maybe_free(normalized);
         return status;
     }
 
@@ -4770,7 +4791,7 @@ static int execute_andor(struct shell_state *state, const char *source) {
                 parts = xrealloc(parts, sizeof(*parts) * (part_len + 1));
                 parts[part_len++] = part;
             } else {
-                free(part);
+                arena_maybe_free(part);
             }
 
             if (ch == '\0') {
@@ -4791,9 +4812,9 @@ static int execute_andor(struct shell_state *state, const char *source) {
     }
 
     if (part_len == 0) {
-        free(parts);
-        free(ops);
-        free(normalized);
+        arena_maybe_free(parts);
+        arena_maybe_free(ops);
+        arena_maybe_free(normalized);
         return 0;
     }
 
@@ -4801,8 +4822,8 @@ static int execute_andor(struct shell_state *state, const char *source) {
     errexit_ignored = state->errexit_ignored;
     if (state->should_exit || has_pending_flow_control(state)) {
         free_string_vec(parts, part_len);
-        free(ops);
-        free(normalized);
+        arena_maybe_free(ops);
+        arena_maybe_free(normalized);
         state->errexit_ignored = status != 0 && errexit_ignored;
         return status;
     }
@@ -4834,8 +4855,8 @@ static int execute_andor(struct shell_state *state, const char *source) {
     }
 
     free_string_vec(parts, part_len);
-    free(ops);
-    free(normalized);
+    arena_maybe_free(ops);
+    arena_maybe_free(normalized);
     state->errexit_ignored = status != 0 && errexit_ignored;
     return status;
 }
@@ -4864,29 +4885,29 @@ char *exec_alias_expand_preview(struct shell_state *state, const char *source) {
 
     logical = collapse_line_continuations(source);
     part = dup_trimmed_slice(logical, 0, strlen(logical));
-    free(logical);
+    arena_maybe_free(logical);
     if (part[0] == '\0') {
-        free(part);
+        arena_maybe_free(part);
         return NULL;
     }
 
     rewritten = NULL;
     changed = false;
     if (rewrite_aliases_for_snippet(state, part, &rewritten, &changed) != 0) {
-        free(part);
+        arena_maybe_free(part);
         return NULL;
     }
     if (changed) {
-        free(part);
+        arena_maybe_free(part);
         part = rewritten;
     } else {
-        free(rewritten);
-        free(part);
+        arena_maybe_free(rewritten);
+        arena_maybe_free(part);
         return NULL;
     }
 
     if (part[0] == '\0') {
-        free(part);
+        arena_maybe_free(part);
         return NULL;
     }
     return part;
@@ -4920,6 +4941,9 @@ static int execute_program_text_internal(struct shell_state *state,
     char *pending_function_head;
     char *pending_raw;
     size_t pending_start;
+    struct arena *saved_arena;
+    struct arena_mark program_mark;
+    bool have_program_mark;
 
     quote = '\0';
     paren_depth = 0;
@@ -4934,6 +4958,11 @@ static int execute_program_text_internal(struct shell_state *state,
     pending_function_head = NULL;
     pending_raw = NULL;
     pending_start = 0;
+    saved_arena = arena_get_current();
+    have_program_mark = saved_arena != NULL;
+    if (have_program_mark) {
+        arena_mark_take(saved_arena, &program_mark);
+    }
 
     for (i = 0;; i++) {
         char ch;
@@ -5087,9 +5116,9 @@ static int execute_program_text_internal(struct shell_state *state,
                 memcpy(raw_part, pending_raw, pending_len);
                 memcpy(raw_part + pending_len, chunk_raw, chunk_len + 1);
                 command_start = pending_start;
-                free(pending_raw);
+                arena_maybe_free(pending_raw);
                 pending_raw = NULL;
-                free(chunk_raw);
+                arena_maybe_free(chunk_raw);
             } else {
                 raw_part = chunk_raw;
                 command_start = start;
@@ -5097,7 +5126,7 @@ static int execute_program_text_internal(struct shell_state *state,
 
             logical_part = collapse_line_continuations(raw_part);
             part = dup_trimmed_slice(logical_part, 0, strlen(logical_part));
-            free(logical_part);
+            arena_maybe_free(logical_part);
             if (part[0] != '\0') {
                 bool alias_changed;
 
@@ -5109,23 +5138,23 @@ static int execute_program_text_internal(struct shell_state *state,
                     if (rewrite_aliases_for_snippet(state, part,
                                                     &alias_rewritten_part,
                                                     &alias_changed) != 0) {
-                        free(part);
-                        free(raw_part);
+                        arena_maybe_free(part);
+                        arena_maybe_free(raw_part);
                         status = 2;
                         break;
                     }
                     if (alias_changed) {
-                        free(part);
+                        arena_maybe_free(part);
                         part = alias_rewritten_part;
                     } else {
-                        free(alias_rewritten_part);
+                        arena_maybe_free(alias_rewritten_part);
                     }
 
                     if (part[0] == '\0') {
                         /* Alias-expanded blank commands preserve prior $? state. */
                         status = state->last_status;
-                        free(part);
-                        free(raw_part);
+                        arena_maybe_free(part);
+                        arena_maybe_free(raw_part);
                         if (ch == '\0') {
                             break;
                         }
@@ -5144,8 +5173,8 @@ static int execute_program_text_internal(struct shell_state *state,
                         pending_raw[raw_len] = ch;
                         pending_raw[raw_len + 1] = '\0';
                         pending_start = command_start;
-                        free(part);
-                        free(raw_part);
+                        arena_maybe_free(part);
+                        arena_maybe_free(raw_part);
                         start = i + 1;
                         pending_heredoc = false;
                         continue;
@@ -5163,15 +5192,15 @@ static int execute_program_text_internal(struct shell_state *state,
                     memcpy(combined, pending_function_head, hlen);
                     combined[hlen] = '\n';
                     memcpy(combined + hlen + 1, part, plen + 1);
-                    free(pending_function_head);
-                    free(part);
+                    arena_maybe_free(pending_function_head);
+                    arena_maybe_free(part);
                     pending_function_head = NULL;
                     part = combined;
                 }
 
                 if (looks_like_function_header_only(part) && ch != '\0') {
                     pending_function_head = part;
-                    free(raw_part);
+                    arena_maybe_free(raw_part);
                     start = i + 1;
                     pending_heredoc = false;
                     continue;
@@ -5196,8 +5225,8 @@ static int execute_program_text_internal(struct shell_state *state,
                     fn_probe_body = NULL;
                     snippet_is_function_def =
                         parse_function_definition(part, &fn_probe_name, &fn_probe_body);
-                    free(fn_probe_name);
-                    free(fn_probe_body);
+                    arena_maybe_free(fn_probe_name);
+                    arena_maybe_free(fn_probe_body);
 
                     /*
                      * Function definitions with here-doc redirections must keep
@@ -5229,8 +5258,8 @@ static int execute_program_text_internal(struct shell_state *state,
                             state->should_exit = true;
                             state->exit_status = status;
                         }
-                        free(part);
-                        free(raw_part);
+                        arena_maybe_free(part);
+                        arena_maybe_free(raw_part);
                         if (state->should_exit) {
                             break;
                         }
@@ -5257,7 +5286,7 @@ static int execute_program_text_internal(struct shell_state *state,
                             status = execute_program_text_internal(state,
                                                                    alias_cleaned,
                                                                    false);
-                            free(alias_cleaned);
+                            arena_maybe_free(alias_cleaned);
                         } else {
                             status = execute_andor(state, part);
                         }
@@ -5271,18 +5300,18 @@ static int execute_program_text_internal(struct shell_state *state,
                 }
                 shell_run_pending_traps(state);
                 if (state->should_exit) {
-                    free(part);
-                    free(raw_part);
+                    arena_maybe_free(part);
+                    arena_maybe_free(raw_part);
                     break;
                 }
                 if (has_pending_flow_control(state)) {
-                    free(part);
-                    free(raw_part);
+                    arena_maybe_free(part);
+                    arena_maybe_free(raw_part);
                     break;
                 }
             }
-            free(part);
-            free(raw_part);
+            arena_maybe_free(part);
+            arena_maybe_free(raw_part);
 
             if (ch == '\0') {
                 break;
@@ -5295,9 +5324,13 @@ static int execute_program_text_internal(struct shell_state *state,
 
     if (pending_function_head != NULL) {
         status = execute_andor(state, pending_function_head);
-        free(pending_function_head);
+        arena_maybe_free(pending_function_head);
     }
-    free(pending_raw);
+    arena_maybe_free(pending_raw);
+    if (have_program_mark) {
+        arena_mark_rewind(saved_arena, &program_mark);
+        arena_set_current(saved_arena);
+    }
 
     return status;
 }
@@ -5317,8 +5350,8 @@ int exec_run_program(struct shell_state *state, const struct ast_program *progra
         normalized = collapse_line_continuations(program->source);
     }
     cleaned = strip_comments(normalized);
-    free(normalized);
+    arena_maybe_free(normalized);
     status = execute_program_text(state, cleaned);
-    free(cleaned);
+    arena_maybe_free(cleaned);
     return status;
 }

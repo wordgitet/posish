@@ -26,8 +26,18 @@ struct heredoc_marker {
     bool strip_tabs;
 };
 
+struct pending_heredoc_state {
+    struct heredoc_marker *markers;
+    size_t marker_count;
+    size_t marker_index;
+    bool active;
+};
+
 static size_t skip_braced_param(const char *buf, size_t i, size_t len,
                                 bool dquote_context);
+static bool collect_heredoc_markers(const char *buf, size_t len,
+                                    struct heredoc_marker **markers_out,
+                                    size_t *count_out);
 
 static size_t skip_backtick_subst(const char *buf, size_t i, size_t len) {
     i++;
@@ -231,9 +241,120 @@ static void free_heredoc_markers(struct heredoc_marker *markers, size_t count) {
     size_t i;
 
     for (i = 0; i < count; i++) {
-        free(markers[i].delimiter);
+        arena_maybe_free(markers[i].delimiter);
     }
-    free(markers);
+    arena_maybe_free(markers);
+}
+
+static void pending_heredoc_clear(struct pending_heredoc_state *state) {
+    if (state == NULL) {
+        return;
+    }
+    if (state->markers != NULL) {
+        free_heredoc_markers(state->markers, state->marker_count);
+    }
+    state->markers = NULL;
+    state->marker_count = 0;
+    state->marker_index = 0;
+    state->active = false;
+}
+
+static bool pending_heredoc_line_matches(const struct heredoc_marker *marker,
+                                         const char *line, size_t len) {
+    size_t cmp_start;
+    size_t delim_len;
+
+    cmp_start = 0;
+    if (marker->strip_tabs) {
+        while (cmp_start < len && line[cmp_start] == '\t') {
+            cmp_start++;
+        }
+    }
+
+    delim_len = strlen(marker->delimiter);
+    return len >= cmp_start && len - cmp_start == delim_len &&
+           strncmp(line + cmp_start, marker->delimiter, delim_len) == 0;
+}
+
+static void pending_heredoc_consume_line(struct pending_heredoc_state *state,
+                                         const char *line, size_t len) {
+    if (!state->active) {
+        return;
+    }
+    if (state->marker_index >= state->marker_count) {
+        state->active = false;
+        return;
+    }
+
+    if (pending_heredoc_line_matches(&state->markers[state->marker_index], line,
+                                     len)) {
+        state->marker_index++;
+        if (state->marker_index >= state->marker_count) {
+            state->active = false;
+        }
+    }
+}
+
+static void pending_heredoc_consume_existing_body(
+    struct pending_heredoc_state *state, const char *buf, size_t len) {
+    size_t pos;
+
+    if (!state->active) {
+        return;
+    }
+
+    pos = 0;
+    while (pos < len && buf[pos] != '\n') {
+        pos++;
+    }
+    if (pos >= len) {
+        return;
+    }
+    pos++;
+
+    while (pos <= len && state->active) {
+        size_t line_start;
+        size_t line_end;
+
+        line_start = pos;
+        while (pos < len && buf[pos] != '\n') {
+            pos++;
+        }
+        line_end = pos;
+        pending_heredoc_consume_line(state, buf + line_start, line_end - line_start);
+        if (pos >= len) {
+            break;
+        }
+        pos++;
+    }
+}
+
+/*
+ * Initialize incremental heredoc tracking once syntax is complete without
+ * considering heredoc bodies. This avoids full-buffer rescans while very long
+ * heredoc bodies are being accumulated.
+ */
+static bool pending_heredoc_begin(struct pending_heredoc_state *state,
+                                  const char *buf, size_t len) {
+    struct heredoc_marker *markers;
+    size_t marker_count;
+
+    markers = NULL;
+    marker_count = 0;
+    pending_heredoc_clear(state);
+    if (!collect_heredoc_markers(buf, len, &markers, &marker_count)) {
+        return true;
+    }
+    if (marker_count == 0) {
+        return false;
+    }
+
+    state->markers = markers;
+    state->marker_count = marker_count;
+    state->marker_index = 0;
+    state->active = true;
+    pending_heredoc_consume_existing_body(state, buf, len);
+    return state->active;
 }
 
 static char *unquote_heredoc_delimiter(const char *raw, size_t len) {
@@ -429,7 +550,7 @@ static bool collect_heredoc_markers(const char *buf, size_t len,
 
                 grown = realloc(markers, sizeof(*markers) * (count + 1));
                 if (grown == NULL) {
-                    free(delim);
+                    arena_maybe_free(delim);
                     free_heredoc_markers(markers, count);
                     return false;
                 }
@@ -721,7 +842,7 @@ static bool looks_like_function_header_only_input(const char *buf, size_t len) {
         i++;
     }
     if (!(isalpha((unsigned char)collapsed[i]) || collapsed[i] == '_')) {
-        free(collapsed);
+        arena_maybe_free(collapsed);
         return false;
     }
     i++;
@@ -732,7 +853,7 @@ static bool looks_like_function_header_only_input(const char *buf, size_t len) {
         i++;
     }
     if (collapsed[i] != '(') {
-        free(collapsed);
+        arena_maybe_free(collapsed);
         return false;
     }
     i++;
@@ -740,7 +861,7 @@ static bool looks_like_function_header_only_input(const char *buf, size_t len) {
         i++;
     }
     if (collapsed[i] != ')') {
-        free(collapsed);
+        arena_maybe_free(collapsed);
         return false;
     }
     i++;
@@ -748,7 +869,7 @@ static bool looks_like_function_header_only_input(const char *buf, size_t len) {
         i++;
     }
     result = collapsed[i] == '\0';
-    free(collapsed);
+    arena_maybe_free(collapsed);
     return result;
 }
 
@@ -1109,7 +1230,12 @@ static int needs_more_input(char *buf, size_t *len, bool include_heredoc) {
     if (if_depth > 0 || case_depth > 0 || loop_depth > 0) {
         return 1;
     }
-    if (looks_like_function_header_only_input(buf, *len)) {
+    /*
+     * Detect incomplete function headers like "name() #comment" so we do not
+     * execute them prematurely. Keep this bounded to avoid expensive scans on
+     * very large multiline buffers (notably long heredoc bodies).
+     */
+    if (*len <= 8192 && looks_like_function_header_only_input(buf, *len)) {
         return 1;
     }
     if (*len >= 2 && buf[*len - 2] == '\\' && buf[*len - 1] == '\n' &&
@@ -1154,7 +1280,7 @@ int shell_needs_more_input_text_mode(const char *buf, size_t len,
     tmp[len] = '\0';
     tmp_len = len;
     rc = needs_more_input(tmp, &tmp_len, include_heredoc);
-    free(tmp);
+    arena_maybe_free(tmp);
     return rc;
 }
 
@@ -1220,7 +1346,27 @@ static bool merge_need_more_with_alias_preview(struct shell_state *state,
                                                size_t command_len,
                                                bool need_more,
                                                bool include_heredoc) {
+    struct arena *saved_arena;
+    struct arena_mark tmp_mark;
+    bool used_temp_arena;
     char *alias_preview;
+    bool result;
+
+    saved_arena = arena_get_current();
+
+    /*
+     * While collecting heredoc bodies, alias preview cannot change completion.
+     * Skipping preview avoids quadratic rescans on very long heredoc inputs.
+     */
+    if (need_more && include_heredoc && strstr(command, "<<") != NULL) {
+        return true;
+    }
+
+    used_temp_arena = saved_arena != &state->arena_cmd;
+    if (used_temp_arena) {
+        arena_mark_take(&state->arena_cmd, &tmp_mark);
+        arena_set_current(&state->arena_cmd);
+    }
 
     alias_preview = exec_alias_expand_preview(state, command);
     if (alias_preview != NULL) {
@@ -1241,7 +1387,7 @@ static bool merge_need_more_with_alias_preview(struct shell_state *state,
             alias_need_more = exec_alias_preview_needs_more(alias_preview);
         }
 
-        free(alias_preview);
+        arena_maybe_free(alias_preview);
 
         if (raw_trailing_backslash_nl) {
             /*
@@ -1249,16 +1395,24 @@ static bool merge_need_more_with_alias_preview(struct shell_state *state,
              * request more input but must not force execution before the
              * continued physical line arrives.
              */
-            return need_more || alias_need_more;
+            result = need_more || alias_need_more;
+            goto out;
         }
         /*
          * Alias substitution is part of command recognition, so completeness
          * should follow the aliased text when no physical continuation is open.
          */
-        return alias_need_more;
+        result = alias_need_more;
+        goto out;
     }
 
-    return need_more;
+    result = need_more;
+out:
+    if (used_temp_arena) {
+        arena_mark_rewind(&state->arena_cmd, &tmp_mark);
+        arena_set_current(saved_arena);
+    }
+    return result;
 }
 
 static bool inherited_ignore_locked(const struct shell_state *state, int signo) {
@@ -1317,12 +1471,17 @@ static const char *trap_resolve_alias_command(const char *command) {
     memcpy(key + strlen(POSISH_ALIAS_ENV_PREFIX), command + start, name_len);
     key[key_len] = '\0';
     value = getenv(key);
-    free(key);
+    arena_maybe_free(key);
     return value;
 }
 
 void shell_state_init(struct shell_state *state) {
     int signo;
+
+    arena_init(&state->arena_perm, 256u * 1024u);
+    arena_init(&state->arena_script, 512u * 1024u);
+    arena_init(&state->arena_cmd, 256u * 1024u);
+    arena_set_current(&state->arena_perm);
 
     state->last_status = 0;
     state->last_cmdsub_status = 0;
@@ -1380,32 +1539,11 @@ void shell_state_init(struct shell_state *state) {
 }
 
 void shell_state_destroy(struct shell_state *state) {
-    size_t i;
     int signo;
 
-    for (i = 0; i < state->readonly_count; i++) {
-        free(state->readonly_names[i]);
-    }
-    free(state->readonly_names);
-
-    for (i = 0; i < state->function_count; i++) {
-        free(state->functions[i].name);
-        free(state->functions[i].body);
-    }
-    free(state->functions);
-
-    for (i = 0; i < state->unexported_count; i++) {
-        free(state->unexported_names[i]);
-    }
-    free(state->unexported_names);
-
-    for (i = 0; i < state->positional_count; i++) {
-        free(state->positional_params[i]);
-    }
-    free(state->positional_params);
-    free(state->exit_trap);
+    arena_maybe_free(state->exit_trap);
     for (signo = 0; signo < NSIG; signo++) {
-        free(state->signal_traps[signo]);
+        arena_maybe_free(state->signal_traps[signo]);
         state->signal_traps[signo] = NULL;
         state->signal_cleared[signo] = false;
     }
@@ -1449,6 +1587,11 @@ void shell_state_destroy(struct shell_state *state) {
     state->in_command_builtin = false;
     state->trap_entry_status_valid = false;
     state->trap_entry_status = 0;
+
+    arena_set_current(NULL);
+    arena_destroy(&state->arena_cmd);
+    arena_destroy(&state->arena_script);
+    arena_destroy(&state->arena_perm);
 }
 
 void shell_refresh_signal_policy(struct shell_state *state) {
@@ -1465,7 +1608,7 @@ void shell_refresh_signal_policy(struct shell_state *state) {
             if (state->signal_traps[signo][0] == '\0') {
                 (void)signals_set_ignored(signo);
             } else if (inherited_ignore_locked(state, signo)) {
-                free(state->signal_traps[signo]);
+                arena_maybe_free(state->signal_traps[signo]);
                 state->signal_traps[signo] = NULL;
                 (void)signals_set_ignored(signo);
             } else {
@@ -1580,21 +1723,52 @@ void shell_run_exit_trap(struct shell_state *state) {
 int shell_run_command(struct shell_state *state, const char *command) {
     struct ast_program *program;
     const char *p;
+    const char *command_text;
+    char *command_copy;
     int status;
+    struct arena *saved_arena;
+    struct arena *active_arena;
+    bool top_level_command;
+    struct arena_mark cmd_mark;
+    struct arena_mark nested_mark;
 
-    p = command;
+    command_copy = arena_alloc_in(NULL, strlen(command) + 1);
+    memcpy(command_copy, command, strlen(command) + 1);
+    command_text = command_copy;
+
+    p = command_text;
     while (*p == ' ' || *p == '\t' || *p == '\n') {
         p++;
     }
     if (*p == '\0') {
+        arena_maybe_free(command_copy);
         shell_run_pending_traps(state);
         return state->last_status;
     }
 
-    trace_log(POSISH_TRACE_TRAPS, "shell_run_command: %s", command);
+    trace_log(POSISH_TRACE_TRAPS, "shell_run_command: %s", command_text);
     shell_run_pending_traps(state);
 
-    if (parse_program(command, &program) != 0) {
+    saved_arena = arena_get_current();
+    top_level_command =
+        saved_arena != &state->arena_script && saved_arena != &state->arena_cmd;
+    if (top_level_command) {
+        arena_reset(&state->arena_script);
+        arena_reset(&state->arena_cmd);
+        active_arena = &state->arena_script;
+        arena_set_current(active_arena);
+    } else {
+        active_arena = saved_arena;
+        arena_mark_take(active_arena, &nested_mark);
+        arena_set_current(active_arena);
+    }
+
+    if (parse_program(command_text, &program) != 0) {
+        if (!top_level_command) {
+            arena_mark_rewind(active_arena, &nested_mark);
+        }
+        arena_set_current(saved_arena);
+        arena_maybe_free(command_copy);
         state->last_status = 2;
         if (!state->interactive) {
             state->should_exit = true;
@@ -1603,8 +1777,27 @@ int shell_run_command(struct shell_state *state, const char *command) {
         return state->last_status;
     }
 
+    if (top_level_command) {
+        arena_mark_take(&state->arena_cmd, &cmd_mark);
+        arena_set_current(&state->arena_cmd);
+    } else {
+        arena_set_current(active_arena);
+    }
     status = exec_run_program(state, program);
     ast_program_free(program);
+    if (top_level_command) {
+        arena_mark_rewind(&state->arena_cmd, &cmd_mark);
+        arena_set_current(&state->arena_script);
+    } else {
+        arena_mark_rewind(active_arena, &nested_mark);
+        arena_set_current(active_arena);
+    }
+    arena_set_current(saved_arena);
+    if (top_level_command) {
+        arena_reset(&state->arena_cmd);
+        arena_reset(&state->arena_script);
+    }
+    arena_maybe_free(command_copy);
 
     state->last_status = status;
     trace_log(POSISH_TRACE_TRAPS, "command finished status=%d", status);
@@ -1622,6 +1815,7 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
     bool line_mode_input;
     size_t line_no;
     size_t command_start_line;
+    struct pending_heredoc_state pending_heredoc;
 
     line = NULL;
     cap = 0;
@@ -1635,6 +1829,10 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
          !state->explicit_non_interactive);
     line_no = 1;
     command_start_line = 1;
+    pending_heredoc.markers = NULL;
+    pending_heredoc.marker_count = 0;
+    pending_heredoc.marker_index = 0;
+    pending_heredoc.active = false;
     state->interactive = interactive;
 
     if (line_mode_input && !interactive) {
@@ -1667,12 +1865,37 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
                 command_start_line = line_no;
             }
             append_command(&command, &command_len, &command_cap, line);
-            bool need_more;
+            if (pending_heredoc.active) {
+                size_t line_len;
 
-            need_more = needs_more_input(command, &command_len, true);
-            need_more = merge_need_more_with_alias_preview(
-                state, command, command_len, need_more, true);
-            if (need_more) {
+                line_len = strlen(line);
+                if (line_len > 0 && line[line_len - 1] == '\n') {
+                    line_len--;
+                }
+                pending_heredoc_consume_line(&pending_heredoc, line, line_len);
+                if (pending_heredoc.active) {
+                    line_no++;
+                    continue;
+                }
+            } else {
+                bool need_more;
+
+                need_more = needs_more_input(command, &command_len, false);
+                if (!need_more) {
+                    need_more =
+                        pending_heredoc_begin(&pending_heredoc, command, command_len);
+                }
+                if (!need_more) {
+                    need_more = merge_need_more_with_alias_preview(
+                        state, command, command_len, false, true);
+                }
+                if (need_more) {
+                    line_no++;
+                    continue;
+                }
+            }
+
+            if (pending_heredoc.active) {
                 line_no++;
                 continue;
             }
@@ -1680,6 +1903,7 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
             snprintf(base_buf, sizeof(base_buf), "%zu", command_start_line - 1);
             (void)setenv("POSISH_LINENO_BASE", base_buf, 1);
             shell_run_command(state, command);
+            pending_heredoc_clear(&pending_heredoc);
             command_len = 0;
             if (command != NULL) {
                 command[0] = '\0';
@@ -1696,9 +1920,19 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
         if (command_len > 0) {
             bool need_more;
 
-            need_more = needs_more_input(command, &command_len, true);
-            need_more = merge_need_more_with_alias_preview(
-                state, command, command_len, need_more, true);
+            if (pending_heredoc.active) {
+                need_more = true;
+            } else {
+                need_more = needs_more_input(command, &command_len, false);
+                if (!need_more) {
+                    need_more =
+                        pending_heredoc_begin(&pending_heredoc, command, command_len);
+                }
+                if (!need_more) {
+                    need_more = merge_need_more_with_alias_preview(
+                        state, command, command_len, false, true);
+                }
+            }
             if (need_more) {
                 posish_error_at("<input>", line_no, 1, "syntax",
                                 "unexpected EOF while looking for matching quote");
@@ -1709,6 +1943,7 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
                 snprintf(base_buf, sizeof(base_buf), "%zu", command_start_line - 1);
                 (void)setenv("POSISH_LINENO_BASE", base_buf, 1);
                 shell_run_command(state, command);
+                pending_heredoc_clear(&pending_heredoc);
                 ran_command = true;
             }
         }
@@ -1718,8 +1953,9 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
             state->last_status = 0;
         }
 
-        free(line);
-        free(command);
+        arena_maybe_free(line);
+        arena_maybe_free(command);
+        pending_heredoc_clear(&pending_heredoc);
         if (state->should_exit) {
             return state->exit_status;
         }
@@ -1751,10 +1987,32 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
             command_start_line = line_no;
         }
         append_command(&command, &command_len, &command_cap, line);
-        if (needs_more_input(command, &command_len, true)) {
-            secondary_prompt = true;
-            line_no++;
-            continue;
+        if (pending_heredoc.active) {
+            size_t line_len;
+
+            line_len = strlen(line);
+            if (line_len > 0 && line[line_len - 1] == '\n') {
+                line_len--;
+            }
+            pending_heredoc_consume_line(&pending_heredoc, line, line_len);
+            if (pending_heredoc.active) {
+                secondary_prompt = true;
+                line_no++;
+                continue;
+            }
+        } else {
+            bool need_more;
+
+            need_more = needs_more_input(command, &command_len, false);
+            if (!need_more) {
+                need_more =
+                    pending_heredoc_begin(&pending_heredoc, command, command_len);
+            }
+            if (need_more) {
+                secondary_prompt = true;
+                line_no++;
+                continue;
+            }
         }
 
         {
@@ -1764,6 +2022,7 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
             (void)setenv("POSISH_LINENO_BASE", base_buf, 1);
         }
         shell_run_command(state, command);
+        pending_heredoc_clear(&pending_heredoc);
         command_len = 0;
         if (command != NULL) {
             command[0] = '\0';
@@ -1775,14 +2034,28 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
         line_no++;
     }
 
-    if (command_len > 0 && needs_more_input(command, &command_len, true)) {
+    if (command_len > 0) {
+        bool need_more;
+
+        if (pending_heredoc.active) {
+            need_more = true;
+        } else {
+            need_more = needs_more_input(command, &command_len, false);
+            if (!need_more) {
+                need_more =
+                    pending_heredoc_begin(&pending_heredoc, command, command_len);
+            }
+        }
+        if (need_more) {
         posish_error_at("<input>", line_no, 1, "syntax",
                         "unexpected EOF while looking for matching quote");
         state->last_status = 2;
+        }
     }
 
-    free(line);
-    free(command);
+    arena_maybe_free(line);
+    arena_maybe_free(command);
+    pending_heredoc_clear(&pending_heredoc);
     (void)unsetenv("POSISH_LINENO_BASE");
 
     if (state->should_exit) {
