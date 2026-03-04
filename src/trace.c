@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include "arena.h"
 
 static bool g_trace_initialized;
 static unsigned int g_trace_mask;
@@ -49,10 +50,7 @@ static void trace_parse_env(void) {
         return;
     }
 
-    copy = malloc(strlen(env) + 1);
-    if (copy == NULL) {
-        return;
-    }
+    copy = arena_alloc_in(NULL, strlen(env) + 1);
     strcpy(copy, env);
 
     saveptr = NULL;
@@ -75,7 +73,7 @@ static void trace_parse_env(void) {
         token = strtok_r(NULL, ",:; \t", &saveptr);
     }
 
-    free(copy);
+    arena_maybe_free(copy);
 }
 
 bool trace_enabled(unsigned int category) {

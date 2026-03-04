@@ -34,11 +34,7 @@ static char *xstrdup_heap(const char *s) {
     char *copy;
 
     n = strlen(s) + 1;
-    copy = malloc(n);
-    if (copy == NULL) {
-        perror("malloc");
-        return NULL;
-    }
+    copy = arena_alloc_in(NULL, n);
     memcpy(copy, s, n);
     return copy;
 }
