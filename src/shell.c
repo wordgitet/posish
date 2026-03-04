@@ -1308,7 +1308,6 @@ bool shell_position_in_comment(const char *buf, size_t len, size_t pos) {
 static void append_command(char **buf, size_t *len, size_t *cap,
                            const char *line) {
     size_t n;
-    char *grown;
 
     n = strlen(line);
     if (*len + n + 1 > *cap) {
@@ -1318,12 +1317,7 @@ static void append_command(char **buf, size_t *len, size_t *cap,
         while (*len + n + 1 > new_cap) {
             new_cap *= 2;
         }
-        grown = realloc(*buf, new_cap);
-        if (grown == NULL) {
-            perror("realloc");
-            exit(EXIT_FAILURE);
-        }
-        *buf = grown;
+        *buf = arena_realloc_in(NULL, *buf, new_cap);
         *cap = new_cap;
     }
 
