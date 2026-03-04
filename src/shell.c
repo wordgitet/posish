@@ -1308,6 +1308,7 @@ bool shell_position_in_comment(const char *buf, size_t len, size_t pos) {
 static void append_command(char **buf, size_t *len, size_t *cap,
                            const char *line) {
     size_t n;
+    char *grown;
 
     n = strlen(line);
     if (*len + n + 1 > *cap) {
@@ -1317,13 +1318,28 @@ static void append_command(char **buf, size_t *len, size_t *cap,
         while (*len + n + 1 > new_cap) {
             new_cap *= 2;
         }
-        *buf = realloc(*buf, new_cap);
+        grown = realloc(*buf, new_cap);
+        if (grown == NULL) {
+            perror("realloc");
+            exit(EXIT_FAILURE);
+        }
+        *buf = grown;
         *cap = new_cap;
     }
 
     memcpy(*buf + *len, line, n);
     *len += n;
     (*buf)[*len] = '\0';
+}
+
+static void maybe_release_large_command_buffer(char **buf, size_t *cap) {
+    const size_t max_reuse_cap = 256u * 1024u;
+
+    if (*buf != NULL && *cap > max_reuse_cap) {
+        arena_maybe_free(*buf);
+        *buf = NULL;
+        *cap = 0;
+    }
 }
 
 static bool merge_need_more_with_alias_preview(struct shell_state *state,
@@ -1888,6 +1904,7 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
             if (command != NULL) {
                 command[0] = '\0';
             }
+            maybe_release_large_command_buffer(&command, &command_cap);
             ran_command = true;
             if (state->return_requested && state->dot_depth > 0) {
                 break;
@@ -2005,6 +2022,7 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
         if (command != NULL) {
             command[0] = '\0';
         }
+        maybe_release_large_command_buffer(&command, &command_cap);
         secondary_prompt = false;
         if (state->return_requested && state->dot_depth > 0) {
             break;
