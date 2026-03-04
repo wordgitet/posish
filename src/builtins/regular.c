@@ -793,7 +793,6 @@ static int builtin_kill(char *const argv[]) {
     size_t i;
     char **converted;
     char **final_argv;
-    size_t final_argc;
     size_t operand_start;
     bool insert_double_dash;
     bool had_jobspec;
@@ -805,13 +804,9 @@ static int builtin_kill(char *const argv[]) {
         argc++;
     }
 
-    converted = calloc(argc + 1, sizeof(*converted));
-    if (converted == NULL) {
-        perror("calloc");
-        return 1;
-    }
+    converted = arena_xmalloc(sizeof(*converted) * (argc + 1));
+    memset(converted, 0, sizeof(*converted) * (argc + 1));
     final_argv = NULL;
-    final_argc = argc;
     operand_start = kill_operand_start(argv);
     insert_double_dash = false;
     had_jobspec = false;
@@ -881,12 +876,8 @@ static int builtin_kill(char *const argv[]) {
     if (insert_double_dash) {
         size_t j;
 
-        final_argv = calloc(argc + 2, sizeof(*final_argv));
-        if (final_argv == NULL) {
-            perror("calloc");
-            status = 1;
-            goto done;
-        }
+        final_argv = arena_xmalloc(sizeof(*final_argv) * (argc + 2));
+        memset(final_argv, 0, sizeof(*final_argv) * (argc + 2));
         for (j = 0; j < operand_start; j++) {
             final_argv[j] = converted[j];
         }
@@ -895,7 +886,6 @@ static int builtin_kill(char *const argv[]) {
             final_argv[j + 1] = converted[j];
         }
         final_argv[argc + 1] = NULL;
-        final_argc = argc + 1;
     }
 
     status = run_utility(final_argv != NULL ? final_argv : converted);
@@ -907,9 +897,6 @@ done:
         }
     }
     if (final_argv != NULL) {
-        for (i = 0; i < final_argc; i++) {
-            final_argv[i] = NULL;
-        }
         arena_maybe_free(final_argv);
     }
     arena_maybe_free(converted);
