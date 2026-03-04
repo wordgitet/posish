@@ -878,11 +878,7 @@ static int split_assignment(const char *word, char **name_out, const char **valu
     }
 
     nlen = (size_t)(eq - word);
-    name = malloc(nlen + 1);
-    if (name == NULL) {
-        perror("malloc");
-        return -1;
-    }
+    name = arena_xmalloc(nlen + 1);
     memcpy(name, word, nlen);
     name[nlen] = '\0';
 
@@ -900,11 +896,7 @@ static void append_mem(char **buf, size_t *len, size_t *cap, const char *data,
         while (*len + data_len + 1 > new_cap) {
             new_cap *= 2;
         }
-        *buf = realloc(*buf, new_cap);
-        if (*buf == NULL) {
-            perror("realloc");
-            exit(EXIT_FAILURE);
-        }
+        *buf = arena_xrealloc(*buf, new_cap);
         *cap = new_cap;
     }
 
@@ -1242,11 +1234,7 @@ static int builtin_eval(struct shell_state *state, char *const argv[]) {
         len += strlen(argv[i]) + 1;
     }
 
-    command = malloc(len);
-    if (command == NULL) {
-        perror("malloc");
-        return 1;
-    }
+    command = arena_xmalloc(len);
 
     pos = 0;
     for (i = (argv[1] != NULL && strcmp(argv[1], "--") == 0) ? 2 : 1;
@@ -1278,19 +1266,9 @@ static int builtin_eval(struct shell_state *state, char *const argv[]) {
 static void read_buf_append(char **buf, size_t *len, size_t *cap, char ch) {
     if (*len + 1 >= *cap) {
         size_t new_cap;
-        char *new_buf;
 
         new_cap = *cap == 0 ? 64 : (*cap * 2);
-        new_buf = realloc(*buf, new_cap);
-        if (new_buf == NULL) {
-            perror("realloc");
-            arena_maybe_free(*buf);
-            *buf = NULL;
-            *len = 0;
-            *cap = 0;
-            return;
-        }
-        *buf = new_buf;
+        *buf = arena_xrealloc(*buf, new_cap);
         *cap = new_cap;
     }
     (*buf)[(*len)++] = ch;
@@ -1587,11 +1565,7 @@ static int builtin_read(struct shell_state *state, char *const argv[]) {
     }
 
     if (line == NULL) {
-        line = malloc(1);
-        if (line == NULL) {
-            perror("malloc");
-            return 1;
-        }
+        line = arena_xmalloc(1);
     }
     line[len] = '\0';
 
@@ -1627,7 +1601,7 @@ static int builtin_read(struct shell_state *state, char *const argv[]) {
             if (vi == 0) {
                 value = read_unescape_segment(line, 0, len);
             } else {
-                value = strdup("");
+                value = arena_xstrdup("");
             }
             if (value == NULL) {
                 perror("malloc");
@@ -1654,9 +1628,9 @@ static int builtin_read(struct shell_state *state, char *const argv[]) {
                 size_t end;
 
                 if (pos >= len) {
-                    value = strdup("");
+                    value = arena_xstrdup("");
                 } else if (read_char_is_delim(line, len, pos, ifs)) {
-                    value = strdup("");
+                    value = arena_xstrdup("");
                     pos = read_consume_delimiter(line, len, pos, ifs);
                 } else {
                     start = pos;
