@@ -17,12 +17,10 @@
 #include <unistd.h>
 
 void redir_vec_free(struct redir_vec *redirs) {
-    size_t i;
-
-    for (i = 0; i < redirs->len; i++) {
-        arena_maybe_free(redirs->items[i].path);
-    }
-    arena_maybe_free(redirs->items);
+    /*
+     * Redirection vectors are arena-backed and reclaimed by the surrounding
+     * command/script arena reset.
+     */
     redirs->items = NULL;
     redirs->len = 0;
 }
@@ -80,7 +78,9 @@ void fd_backup_restore(struct fd_backup_vec *backups) {
         }
     }
 
-    arena_maybe_free(backups->items);
+    /*
+     * Backup vector storage is arena-backed and reclaimed by arena reset.
+     */
     backups->items = NULL;
     backups->len = 0;
 }

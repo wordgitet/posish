@@ -7,24 +7,43 @@
 #include "arena.h"
 
 #include <errno.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <unistd.h>
 
 char *path_getcwd_alloc(void) {
     size_t size;
     char *buf;
+    char *grown;
+    char *result;
 
     size = 128;
+    buf = malloc(size);
+    if (buf == NULL) {
+        return NULL;
+    }
     for (;;) {
-        buf = arena_alloc_in(NULL, size);
         if (getcwd(buf, size) != NULL) {
-            return buf;
+            result = arena_xstrdup(buf);
+            free(buf);
+            return result;
         }
 
-        arena_maybe_free(buf);
         if (errno != ERANGE) {
+            free(buf);
+            return NULL;
+        }
+        if (size > SIZE_MAX / 2) {
+            free(buf);
+            errno = ERANGE;
             return NULL;
         }
         size *= 2;
+        grown = realloc(buf, size);
+        if (grown == NULL) {
+            free(buf);
+            return NULL;
+        }
+        buf = grown;
     }
 }

@@ -5,7 +5,6 @@
 #include "parser.h"
 
 #include "arena.h"
-#include <stdlib.h>
 
 int parse_program(const char *source, struct ast_program **out_program) {
     struct ast_program *program;
@@ -18,10 +17,9 @@ int parse_program(const char *source, struct ast_program **out_program) {
 }
 
 void ast_program_free(struct ast_program *program) {
-    if (program == NULL) {
-        return;
-    }
-
-    arena_maybe_free(program->source);
-    arena_maybe_free(program);
+    (void)program;
+    /*
+     * AST program objects are allocated from command/script arenas and are
+     * released via arena mark-rewind/reset at the execution boundary.
+     */
 }
