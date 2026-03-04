@@ -4,6 +4,7 @@
 
 #include "arith.h"
 
+#include "arena.h"
 #include "error.h"
 #include "vars.h"
 
@@ -347,11 +348,7 @@ static struct arith_value make_value(long value) {
 static char *slice_dup(const char *src, size_t start, size_t len) {
   char *copy;
 
-  copy = malloc(len + 1);
-  if (copy == NULL) {
-    perror("malloc");
-    return NULL;
-  }
+  copy = arena_xmalloc(len + 1);
 
   memcpy(copy, src + start, len);
   copy[len] = '\0';
@@ -394,11 +391,6 @@ static long read_identifier_value(struct arith_parser *p, size_t start,
   long result;
 
   name = slice_dup(p->src, start, len);
-  if (name == NULL) {
-    parser_fail(p, "malloc failed");
-    *ok = false;
-    return 0;
-  }
 
   value = getenv(name);
   if (value == NULL || value[0] == '\0') {
@@ -408,11 +400,9 @@ static long read_identifier_value(struct arith_parser *p, size_t start,
         p->state->should_exit = true;
         p->state->exit_status = 1;
       }
-      free(name);
       *ok = false;
       return 0;
     }
-    free(name);
     *ok = true;
     return 0;
   }
@@ -422,7 +412,6 @@ static long read_identifier_value(struct arith_parser *p, size_t start,
     result = 0;
   }
 
-  free(name);
   *ok = true;
   return result;
 }
@@ -433,10 +422,6 @@ static int assign_identifier_value(struct arith_parser *p, size_t start,
   char text[64];
 
   name = slice_dup(p->src, start, len);
-  if (name == NULL) {
-    parser_fail(p, "malloc failed");
-    return -1;
-  }
 
   snprintf(text, sizeof(text), "%ld", value);
   if (vars_set_assignment(p->state, name, text, true) != 0) {
@@ -444,12 +429,10 @@ static int assign_identifier_value(struct arith_parser *p, size_t start,
       p->state->should_exit = true;
       p->state->exit_status = 1;
     }
-    free(name);
     p->failed = true;
     return -1;
   }
 
-  free(name);
   return 0;
 }
 
