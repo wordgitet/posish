@@ -170,15 +170,7 @@ static int remove_shell_function(struct shell_state *state, const char *name) {
 }
 
 static char *xstrdup_local(const char *s) {
-    char *copy;
-
-    copy = malloc(strlen(s) + 1);
-    if (copy == NULL) {
-        perror("malloc");
-        return NULL;
-    }
-    strcpy(copy, s);
-    return copy;
+    return arena_xstrdup(s);
 }
 
 static char *find_command_path(const char *name, bool use_standard_path) {
@@ -201,12 +193,7 @@ static char *find_command_path(const char *name, bool use_standard_path) {
             }
             clen = strlen(cwd);
             nlen = strlen(name);
-            absolute = malloc(clen + 1 + nlen + 1);
-            if (absolute == NULL) {
-                perror("malloc");
-                arena_maybe_free(cwd);
-                return NULL;
-            }
+            absolute = arena_xmalloc(clen + 1 + nlen + 1);
             memcpy(absolute, cwd, clen);
             absolute[clen] = '/';
             memcpy(absolute + clen + 1, name, nlen + 1);
@@ -235,11 +222,7 @@ static char *find_command_path(const char *name, bool use_standard_path) {
         dlen = (size_t)(end - p);
         dir = dlen == 0 ? "." : p;
 
-        candidate = malloc((dlen == 0 ? 1 : dlen) + 1 + strlen(name) + 1);
-        if (candidate == NULL) {
-            perror("malloc");
-            return NULL;
-        }
+        candidate = arena_xmalloc((dlen == 0 ? 1 : dlen) + 1 + strlen(name) + 1);
         if (dlen == 0) {
             strcpy(candidate, ".");
         } else {
@@ -296,11 +279,7 @@ static char *find_dot_script_path(const char *name) {
         }
 
         name_len = strlen(name);
-        candidate = malloc(dir_len + 1 + name_len + 1);
-        if (candidate == NULL) {
-            perror("malloc");
-            return NULL;
-        }
+        candidate = arena_xmalloc(dir_len + 1 + name_len + 1);
         memcpy(candidate, dir, dir_len);
         candidate[dir_len] = '/';
         memcpy(candidate + dir_len + 1, name, name_len + 1);
@@ -329,11 +308,7 @@ static char *command_alias_value_dup(const char *name) {
 
     plen = sizeof(prefix) - 1;
     nlen = strlen(name);
-    key = malloc(plen + nlen + 1);
-    if (key == NULL) {
-        perror("malloc");
-        return NULL;
-    }
+    key = arena_xmalloc(plen + nlen + 1);
     memcpy(key, prefix, plen);
     memcpy(key + plen, name, nlen + 1);
     value = getenv(key);
@@ -981,11 +956,7 @@ static char *double_quote_for_eval(const char *value) {
         }
     }
 
-    out = malloc(len + 1);
-    if (out == NULL) {
-        perror("malloc");
-        return NULL;
-    }
+    out = arena_xmalloc(len + 1);
 
     pos = 0;
     out[pos++] = '"';
@@ -1020,11 +991,7 @@ static int print_exported_variables(void) {
         }
 
         nlen = (size_t)(eq - entry);
-        name = malloc(nlen + 1);
-        if (name == NULL) {
-            perror("malloc");
-            return 1;
-        }
+        name = arena_xmalloc(nlen + 1);
         memcpy(name, entry, nlen);
         name[nlen] = '\0';
         if (!vars_is_name_valid(name)) {
@@ -1355,11 +1322,7 @@ static char *read_unescape_segment(const char *s, size_t start, size_t end) {
     size_t i;
     size_t j;
 
-    out = malloc((end - start) + 1);
-    if (out == NULL) {
-        perror("malloc");
-        return NULL;
-    }
+    out = arena_xmalloc((end - start) + 1);
 
     j = 0;
     for (i = start; i < end; i++) {
@@ -1956,11 +1919,7 @@ static char *trap_quote_action(const char *action) {
         }
     }
 
-    out = malloc(out_len + 1);
-    if (out == NULL) {
-        perror("malloc");
-        return NULL;
-    }
+    out = arena_xmalloc(out_len + 1);
 
     j = 0;
     out[j++] = '\'';
@@ -2070,11 +2029,7 @@ static int trap_set_signal_command(struct shell_state *state, int signo,
                                    const char *command) {
     char *copy;
 
-    copy = malloc(strlen(command) + 1);
-    if (copy == NULL) {
-        perror("malloc");
-        return -1;
-    }
+    copy = arena_xmalloc(strlen(command) + 1);
     strcpy(copy, command);
 
     arena_maybe_free(state->signal_traps[signo]);
@@ -2166,11 +2121,7 @@ static int builtin_trap(struct shell_state *state, char *const argv[]) {
             } else {
                 char *command;
 
-                command = malloc(strlen(action) + 1);
-                if (command == NULL) {
-                    perror("malloc");
-                    return 1;
-                }
+                command = arena_xmalloc(strlen(action) + 1);
                 strcpy(command, action);
 
                 arena_maybe_free(state->exit_trap);
