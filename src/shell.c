@@ -1885,10 +1885,8 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
                     need_more =
                         pending_heredoc_begin(&pending_heredoc, command, command_len);
                 }
-                if (!need_more) {
-                    need_more = merge_need_more_with_alias_preview(
-                        state, command, command_len, false, true);
-                }
+                need_more = merge_need_more_with_alias_preview(
+                    state, command, command_len, need_more, true);
                 if (need_more) {
                     line_no++;
                     continue;
@@ -1928,10 +1926,8 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
                     need_more =
                         pending_heredoc_begin(&pending_heredoc, command, command_len);
                 }
-                if (!need_more) {
-                    need_more = merge_need_more_with_alias_preview(
-                        state, command, command_len, false, true);
-                }
+                need_more = merge_need_more_with_alias_preview(
+                    state, command, command_len, need_more, true);
             }
             if (need_more) {
                 posish_error_at("<input>", line_no, 1, "syntax",
