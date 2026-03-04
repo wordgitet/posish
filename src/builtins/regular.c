@@ -81,11 +81,7 @@ static char *cd_join_path(const char *left, const char *right) {
     rlen = strlen(right);
     need_slash = llen > 0 && left[llen - 1] != '/';
 
-    out = malloc(llen + (need_slash ? 1 : 0) + rlen + 1);
-    if (out == NULL) {
-        perror("malloc");
-        return NULL;
-    }
+    out = arena_xmalloc(llen + (need_slash ? 1 : 0) + rlen + 1);
 
     memcpy(out, left, llen);
     if (need_slash) {
@@ -149,16 +145,7 @@ static char *cd_canonicalize_logical(const char *base, const char *path) {
             continue;
         }
 
-        segment = malloc(len + 1);
-        if (segment == NULL) {
-            perror("malloc");
-            for (i = 0; i < seg_count; i++) {
-                arena_maybe_free(segments[i]);
-            }
-            arena_maybe_free(segments);
-            arena_maybe_free(joined);
-            return NULL;
-        }
+        segment = arena_xmalloc(len + 1);
         memcpy(segment, start, len);
         segment[len] = '\0';
 
@@ -754,10 +741,7 @@ static char *pid_to_string(pid_t pid) {
         return NULL;
     }
 
-    out = malloc((size_t)len + 1);
-    if (out == NULL) {
-        return NULL;
-    }
+    out = arena_xmalloc((size_t)len + 1);
     memcpy(out, buf, (size_t)len + 1);
     return out;
 }
@@ -959,11 +943,7 @@ static char *alias_env_key(const char *name) {
 
     plen = strlen(POSISH_ALIAS_ENV_PREFIX);
     nlen = strlen(name);
-    key = malloc(plen + nlen + 1);
-    if (key == NULL) {
-        perror("malloc");
-        return NULL;
-    }
+    key = arena_xmalloc(plen + nlen + 1);
     memcpy(key, POSISH_ALIAS_ENV_PREFIX, plen);
     memcpy(key + plen, name, nlen + 1);
     return key;
@@ -984,11 +964,7 @@ static char *alias_quote_value(const char *value) {
         }
     }
 
-    out = malloc(out_len + 1);
-    if (out == NULL) {
-        perror("malloc");
-        return NULL;
-    }
+    out = arena_xmalloc(out_len + 1);
 
     pos = 0;
     out[pos++] = '\'';
@@ -1053,11 +1029,7 @@ static int builtin_alias(char *const argv[]) {
             name_len = (size_t)(eq - name);
             value = eq + 1;
 
-            name_buf = malloc(name_len + 1);
-            if (name_buf == NULL) {
-                perror("malloc");
-                return 1;
-            }
+            name_buf = arena_xmalloc(name_len + 1);
             memcpy(name_buf, name, name_len);
             name_buf[name_len] = '\0';
 
@@ -1104,11 +1076,7 @@ static int builtin_alias(char *const argv[]) {
             continue;
         }
 
-        name = malloc((size_t)(eq - argv[i]) + 1);
-        if (name == NULL) {
-            perror("malloc");
-            return 1;
-        }
+        name = arena_xmalloc((size_t)(eq - argv[i]) + 1);
         memcpy(name, argv[i], (size_t)(eq - argv[i]));
         name[eq - argv[i]] = '\0';
         value = eq + 1;
@@ -1190,15 +1158,7 @@ static int builtin_unalias(char *const argv[]) {
             }
 
             len = (size_t)(eq - environ[k]);
-            key = malloc(len + 1);
-            if (key == NULL) {
-                perror("malloc");
-                for (k = 0; k < key_count; k++) {
-                    arena_maybe_free(keys[k]);
-                }
-                arena_maybe_free(keys);
-                return 1;
-            }
+            key = arena_xmalloc(len + 1);
             memcpy(key, environ[k], len);
             key[len] = '\0';
             keys = arena_xrealloc(keys, sizeof(*keys) * (key_count + 1));
