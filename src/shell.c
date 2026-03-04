@@ -362,10 +362,7 @@ static char *unquote_heredoc_delimiter(const char *raw, size_t len) {
     size_t out_len;
     char *out;
 
-    out = malloc(len + 1);
-    if (out == NULL) {
-        return NULL;
-    }
+    out = arena_xmalloc(len + 1);
 
     out_len = 0;
     i = 0;
@@ -548,12 +545,7 @@ static bool collect_heredoc_markers(const char *buf, size_t len,
                     return false;
                 }
 
-                grown = realloc(markers, sizeof(*markers) * (count + 1));
-                if (grown == NULL) {
-                    arena_maybe_free(delim);
-                    free_heredoc_markers(markers, count);
-                    return false;
-                }
+                grown = arena_xrealloc(markers, sizeof(*markers) * (count + 1));
                 markers = grown;
                 markers[count].delimiter = delim;
                 markers[count].strip_tabs = strip_tabs;
@@ -778,10 +770,7 @@ static bool looks_like_function_header_only_input(const char *buf, size_t len) {
     int quote;
     bool result;
 
-    collapsed = malloc(len + 1);
-    if (collapsed == NULL) {
-        return false;
-    }
+    collapsed = arena_xmalloc(len + 1);
 
     i = 0;
     out_len = 0;
@@ -1271,11 +1260,7 @@ int shell_needs_more_input_text_mode(const char *buf, size_t len,
     size_t tmp_len;
     int rc;
 
-    tmp = malloc(len + 1);
-    if (tmp == NULL) {
-        perror("malloc");
-        return 1;
-    }
+    tmp = arena_xmalloc(len + 1);
     memcpy(tmp, buf, len);
     tmp[len] = '\0';
     tmp_len = len;
@@ -1463,10 +1448,7 @@ static const char *trap_resolve_alias_command(const char *command) {
 
     name_len = end - start;
     key_len = strlen(POSISH_ALIAS_ENV_PREFIX) + name_len;
-    key = malloc(key_len + 1);
-    if (key == NULL) {
-        return NULL;
-    }
+    key = arena_xmalloc(key_len + 1);
     memcpy(key, POSISH_ALIAS_ENV_PREFIX, strlen(POSISH_ALIAS_ENV_PREFIX));
     memcpy(key + strlen(POSISH_ALIAS_ENV_PREFIX), command + start, name_len);
     key[key_len] = '\0';
