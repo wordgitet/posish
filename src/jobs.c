@@ -3,9 +3,9 @@
 /* posish - job handling */
 
 #include "jobs.h"
+#include "arena.h"
 #include "trace.h"
 
-#include <stdlib.h>
 #include <string.h>
 
 struct tracked_job {
@@ -42,7 +42,7 @@ static char *dup_trimmed_command(const char *command) {
     end--;
   }
 
-  copy = malloc(end - start + 1);
+  copy = arena_alloc_in(NULL, end - start + 1);
   if (copy == NULL) {
     return NULL;
   }
@@ -102,7 +102,7 @@ static struct tracked_job *add_job(pid_t pid, pid_t pgid, const char *command,
   struct tracked_job *new_jobs;
   struct tracked_job *job;
 
-  new_jobs = realloc(g_jobs, sizeof(*g_jobs) * (g_job_count + 1));
+  new_jobs = arena_realloc_in(NULL, g_jobs, sizeof(*g_jobs) * (g_job_count + 1));
   if (new_jobs == NULL) {
     return NULL;
   }
@@ -131,7 +131,7 @@ static void set_job_command(struct tracked_job *job, const char *command) {
     return;
   }
 
-  free(job->command);
+  arena_maybe_free(job->command);
   job->command = copy;
 }
 
@@ -170,9 +170,9 @@ void jobs_init(void) {
   size_t i;
 
   for (i = 0; i < g_job_count; i++) {
-    free(g_jobs[i].command);
+    arena_maybe_free(g_jobs[i].command);
   }
-  free(g_jobs);
+  arena_maybe_free(g_jobs);
   g_jobs = NULL;
   g_job_count = 0;
   g_next_job_id = 1;
@@ -184,9 +184,9 @@ void jobs_destroy(void) {
   size_t i;
 
   for (i = 0; i < g_job_count; i++) {
-    free(g_jobs[i].command);
+    arena_maybe_free(g_jobs[i].command);
   }
-  free(g_jobs);
+  arena_maybe_free(g_jobs);
   g_jobs = NULL;
   g_job_count = 0;
   g_next_job_id = 1;
@@ -229,16 +229,16 @@ void jobs_forget(pid_t pid) {
 
   for (i = 0; i < g_job_count; i++) {
     if (g_jobs[i].pid == pid) {
-      free(g_jobs[i].command);
+      arena_maybe_free(g_jobs[i].command);
       g_jobs[i] = g_jobs[g_job_count - 1];
       g_job_count--;
       if (g_job_count == 0) {
-        free(g_jobs);
+        arena_maybe_free(g_jobs);
         g_jobs = NULL;
       } else {
         struct tracked_job *shrunk;
 
-        shrunk = realloc(g_jobs, sizeof(*g_jobs) * g_job_count);
+        shrunk = arena_realloc_in(NULL, g_jobs, sizeof(*g_jobs) * g_job_count);
         if (shrunk != NULL) {
           g_jobs = shrunk;
         }
