@@ -2029,8 +2029,7 @@ static int trap_set_signal_command(struct shell_state *state, int signo,
                                    const char *command) {
     char *copy;
 
-    copy = arena_xmalloc(strlen(command) + 1);
-    strcpy(copy, command);
+    copy = arena_strdup_in(&state->arena_perm, command);
 
     arena_maybe_free(state->signal_traps[signo]);
     state->signal_traps[signo] = copy;
@@ -2121,8 +2120,7 @@ static int builtin_trap(struct shell_state *state, char *const argv[]) {
             } else {
                 char *command;
 
-                command = arena_xmalloc(strlen(action) + 1);
-                strcpy(command, action);
+                command = arena_strdup_in(&state->arena_perm, action);
 
                 arena_maybe_free(state->exit_trap);
                 state->exit_trap = command;
