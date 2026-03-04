@@ -31,14 +31,7 @@ struct heredoc_spec {
 };
 
 static void *xrealloc(void *ptr, size_t size) {
-    void *p;
-
-    p = realloc(ptr, size);
-    if (p == NULL) {
-        perror("realloc");
-        exit(EXIT_FAILURE);
-    }
-    return p;
+    return arena_xrealloc(ptr, size);
 }
 
 static void append_char(char **buf, size_t *len, size_t *cap, char ch) {
