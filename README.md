@@ -89,6 +89,30 @@ Append pass-rate metrics to `tmp/metrics/posix.csv`:
 make metrics
 ```
 
+## Allocator Policy
+
+`posish` uses a real arena allocator for runtime ownership control:
+- `arena_perm`: process lifetime
+- `arena_script`: per top-level script/program
+- `arena_cmd`: per command/snippet
+
+Runtime code should allocate through allocator wrappers instead of direct
+`malloc`/`realloc`/`free`:
+- `arena_xmalloc`, `arena_xrealloc`, `arena_xstrdup`
+- `arena_alloc_in`, `arena_realloc_in`, `arena_maybe_free`
+
+Hybrid behavior is intentional:
+- `arena == NULL` in `arena_alloc_in`/`arena_realloc_in` means plain heap
+  semantics via wrappers.
+- `arena_maybe_free` frees only non-arena pointers and no-ops for arena-owned
+  pointers.
+
+Direct raw allocation calls are intentionally limited to:
+- `src/arena.c` allocator internals
+- imported vendor test implementation files:
+  - `src/builtins/netbsd_test.c`
+  - `src/builtins/netbsd_test_vendor.c`
+
 When built with `--enable-trace`, runtime tracing is controlled by:
 
 ```sh

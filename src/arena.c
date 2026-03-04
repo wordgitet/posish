@@ -291,6 +291,10 @@ void *arena_realloc_in(struct arena *arena, void *ptr, size_t size) {
     if (arena == NULL) {
         void *re;
 
+        /*
+         * Hybrid mode: explicit NULL arena means "plain heap semantics", routed
+         * through this wrapper so runtime code can avoid direct realloc(3).
+         */
         re = realloc(ptr, payload_size);
         if (re == NULL) {
             perror("realloc");
@@ -356,6 +360,11 @@ void arena_maybe_free(void *ptr) {
     if (ptr == NULL) {
         return;
     }
+    /*
+     * Hybrid ownership helper:
+     * - arena-owned pointers are no-ops (freed by reset/destroy),
+     * - non-arena pointers are treated as heap allocations and freed.
+     */
     if (arena_owns_pointer(ptr)) {
         return;
     }
