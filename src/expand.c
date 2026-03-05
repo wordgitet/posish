@@ -779,11 +779,15 @@ static int run_command_substitution(struct shell_state *state, const char *cmd,
     arena_set_current(&local_state.arena_perm);
     local_state.should_exit = false;
     local_state.exit_status = 0;
+    local_state.exit_trap = NULL;
     local_state.running_signal_trap = false;
+    local_state.running_exit_trap = false;
     local_state.main_context = false;
     reset_signal_traps_for_cmdsub(&local_state);
 
     st = shell_run_command(&local_state, cmd);
+    shell_run_pending_traps(&local_state);
+    shell_run_exit_trap(&local_state);
     if (local_state.should_exit) {
       st = local_state.exit_status;
     }

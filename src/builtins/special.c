@@ -125,9 +125,9 @@ static bool is_reserved_word_name(const char *name) {
 
 static bool is_regular_builtin_name(const char *name) {
     static const char *const words[] = {
-        "cd",    "true",   "false",  "test",   "[",      "kill",
-        "wait",  "fg",     "bg",     "umask",  "alias",  "command",
-        "read",  "getopts","hash",   "jobs",   "type",   "unalias",
+        "cd",     "true",   "false",  "test",   "[",      "kill",
+        "wait",   "fg",     "bg",     "umask",  "alias",  "command",
+        "read",   "getopts","hash",   "jobs",   "type",   "unalias",
         "echoraw","bracket","make_command"};
     size_t i;
 
@@ -242,6 +242,19 @@ static char *find_command_path(const char *name, bool use_standard_path) {
     }
 
     return NULL;
+}
+
+static bool path_resolves_command(const char *name, bool use_standard_path) {
+    char *path;
+    bool found;
+
+    path = find_command_path(name, use_standard_path);
+    if (path == NULL) {
+        return false;
+    }
+    found = true;
+    arena_maybe_free(path);
+    return found;
 }
 
 static char *find_dot_script_path(const char *name) {
@@ -479,7 +492,12 @@ static int builtin_command(struct shell_state *state, char *const argv[]) {
 
         saved_in_command_builtin = state->in_command_builtin;
         state->in_command_builtin = true;
-        status = builtin_dispatch(state, &argv[i], &handled);
+        if (builtin_is_substitutive_name(argv[i]) &&
+            !path_resolves_command(argv[i], opt_p)) {
+            handled = false;
+        } else {
+            status = builtin_dispatch(state, &argv[i], &handled);
+        }
         state->in_command_builtin = saved_in_command_builtin;
     }
     if (!handled) {

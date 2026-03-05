@@ -1864,6 +1864,61 @@ static int run_external_argv(struct shell_state *state, char *const argv[],
     return 1;
 }
 
+static bool path_resolves_command(const char *name) {
+    const char *path;
+    const char *p;
+
+    if (name == NULL || name[0] == '\0') {
+        return false;
+    }
+    if (strchr(name, '/') != NULL) {
+        return access(name, X_OK) == 0;
+    }
+
+    path = getenv("PATH");
+    if (path == NULL || path[0] == '\0') {
+        return false;
+    }
+
+    p = path;
+    while (1) {
+        const char *end;
+        size_t dlen;
+        const char *dir;
+        char *candidate;
+        bool found;
+
+        end = strchr(p, ':');
+        if (end == NULL) {
+            end = p + strlen(p);
+        }
+        dlen = (size_t)(end - p);
+        dir = dlen == 0 ? "." : p;
+
+        candidate = arena_xmalloc((dlen == 0 ? 1 : dlen) + 1 + strlen(name) + 1);
+        if (dlen == 0) {
+            strcpy(candidate, ".");
+        } else {
+            memcpy(candidate, dir, dlen);
+            candidate[dlen] = '\0';
+        }
+        strcat(candidate, "/");
+        strcat(candidate, name);
+
+        found = access(candidate, X_OK) == 0;
+        arena_maybe_free(candidate);
+        if (found) {
+            return true;
+        }
+        if (*end == '\0') {
+            break;
+        }
+        p = end + 1;
+    }
+
+    return false;
+}
+
 static int parse_redirections_from_source(const char *source, struct shell_state *state,
                                           struct redir_vec *redirs) {
     struct token_vec lexed;
@@ -2320,8 +2375,12 @@ static int execute_simple_command(struct shell_state *state, const char *source,
 
     if (allow_builtin) {
         bool run_in_shell;
+        bool builtin_available;
 
-        run_in_shell = function_body != NULL || builtin_is_name(argv[0]);
+        builtin_available = builtin_is_name(argv[0]) &&
+                            (!builtin_is_substitutive_name(argv[0]) ||
+                             path_resolves_command(argv[0]));
+        run_in_shell = function_body != NULL || builtin_available;
         if (persist_builtin_redirs) {
             if (apply_redirections(&redirs, false, state->noclobber, NULL) !=
                 0) {

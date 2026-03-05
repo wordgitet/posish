@@ -13,5 +13,6 @@ int builtin_try_special(struct shell_state *state, char *const argv[], bool *han
 int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handled);
 bool builtin_is_special_name(const char *name);
 bool builtin_is_name(const char *name);
+bool builtin_is_substitutive_name(const char *name);
 
 #endif

@@ -394,6 +394,63 @@ static int builtin_cd(struct shell_state *state, char *const argv[]) {
     return 0;
 }
 
+static int builtin_pwd(char *const argv[]) {
+    size_t i;
+    bool physical;
+    char *cwd;
+    const char *pwd;
+
+    i = 1;
+    physical = false;
+    while (argv[i] != NULL) {
+        size_t j;
+
+        if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
+        }
+        if (argv[i][0] != '-' || argv[i][1] == '\0' ||
+            (argv[i][1] == '-' && argv[i][2] == '\0')) {
+            break;
+        }
+
+        for (j = 1; argv[i][j] != '\0'; j++) {
+            if (argv[i][j] == 'L') {
+                physical = false;
+                continue;
+            }
+            if (argv[i][j] == 'P') {
+                physical = true;
+                continue;
+            }
+            posish_errorf("pwd: invalid option: -%c", argv[i][j]);
+            return 2;
+        }
+        i++;
+    }
+
+    if (argv[i] != NULL) {
+        posish_errorf("pwd: too many arguments");
+        return 1;
+    }
+
+    pwd = getenv("PWD");
+    if (!physical && pwd != NULL && pwd[0] == '/') {
+        puts(pwd);
+        return 0;
+    }
+
+    cwd = path_getcwd_alloc();
+    if (cwd == NULL) {
+        perror("pwd");
+        return 1;
+    }
+
+    puts(cwd);
+    arena_maybe_free(cwd);
+    return 0;
+}
+
 static int parse_octal_umask(const char *text, mode_t *mask_out) {
     char *end;
     unsigned long value;
@@ -1604,13 +1661,6 @@ static void forget_completed_job_by_pid(pid_t pid) {
     }
 }
 
-static void clear_last_async_if_job_matches(struct shell_state *state,
-                                            const struct jobs_entry_info *job) {
-    if (state != NULL && job != NULL && job->status_pid == state->last_async_pid) {
-        state->last_async_pid = -1;
-    }
-}
-
 static void report_job_lookup_error(const char *builtin_name, const char *spec,
                                     enum jobs_lookup_result lookup) {
     if (lookup == JOBS_LOOKUP_AMBIGUOUS) {
@@ -1652,9 +1702,6 @@ static int builtin_wait(struct shell_state *state, char *const argv[]) {
 
             jobs_note_process_status(w, status);
             forget_completed_job_by_pid(w);
-            if (w == state->last_async_pid) {
-                state->last_async_pid = -1;
-            }
             last_status = wait_status_to_shell_status(status);
         }
 
@@ -1695,7 +1742,6 @@ static int builtin_wait(struct shell_state *state, char *const argv[]) {
             if (jobs_job_is_completed(job.pgid)) {
                 jobs_forget_pgid(job.pgid);
             }
-            clear_last_async_if_job_matches(state, &job);
             last_status = wait_status_to_shell_status(status);
             continue;
         }
@@ -1714,9 +1760,6 @@ static int builtin_wait(struct shell_state *state, char *const argv[]) {
 
         jobs_note_process_status(pid, status);
         forget_completed_job_by_pid(pid);
-        if (pid == state->last_async_pid) {
-            state->last_async_pid = -1;
-        }
         last_status = wait_status_to_shell_status(status);
     }
 
@@ -1790,7 +1833,6 @@ static int wait_foreground_job(struct shell_state *state,
 
     if (jobs_job_is_completed(job_pgid)) {
         jobs_forget_pgid(job_pgid);
-        clear_last_async_if_job_matches(state, job);
     }
     return wait_status_to_shell_status(status);
 }
@@ -1943,6 +1985,10 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
         *handled = true;
         return builtin_cd(state, argv);
     }
+    if (strcmp(argv[0], "pwd") == 0) {
+        *handled = true;
+        return builtin_pwd(argv);
+    }
     if (strcmp(argv[0], "true") == 0) {
         *handled = true;
         return 0;
@@ -2019,12 +2065,13 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
 }
 
 bool builtin_is_name(const char *name) {
-    static const char *const regular_names[] = {"cd",    "true",    "false",
-                                                 "test",  "[",       "kill",
-                                                 "wait",  "fg",      "bg",
-                                                 "umask", "alias",   "command",
-                                                 "read",  "getopts", "hash",
-                                                 "jobs",  "type",    "unalias"};
+    static const char *const regular_names[] = {"cd",     "pwd",    "true",
+                                                "false",  "test",   "[",
+                                                "kill",   "wait",   "fg",
+                                                "bg",     "umask",  "alias",
+                                                "command","read",   "getopts",
+                                                "hash",   "jobs",   "type",
+                                                "unalias"};
     size_t i;
 
     if (name == NULL || name[0] == '\0') {
@@ -2047,4 +2094,8 @@ bool builtin_is_name(const char *name) {
     }
 #endif
     return false;
+}
+
+bool builtin_is_substitutive_name(const char *name) {
+    return name != NULL && strcmp(name, "pwd") == 0;
 }
