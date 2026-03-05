@@ -27,6 +27,19 @@ Binary:
 ./build/posish
 ```
 
+## Android (Termux)
+
+`posish` can be built on Termux using `gcc` without committing Android-specific
+paths into generated files.
+
+```sh
+pkg install build-essential autoconf automake
+autoreconf -fi
+CC=gcc sh ./configure --prefix="$PREFIX"
+make -j"$(nproc)"
+make install
+```
+
 ## Run Tests
 
 ```sh
