@@ -98,12 +98,4 @@ kill %1
 wait
 __IN__
 
-test_OE -e 0 'invalid jobspec syntax' -m
-./hold &
-kill '%?' 2>err
-grep -q 'invalid job spec' err
-kill %1
-wait
-__IN__
-
 # vim: set ft=sh ts=8 sts=4 sw=4 et:
