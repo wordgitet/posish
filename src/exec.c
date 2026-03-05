@@ -1850,7 +1850,8 @@ static int run_external_argv(struct shell_state *state, char *const argv[],
         return WEXITSTATUS(status);
     }
     if (WIFSTOPPED(status)) {
-        jobs_note_stopped_with_command(pid, pid, argv[0]);
+        jobs_track_job(pid, &pid, 1, pid, argv[0], true);
+        jobs_note_process_status(pid, status);
         trace_log(POSISH_TRACE_SIGNALS, "external pid=%ld stopped sig=%d",
                   (long)pid, WSTOPSIG(status));
         return 128 + WSTOPSIG(status);
@@ -2596,7 +2597,8 @@ static int run_subshell_command(struct shell_state *parent_state,
         return WEXITSTATUS(status);
     }
     if (WIFSTOPPED(status)) {
-        jobs_note_stopped_with_command(pid, pid, source);
+        jobs_track_job(pid, &pid, 1, pid, source, true);
+        jobs_note_process_status(pid, status);
         trace_log(POSISH_TRACE_SIGNALS, "subshell pid=%ld stopped sig=%d",
                   (long)pid, WSTOPSIG(status));
         return 128 + WSTOPSIG(status);
@@ -3315,6 +3317,8 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
     bool isolate_pipeline_pgid;
     bool pipefail_snapshot;
     int *command_statuses;
+    int *wait_statuses;
+    bool *have_wait_statuses;
     int last_status;
     int in_fd;
 
@@ -3496,6 +3500,10 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
 
     pids = arena_xmalloc(sizeof(*pids) * cmd_len);
     command_statuses = arena_xmalloc(sizeof(*command_statuses) * cmd_len);
+    wait_statuses = arena_xmalloc(sizeof(*wait_statuses) * cmd_len);
+    have_wait_statuses = arena_xmalloc(sizeof(*have_wait_statuses) * cmd_len);
+    memset(wait_statuses, 0, sizeof(*wait_statuses) * cmd_len);
+    memset(have_wait_statuses, 0, sizeof(*have_wait_statuses) * cmd_len);
     pipeline_pgid = -1;
     isolate_pipeline_pgid = state->monitor_mode && state->main_context;
     pipefail_snapshot = state->pipefail;
@@ -3514,6 +3522,8 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
                 free_string_vec(commands, cmd_len);
                 arena_maybe_free(pids);
                 arena_maybe_free(command_statuses);
+                arena_maybe_free(wait_statuses);
+                arena_maybe_free(have_wait_statuses);
                 arena_maybe_free(work);
                 return 1;
             }
@@ -3529,6 +3539,8 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
             free_string_vec(commands, cmd_len);
             arena_maybe_free(pids);
             arena_maybe_free(command_statuses);
+            arena_maybe_free(wait_statuses);
+            arena_maybe_free(have_wait_statuses);
             arena_maybe_free(work);
             return 1;
         }
@@ -3619,15 +3631,37 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
             continue;
         }
 
+        wait_statuses[i] = wstatus;
+        have_wait_statuses[i] = true;
+
         if (WIFEXITED(wstatus)) {
             command_status = WEXITSTATUS(wstatus);
         } else if (WIFSTOPPED(wstatus)) {
-            jobs_note_stopped_with_command(pids[i], pids[i], commands[i]);
+            pid_t job_pgid;
+            pid_t status_pid;
+            size_t j;
+
+            job_pgid = isolate_pipeline_pgid && pipeline_pgid > 0 ? pipeline_pgid
+                                                                  : pids[i];
+            status_pid = pids[cmd_len - 1];
+            jobs_track_job(job_pgid, pids, cmd_len, status_pid, source, true);
+            for (j = 0; j < cmd_len; j++) {
+                if (have_wait_statuses[j]) {
+                    jobs_note_process_status(pids[j], wait_statuses[j]);
+                }
+            }
             command_status = 128 + WSTOPSIG(wstatus);
         } else if (WIFSIGNALED(wstatus)) {
             command_status = 128 + WTERMSIG(wstatus);
         } else {
             command_status = 1;
+        }
+        if (!WIFSTOPPED(wstatus)) {
+            struct jobs_entry_info tracked_job;
+
+            if (jobs_find_by_pid(pids[i], &tracked_job)) {
+                jobs_note_process_status(pids[i], wstatus);
+            }
         }
         command_statuses[i] = command_status;
     }
@@ -3649,6 +3683,8 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
     free_string_vec(commands, cmd_len);
     arena_maybe_free(pids);
     arena_maybe_free(command_statuses);
+    arena_maybe_free(wait_statuses);
+    arena_maybe_free(have_wait_statuses);
     arena_maybe_free(work);
 
     if (negate) {

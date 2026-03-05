@@ -840,10 +840,18 @@ static int builtin_kill(char *const argv[]) {
 
         if (argv[i][0] == '%') {
             struct jobs_entry_info job;
+            enum jobs_lookup_result lookup;
             char *pid_text;
 
-            if (!jobs_get_by_spec(argv[i], &job) || job.pgid <= 0) {
-                posish_errorf("kill: no such job: %s", argv[i]);
+            lookup = jobs_get_by_spec(argv[i], &job);
+            if (lookup != JOBS_LOOKUP_OK || job.pgid <= 0) {
+                if (lookup == JOBS_LOOKUP_AMBIGUOUS) {
+                    posish_errorf("kill: ambiguous job: %s", argv[i]);
+                } else if (lookup == JOBS_LOOKUP_INVALID) {
+                    posish_errorf("kill: invalid job spec: %s", argv[i]);
+                } else {
+                    posish_errorf("kill: no such job: %s", argv[i]);
+                }
                 status = 1;
                 goto done;
             }
@@ -1476,20 +1484,102 @@ static int wait_for_pid(struct shell_state *state, pid_t pid, int *status_out,
     }
 }
 
-static int parse_wait_operand(const char *text, pid_t *pid_out) {
+static int wait_for_job(struct shell_state *state,
+                        const struct jobs_entry_info *job, int *status_out,
+                        int *interrupted_signal_out) {
+    pid_t job_pgid;
+    int cached_status;
+
+    if (job == NULL || status_out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    job_pgid = job->pgid > 0 ? job->pgid : job->status_pid;
+    if (job_pgid <= 0) {
+        errno = ESRCH;
+        return -1;
+    }
+
+    if (jobs_job_is_completed(job_pgid)) {
+        if (jobs_get_job_wait_status(job_pgid, &cached_status)) {
+            *status_out = cached_status;
+            return 0;
+        }
+        errno = ECHILD;
+        return -1;
+    }
+
+    for (;;) {
+        int previous_signal;
+        int status;
+        pid_t w;
+        struct jobs_entry_info current_job;
+
+        previous_signal = state->last_handled_signal;
+        w = waitpid(-job_pgid, &status, WUNTRACED);
+        if (w < 0) {
+            if (errno == EINTR) {
+                shell_run_pending_traps(state);
+                if (interrupted_signal_out != NULL &&
+                    state->last_handled_signal != previous_signal) {
+                    *interrupted_signal_out = state->last_handled_signal;
+                    errno = EINTR;
+                    return -1;
+                }
+                continue;
+            }
+            return -1;
+        }
+
+        jobs_note_process_status(w, status);
+        if (WIFSTOPPED(status)) {
+            if (jobs_get_job_wait_status(job_pgid, &cached_status)) {
+                *status_out = cached_status;
+            } else {
+                *status_out = status;
+            }
+            return 0;
+        }
+        if (!jobs_find_by_pgid(job_pgid, &current_job)) {
+            *status_out = status;
+            return 0;
+        }
+        if (jobs_job_is_completed(job_pgid)) {
+            if (jobs_get_job_wait_status(job_pgid, &cached_status)) {
+                *status_out = cached_status;
+            } else {
+                *status_out = status;
+            }
+            return 0;
+        }
+    }
+}
+
+static int parse_wait_operand(const char *text, pid_t *pid_out,
+                              struct jobs_entry_info *job_out, bool *is_job_out) {
     char *end;
     long n;
 
-    if (text[0] == '%') {
-        pid_t pid;
+    if (pid_out == NULL || job_out == NULL || is_job_out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
 
-        pid = jobs_resolve_spec(text);
-        if (pid <= 0) {
-            errno = ESRCH;
-            return -1;
+    if (text[0] == '%') {
+        enum jobs_lookup_result lookup;
+
+        lookup = jobs_get_by_spec(text, job_out);
+        if (lookup == JOBS_LOOKUP_OK) {
+            *is_job_out = true;
+            return 0;
         }
-        *pid_out = pid;
-        return 0;
+        if (lookup == JOBS_LOOKUP_NO_MATCH) {
+            errno = ESRCH;
+        } else {
+            errno = EINVAL;
+        }
+        return -1;
     }
 
     errno = 0;
@@ -1499,7 +1589,37 @@ static int parse_wait_operand(const char *text, pid_t *pid_out) {
         return -1;
     }
     *pid_out = (pid_t)n;
+    *is_job_out = false;
     return 0;
+}
+
+static void forget_completed_job_by_pid(pid_t pid) {
+    struct jobs_entry_info job;
+
+    if (!jobs_find_by_pid(pid, &job)) {
+        return;
+    }
+    if (jobs_job_is_completed(job.pgid)) {
+        jobs_forget_pgid(job.pgid);
+    }
+}
+
+static void clear_last_async_if_job_matches(struct shell_state *state,
+                                            const struct jobs_entry_info *job) {
+    if (state != NULL && job != NULL && job->status_pid == state->last_async_pid) {
+        state->last_async_pid = -1;
+    }
+}
+
+static void report_job_lookup_error(const char *builtin_name, const char *spec,
+                                    enum jobs_lookup_result lookup) {
+    if (lookup == JOBS_LOOKUP_AMBIGUOUS) {
+        posish_errorf("%s: ambiguous job: %s", builtin_name, spec);
+    } else if (lookup == JOBS_LOOKUP_INVALID) {
+        posish_errorf("%s: invalid job spec: %s", builtin_name, spec);
+    } else {
+        posish_errorf("%s: no such job: %s", builtin_name, spec);
+    }
 }
 
 static int builtin_wait(struct shell_state *state, char *const argv[]) {
@@ -1530,7 +1650,8 @@ static int builtin_wait(struct shell_state *state, char *const argv[]) {
                 return 1;
             }
 
-            jobs_forget(w);
+            jobs_note_process_status(w, status);
+            forget_completed_job_by_pid(w);
             if (w == state->last_async_pid) {
                 state->last_async_pid = -1;
             }
@@ -1545,8 +1666,11 @@ static int builtin_wait(struct shell_state *state, char *const argv[]) {
         pid_t pid;
         int interrupted_signal;
         int status;
+        struct jobs_entry_info job;
+        bool is_job;
 
-        if (parse_wait_operand(argv[i], &pid) != 0) {
+        interrupted_signal = 0;
+        if (parse_wait_operand(argv[i], &pid, &job, &is_job) != 0) {
             if (errno == ESRCH) {
                 last_status = 127;
                 continue;
@@ -1556,7 +1680,26 @@ static int builtin_wait(struct shell_state *state, char *const argv[]) {
             continue;
         }
 
-        interrupted_signal = 0;
+        if (is_job) {
+            if (wait_for_job(state, &job, &status, &interrupted_signal) != 0) {
+                if (errno == ECHILD) {
+                    last_status = 127;
+                    continue;
+                }
+                if (errno == EINTR && interrupted_signal > 0) {
+                    return 128 + interrupted_signal;
+                }
+                perror("wait");
+                return 1;
+            }
+            if (jobs_job_is_completed(job.pgid)) {
+                jobs_forget_pgid(job.pgid);
+            }
+            clear_last_async_if_job_matches(state, &job);
+            last_status = wait_status_to_shell_status(status);
+            continue;
+        }
+
         if (wait_for_pid(state, pid, &status, &interrupted_signal) != 0) {
             if (errno == ECHILD) {
                 last_status = 127;
@@ -1569,7 +1712,8 @@ static int builtin_wait(struct shell_state *state, char *const argv[]) {
             return 1;
         }
 
-        jobs_forget(pid);
+        jobs_note_process_status(pid, status);
+        forget_completed_job_by_pid(pid);
         if (pid == state->last_async_pid) {
             state->last_async_pid = -1;
         }
@@ -1591,7 +1735,7 @@ static int wait_foreground_job(struct shell_state *state,
     transferred_tty = false;
     close_tty = false;
     shell_pgid = getpgrp();
-    job_pgid = job->pgid > 0 ? job->pgid : job->pid;
+    job_pgid = job->pgid > 0 ? job->pgid : job->status_pid;
     tty_fd = -1;
     if (state->monitor_mode) {
         if (isatty(STDIN_FILENO)) {
@@ -1614,7 +1758,7 @@ static int wait_foreground_job(struct shell_state *state,
         }
     }
 
-    jobs_mark_running(job->pid);
+    jobs_mark_job_running(job_pgid);
     if (kill(-job_pgid, SIGCONT) != 0) {
         if (transferred_tty) {
             (void)tcsetpgrp(tty_fd, shell_pgid);
@@ -1626,22 +1770,15 @@ static int wait_foreground_job(struct shell_state *state,
         return 1;
     }
 
-    for (;;) {
-        if (waitpid(job->pid, &status, WUNTRACED) < 0) {
-            if (errno == EINTR) {
-                shell_run_pending_traps(state);
-                continue;
-            }
-            if (transferred_tty) {
-                (void)tcsetpgrp(tty_fd, shell_pgid);
-            }
-            if (close_tty) {
-                close(tty_fd);
-            }
-            perror("waitpid");
-            return 1;
+    if (wait_for_job(state, job, &status, NULL) != 0) {
+        if (transferred_tty) {
+            (void)tcsetpgrp(tty_fd, shell_pgid);
         }
-        break;
+        if (close_tty) {
+            close(tty_fd);
+        }
+        perror("waitpid");
+        return 1;
     }
 
     if (transferred_tty) {
@@ -1651,10 +1788,9 @@ static int wait_foreground_job(struct shell_state *state,
         close(tty_fd);
     }
 
-    if (WIFSTOPPED(status)) {
-        jobs_note_stopped_with_command(job->pid, job_pgid, job->command);
-    } else {
-        jobs_forget(job->pid);
+    if (jobs_job_is_completed(job_pgid)) {
+        jobs_forget_pgid(job_pgid);
+        clear_last_async_if_job_matches(state, job);
     }
     return wait_status_to_shell_status(status);
 }
@@ -1668,12 +1804,15 @@ static int builtin_fg(struct shell_state *state, char *const argv[]) {
     }
 
     if (argv[1] != NULL) {
+        enum jobs_lookup_result lookup;
+
         if (argv[2] != NULL) {
             posish_errorf("fg: too many arguments");
             return 1;
         }
-        if (!jobs_get_by_spec(argv[1], &job)) {
-            posish_errorf("fg: no such job: %s", argv[1]);
+        lookup = jobs_get_by_spec(argv[1], &job);
+        if (lookup != JOBS_LOOKUP_OK) {
+            report_job_lookup_error("fg", argv[1], lookup);
             return 1;
         }
     } else {
@@ -1711,8 +1850,8 @@ static int builtin_bg(struct shell_state *state, char *const argv[]) {
         if (job.stopped) {
             pid_t job_pgid;
 
-            job_pgid = job.pgid > 0 ? job.pgid : job.pid;
-            jobs_mark_running(job.pid);
+            job_pgid = job.pgid > 0 ? job.pgid : job.status_pid;
+            jobs_mark_job_running(job_pgid);
             if (kill(-job_pgid, SIGCONT) != 0) {
                 perror("bg");
                 return 1;
@@ -1721,18 +1860,20 @@ static int builtin_bg(struct shell_state *state, char *const argv[]) {
         if (job.command != NULL && job.command[0] != '\0') {
             printf("[%u] %s\n", job.job_id, job.command);
         } else {
-            printf("[%u] %ld\n", job.job_id, (long)job.pid);
+            printf("[%u] %ld\n", job.job_id, (long)job.status_pid);
         }
         fflush(stdout);
-        state->last_async_pid = job.pid;
+        state->last_async_pid = job.status_pid;
         return 0;
     }
 
     for (i = 1; argv[i] != NULL; i++) {
         struct jobs_entry_info job;
+        enum jobs_lookup_result lookup;
 
-        if (!jobs_get_by_spec(argv[i], &job)) {
-            posish_errorf("bg: no such job: %s", argv[i]);
+        lookup = jobs_get_by_spec(argv[i], &job);
+        if (lookup != JOBS_LOOKUP_OK) {
+            report_job_lookup_error("bg", argv[i], lookup);
             status = 1;
             continue;
         }
@@ -1740,8 +1881,8 @@ static int builtin_bg(struct shell_state *state, char *const argv[]) {
         if (job.stopped) {
             pid_t job_pgid;
 
-            job_pgid = job.pgid > 0 ? job.pgid : job.pid;
-            jobs_mark_running(job.pid);
+            job_pgid = job.pgid > 0 ? job.pgid : job.status_pid;
+            jobs_mark_job_running(job_pgid);
             if (kill(-job_pgid, SIGCONT) != 0) {
                 perror("bg");
                 status = 1;
@@ -1751,10 +1892,10 @@ static int builtin_bg(struct shell_state *state, char *const argv[]) {
         if (job.command != NULL && job.command[0] != '\0') {
             printf("[%u] %s\n", job.job_id, job.command);
         } else {
-            printf("[%u] %ld\n", job.job_id, (long)job.pid);
+            printf("[%u] %ld\n", job.job_id, (long)job.status_pid);
         }
         fflush(stdout);
-        state->last_async_pid = job.pid;
+        state->last_async_pid = job.status_pid;
     }
 
     return status;
