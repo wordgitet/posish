@@ -15,6 +15,13 @@ autoreconf -fi
 make
 ```
 
+If the generated configure cache points at a stale or host-inappropriate
+compiler, override `CC` explicitly for local builds:
+
+```sh
+make -B all CC=cc
+```
+
 Enable tracing hooks at configure time (disabled by default):
 
 ```sh
@@ -42,13 +49,20 @@ make install
 
 ## Run Tests
 
+If `yash` is not discoverable at configure time, pass `YASH_RUNNER` explicitly.
+On this machine, the reliable local path is:
+
 ```sh
-make test-smoke
-make test-posix
-make test-stop
-make test-signal
-make test-regressions
-make rebaseline-fulltruth
+YASH_RUNNER=/usr/local/bin/yash
+```
+
+```sh
+make test-smoke CC=cc YASH_RUNNER=/usr/local/bin/yash
+make test-posix CC=cc YASH_RUNNER=/usr/local/bin/yash
+make test-stop CC=cc YASH_RUNNER=/usr/local/bin/yash
+make test-signal CC=cc YASH_RUNNER=/usr/local/bin/yash
+make test-regressions CC=cc YASH_RUNNER=/usr/local/bin/yash
+make rebaseline-fulltruth CC=cc YASH_RUNNER=/usr/local/bin/yash
 ```
 
 Signal-specific notes:
@@ -93,13 +107,22 @@ make test-posix TESTEE=/absolute/path/to/shell
 If missing, install the latest yash (recommended: build from source) or set:
 
 ```sh
-make test-posix YASH_RUNNER=/absolute/path/to/yash
+make test-posix CC=cc YASH_RUNNER=/absolute/path/to/yash
 ```
 
 Append pass-rate metrics to `tmp/metrics/posix.csv`:
 
 ```sh
 make metrics
+```
+
+## Local Notes
+
+Some local runs can leave behind permissioned `tests/posix/tmp.*` artifacts.
+If `make clean` fails because of those directories, prefer forcing a rebuild:
+
+```sh
+make -B all CC=cc
 ```
 
 ## Allocator Policy
