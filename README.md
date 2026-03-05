@@ -49,20 +49,15 @@ make install
 
 ## Run Tests
 
-If `yash` is not discoverable at configure time, pass `YASH_RUNNER` explicitly.
-On this machine, the reliable local path is:
+If `yash` is not discoverable at configure time, pass `YASH_RUNNER` explicitly:
 
 ```sh
-YASH_RUNNER=/usr/local/bin/yash
-```
-
-```sh
-make test-smoke CC=cc YASH_RUNNER=/usr/local/bin/yash
-make test-posix CC=cc YASH_RUNNER=/usr/local/bin/yash
-make test-stop CC=cc YASH_RUNNER=/usr/local/bin/yash
-make test-signal CC=cc YASH_RUNNER=/usr/local/bin/yash
-make test-regressions CC=cc YASH_RUNNER=/usr/local/bin/yash
-make rebaseline-fulltruth CC=cc YASH_RUNNER=/usr/local/bin/yash
+make test-smoke CC=cc YASH_RUNNER=/absolute/path/to/yash
+make test-posix CC=cc YASH_RUNNER=/absolute/path/to/yash
+make test-stop CC=cc YASH_RUNNER=/absolute/path/to/yash
+make test-signal CC=cc YASH_RUNNER=/absolute/path/to/yash
+make test-regressions CC=cc YASH_RUNNER=/absolute/path/to/yash
+make rebaseline-fulltruth CC=cc YASH_RUNNER=/absolute/path/to/yash
 ```
 
 Signal-specific notes:
