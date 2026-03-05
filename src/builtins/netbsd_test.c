@@ -3,6 +3,7 @@
 /* posish - netbsd test builtin wrapper */
 
 #include "builtins/netbsd_test.h"
+#include "compat.h"
 
 #include <setjmp.h>
 #include <stdarg.h>
@@ -11,27 +12,6 @@
 
 /* Compile the vendored NetBSD test(1) source in shell-builtin mode. */
 #define SHELL 1
-
-/* NetBSD-local helper macros that may be absent on non-NetBSD libc headers. */
-#ifndef __RCSID
-#define __RCSID(x) \
-    static const char netbsd_test_rcsid[] __attribute__((unused)) = x
-#endif
-#ifndef __dead
-#define __dead __attribute__((__noreturn__))
-#endif
-#ifndef __printflike
-#define __printflike(a, b) __attribute__((__format__(__printf__, a, b)))
-#endif
-#ifndef __arraycount
-#define __arraycount(a) (sizeof(a) / sizeof((a)[0]))
-#endif
-#ifndef timespeccmp
-#define timespeccmp(tsp, usp, cmp) \
-    (((tsp)->tv_sec == (usp)->tv_sec) ? \
-         ((tsp)->tv_nsec cmp(usp)->tv_nsec) : \
-         ((tsp)->tv_sec cmp(usp)->tv_sec))
-#endif
 
 /*
  * NetBSD test(1) reports syntax/runtime issues via error() and exits with status 2.
