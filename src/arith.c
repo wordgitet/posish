@@ -10,6 +10,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -85,6 +86,10 @@ static void parser_fail(struct arith_parser *p, const char *message) {
     posish_errorf("%s", message);
     p->failed = true;
   }
+}
+
+static bool valid_shift_width(long width) {
+  return width >= 0 && width < (long)(sizeof(long) * CHAR_BIT);
 }
 
 static bool is_name_start(char ch) {
@@ -596,6 +601,11 @@ static struct arith_value parse_shift(struct arith_parser *p, bool eval) {
       continue;
     }
 
+    if (!valid_shift_width(right.value)) {
+      parser_fail(p, "arithmetic error: invalid shift width");
+      return make_value(0);
+    }
+
     if (op == TOK_SHL) {
       left.value <<= right.value;
     } else {
@@ -860,8 +870,16 @@ static struct arith_value parse_assignment(struct arith_parser *p, bool eval) {
     } else if (op == TOK_SUB_ASSIGN) {
       assigned = lhs - right.value;
     } else if (op == TOK_SHL_ASSIGN) {
+      if (!valid_shift_width(right.value)) {
+        parser_fail(p, "arithmetic error: invalid shift width");
+        return make_value(0);
+      }
       assigned = lhs << right.value;
     } else if (op == TOK_SHR_ASSIGN) {
+      if (!valid_shift_width(right.value)) {
+        parser_fail(p, "arithmetic error: invalid shift width");
+        return make_value(0);
+      }
       assigned = lhs >> right.value;
     } else if (op == TOK_AND_ASSIGN) {
       assigned = lhs & right.value;
