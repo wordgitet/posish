@@ -1,5 +1,5 @@
 AC_PREREQ([2.69])
-AC_INIT([posish], [0.1.1], [https://github.com/example/posish])
+AC_INIT([posish], [0.1.2], [https://github.com/example/posish])
 AC_CONFIG_SRCDIR([src/main.c])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_AUX_DIR([build-aux])
