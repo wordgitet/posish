@@ -3,7 +3,7 @@
 /* posish - regular builtins */
 
 #include "builtins/builtin.h"
-#include "builtins/netbsd_test.h"
+#include "builtins/test.h"
 
 #include "arena.h"
 #include "error.h"
@@ -693,7 +693,7 @@ static int builtin_test(char *const argv[]) {
     while (argv[argc] != NULL) {
         argc++;
     }
-    return posish_netbsd_test_builtin((int)argc, argv);
+    return posish_test_builtin((int)argc, argv);
 }
 
 #if POSISH_TEST_HELPERS

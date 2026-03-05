@@ -5,7 +5,7 @@ SHELL = /bin/sh
 
 CC = @CC@
 POSISH_TEST_HELPERS ?= 0
-CPPFLAGS = @CPPFLAGS@ -D_POSIX_C_SOURCE=200809L -DPOSISH_TEST_HELPERS=$(POSISH_TEST_HELPERS) -Iinclude -Isrc -include config.h
+CPPFLAGS = @CPPFLAGS@ -D_POSIX_C_SOURCE=200809L -DPOSISH_TEST_HELPERS=$(POSISH_TEST_HELPERS) -Iinclude -Isrc -include config.h -include compat.h
 CFLAGS = @CFLAGS@ -Wall -Wextra -Wpedantic
 LDFLAGS = @LDFLAGS@
 LIBS = @LIBS@
@@ -29,6 +29,7 @@ SRC = \
 	src/heredoc_command.c \
 	src/expand.c \
 	src/exec.c \
+	src/alias.c \
 	src/redir.c \
 	src/jobs.c \
 	src/signals.c \
@@ -39,7 +40,8 @@ SRC = \
 	src/error.c \
 	src/arena.c \
 	src/builtins/special.c \
-	src/builtins/regular.c
+	src/builtins/regular.c \
+	src/builtins/test.c
 
 OBJ = \
 	src/main.o \
@@ -53,6 +55,7 @@ OBJ = \
 	src/heredoc_command.o \
 	src/expand.o \
 	src/exec.o \
+	src/alias.o \
 	src/redir.o \
 	src/jobs.o \
 	src/signals.o \
@@ -63,7 +66,8 @@ OBJ = \
 	src/error.o \
 	src/arena.o \
 	src/builtins/special.o \
-	src/builtins/regular.o
+	src/builtins/regular.o \
+	src/builtins/test.o
 
 SMOKE_TEST_SOURCES = \
 	nop-p.tst \

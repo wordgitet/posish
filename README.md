@@ -109,9 +109,6 @@ Hybrid behavior is intentional:
 
 Direct raw allocation calls are intentionally limited to:
 - `src/arena.c` allocator internals
-- imported vendor test implementation files:
-  - `src/builtins/netbsd_test.c`
-  - `src/builtins/netbsd_test_vendor.c`
 
 When built with `--enable-trace`, runtime tracing is controlled by:
 
