@@ -167,3 +167,157 @@ void signals_clear_pending(int signo) {
         trace_log(POSISH_TRACE_SIGNALS, "clear pending signal=%d", signo);
     }
 }
+
+/* ---------- child trap / signal disposition (moved from exec.c) ---------- */
+
+#include "shell.h"
+
+static bool inherited_ignore_locked(const struct shell_state *state, int signo) {
+    return !state->interactive && signals_inherited_ignored(signo) &&
+           !state->parent_was_interactive;
+}
+
+static bool trap_clear_keeps_ignore(const struct shell_state *state, int signo) {
+    return inherited_ignore_locked(state, signo);
+}
+
+static bool trace_signal_of_interest(int signo) {
+#ifdef SIGINT
+    if (signo == SIGINT) return true;
+#endif
+#ifdef SIGQUIT
+    if (signo == SIGQUIT) return true;
+#endif
+#ifdef SIGTERM
+    if (signo == SIGTERM) return true;
+#endif
+#ifdef SIGTSTP
+    if (signo == SIGTSTP) return true;
+#endif
+#ifdef SIGTTIN
+    if (signo == SIGTTIN) return true;
+#endif
+#ifdef SIGTTOU
+    if (signo == SIGTTOU) return true;
+#endif
+    return false;
+}
+
+static void apply_child_signal_disposition(const struct shell_state *state,
+                                           char **trap_slot, int signo,
+                                           bool reset_policy_ignore) {
+    const char *trap_value;
+
+    trap_value = trap_slot != NULL ? *trap_slot : state->signal_traps[signo];
+    if (trap_value != NULL) {
+        if (trap_value[0] == '\0') {
+            (void)signals_set_ignored(signo);
+        } else if (inherited_ignore_locked(state, signo)) {
+            if (trap_slot != NULL) *trap_slot = NULL;
+            (void)signals_set_ignored(signo);
+        } else {
+            if (trap_slot != NULL) *trap_slot = NULL;
+            (void)signals_set_default(signo);
+        }
+        signals_clear_pending(signo);
+        return;
+    }
+
+    if (state->signal_cleared[signo]) {
+        if (trap_clear_keeps_ignore(state, signo)) {
+            (void)signals_set_ignored(signo);
+        } else {
+            (void)signals_set_default(signo);
+        }
+        signals_clear_pending(signo);
+        return;
+    }
+
+    if (reset_policy_ignore && signals_policy_ignored(signo) &&
+        !inherited_ignore_locked(state, signo) &&
+        !(state->interactive && signals_inherited_ignored(signo))) {
+        (void)signals_set_default(signo);
+    }
+    signals_clear_pending(signo);
+}
+
+void signals_reset_traps_for_child(struct shell_state *state) {
+    int signo;
+
+    trace_log(POSISH_TRACE_SIGNALS,
+              "reset child traps interactive=%d main=%d async=%d monitor=%d",
+              state->interactive ? 1 : 0, state->main_context ? 1 : 0,
+              state->in_async_context ? 1 : 0, state->monitor_mode ? 1 : 0);
+
+    for (signo = 1; signo < NSIG; signo++) {
+        if (trace_signal_of_interest(signo)) {
+            trace_log(POSISH_TRACE_SIGNALS,
+                      "child reset signo=%d trap=%s cleared=%d inherited_ign=%d policy_ign=%d",
+                      signo,
+                      state->signal_traps[signo] == NULL ? "(null)"
+                          : (state->signal_traps[signo][0] == '\0' ? "ignore" : "command"),
+                      state->signal_cleared[signo] ? 1 : 0,
+                      signals_inherited_ignored(signo) ? 1 : 0,
+                      signals_policy_ignored(signo) ? 1 : 0);
+        }
+        apply_child_signal_disposition(state, &state->signal_traps[signo], signo, true);
+    }
+}
+
+void signals_reset_exit_trap_for_child(struct shell_state *state) {
+    state->exit_trap = NULL;
+}
+
+void exec_prepare_signals_for_exec_child(const struct shell_state *state) {
+    int signo;
+
+    trace_log(POSISH_TRACE_SIGNALS,
+              "prepare exec child interactive=%d main=%d async=%d monitor=%d",
+              state->interactive ? 1 : 0, state->main_context ? 1 : 0,
+              state->in_async_context ? 1 : 0, state->monitor_mode ? 1 : 0);
+
+    for (signo = 1; signo < NSIG; signo++) {
+        if (trace_signal_of_interest(signo)) {
+            trace_log(POSISH_TRACE_SIGNALS,
+                      "exec child signo=%d trap=%s cleared=%d inherited_ign=%d policy_ign=%d",
+                      signo,
+                      state->signal_traps[signo] == NULL ? "(null)"
+                          : (state->signal_traps[signo][0] == '\0' ? "ignore" : "command"),
+                      state->signal_cleared[signo] ? 1 : 0,
+                      signals_inherited_ignored(signo) ? 1 : 0,
+                      signals_policy_ignored(signo) ? 1 : 0);
+        }
+
+#ifdef SIGINT
+        if (signo == SIGINT && state->in_async_context && !state->monitor_mode) {
+            if (state->signal_traps[signo] == NULL && !state->signal_cleared[signo]) {
+                (void)signals_set_ignored(signo);
+                signals_clear_pending(signo);
+                continue;
+            }
+            if (state->signal_traps[signo] != NULL &&
+                state->signal_traps[signo][0] == '\0') {
+                (void)signals_set_ignored(signo);
+                signals_clear_pending(signo);
+                continue;
+            }
+        }
+#endif
+#ifdef SIGQUIT
+        if (signo == SIGQUIT && state->in_async_context && !state->monitor_mode) {
+            if (state->signal_traps[signo] == NULL && !state->signal_cleared[signo]) {
+                (void)signals_set_ignored(signo);
+                signals_clear_pending(signo);
+                continue;
+            }
+            if (state->signal_traps[signo] != NULL &&
+                state->signal_traps[signo][0] == '\0') {
+                (void)signals_set_ignored(signo);
+                signals_clear_pending(signo);
+                continue;
+            }
+        }
+#endif
+        apply_child_signal_disposition(state, NULL, signo, state->main_context);
+    }
+}

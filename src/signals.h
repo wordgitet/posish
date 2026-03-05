@@ -17,4 +17,9 @@ int signals_set_trap(int signo);
 int signals_take_next_pending(void);
 void signals_clear_pending(int signo);
 
+/* Child process trap/signal management */
+struct shell_state;
+void signals_reset_traps_for_child(struct shell_state *state);
+void signals_reset_exit_trap_for_child(struct shell_state *state);
+
 #endif
