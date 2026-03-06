@@ -41,12 +41,26 @@ enum ast_andor_op {
     AST_ANDOR_OR
 };
 
+enum ast_case_clause_term {
+    AST_CASE_TERM_END,
+    AST_CASE_TERM_DBL_SEMI,
+    AST_CASE_TERM_SEMI_AMP,
+    AST_CASE_TERM_DBL_SEMI_AMP
+};
+
 struct ast_word_vec {
     char **items;
     size_t len;
 };
 
 struct ast_node;
+
+struct ast_case_clause {
+    char *patterns;
+    char *body;
+    struct ast_node *body_node;
+    enum ast_case_clause_term terminator;
+};
 
 struct ast_node {
     enum ast_node_kind kind;
@@ -104,7 +118,9 @@ struct ast_node {
             bool implicit_words;
         } for_cmd;
         struct {
-            char *core;
+            char *word_expr;
+            struct ast_case_clause *clauses;
+            size_t clause_count;
             char *redir_suffix;
         } case_cmd;
     } data;

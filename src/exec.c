@@ -73,6 +73,7 @@ static int run_if_ast(struct shell_state *state, const struct ast_node *node);
 static int run_loop_ast(struct shell_state *state, const struct ast_node *node,
                         bool is_until);
 static int run_for_ast(struct shell_state *state, const struct ast_node *node);
+static int run_case_ast(struct shell_state *state, const struct ast_node *node);
 static int execute_command_atom(struct shell_state *state, const char *source,
                                 bool allow_builtin);
 static bool is_assignment_word(const char *word);
@@ -292,6 +293,14 @@ static bool ast_node_is_direct_exec_compatible(const struct ast_node *node) {
         return node->data.for_cmd.body_node != NULL &&
                ast_node_is_direct_exec_compatible(node->data.for_cmd.body_node);
     case AST_NODE_CASE:
+        for (i = 0; i < node->data.case_cmd.clause_count; i++) {
+            if (node->data.case_cmd.clauses[i].body_node != NULL &&
+                !ast_node_is_direct_exec_compatible(
+                    node->data.case_cmd.clauses[i].body_node)) {
+                return false;
+            }
+        }
+        return true;
     case AST_NODE_LEGACY:
         return false;
     }
@@ -338,6 +347,7 @@ static bool ast_node_uses_operator_execution(const struct ast_node *node) {
     case AST_NODE_FOR:
         return true;
     case AST_NODE_CASE:
+        return true;
     case AST_NODE_LEGACY:
         return false;
     }
@@ -3327,6 +3337,55 @@ done:
     return status;
 }
 
+static int execute_case_ast_body_node(struct shell_state *state,
+                                      const struct ast_node *node) {
+    return execute_ast_node(state, node, true);
+}
+
+static int run_case_ast(struct shell_state *state, const struct ast_node *node) {
+    struct redir_vec redirs;
+    struct fd_backup_vec backups;
+    bool redir_applied;
+    int status;
+
+    if (node == NULL || node->data.case_cmd.word_expr == NULL) {
+        return execute_command_atom(state, node != NULL ? node->source : "",
+                                    true);
+    }
+
+    redirs.items = NULL;
+    redirs.len = 0;
+    backups.items = NULL;
+    backups.len = 0;
+    redir_applied = false;
+
+    if (node->data.case_cmd.redir_suffix != NULL &&
+        node->data.case_cmd.redir_suffix[0] != '\0') {
+        if (parse_redirections_from_source(node->data.case_cmd.redir_suffix,
+                                           state, &redirs) != 0) {
+            return 2;
+        }
+        if (apply_redirections(&redirs, true, state->noclobber, &backups) !=
+            0) {
+            fd_backup_restore(&backups);
+            redir_vec_free(&redirs);
+            return 1;
+        }
+        redir_applied = true;
+    }
+
+    status = execute_structured_case_command(
+        state, node->data.case_cmd.word_expr, node->data.case_cmd.clauses,
+        node->data.case_cmd.clause_count, execute_program_text,
+        execute_case_ast_body_node);
+
+    if (redir_applied) {
+        fd_backup_restore(&backups);
+    }
+    redir_vec_free(&redirs);
+    return status;
+}
+
 static bool split_case_redirection_suffix(const char *source, char **core_out,
                                           char **suffix_out) {
     size_t i;
@@ -4249,7 +4308,7 @@ static int execute_ast_node(struct shell_state *state,
     case AST_NODE_FOR:
         return run_for_ast(state, node);
     case AST_NODE_CASE:
-        return execute_command_atom(state, node->source, allow_builtin);
+        return run_case_ast(state, node);
     case AST_NODE_LEGACY:
         return execute_program_text(state, node->source);
     }

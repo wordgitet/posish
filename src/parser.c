@@ -41,6 +41,10 @@ static struct ast_node *parse_embedded_program_root(struct parser_ctx *ctx,
                                                     const char *source,
                                                     size_t offset_hint,
                                                     int *err_out);
+static bool parse_case_structure(struct parser_ctx *ctx, const char *source,
+                                 size_t source_offset, char **word_expr_out,
+                                 struct ast_case_clause **clauses_out,
+                                 size_t *clause_count_out, int *err_out);
 
 static bool keyword_boundary(char ch) {
     return ch == '\0' || isspace((unsigned char)ch) || ch == ';' ||
@@ -870,6 +874,374 @@ static bool source_contains_heredoc_operator(const char *source) {
     return false;
 }
 
+static void ast_case_clause_vec_push(struct ast_case_clause **items,
+                                     size_t *len,
+                                     const struct ast_case_clause *item) {
+    *items = arena_xrealloc(*items, sizeof(**items) * (*len + 1));
+    (*items)[*len] = *item;
+    (*len)++;
+}
+
+static size_t skip_case_clause_leading_space_and_comments_parser(
+    const char *source, size_t pos) {
+    while (1) {
+        while (isspace((unsigned char)source[pos])) {
+            pos++;
+        }
+        if (source[pos] != '#') {
+            return pos;
+        }
+        while (source[pos] != '\0' && source[pos] != '\n') {
+            pos++;
+        }
+    }
+}
+
+static bool skip_backtick_subst_parser(const char *source, size_t start,
+                                       size_t *out_end) {
+    size_t i;
+
+    i = start + 1;
+    while (source[i] != '\0') {
+        if (source[i] == '\\' && source[i + 1] != '\0') {
+            i += 2;
+            continue;
+        }
+        if (source[i] == '`') {
+            *out_end = i;
+            return true;
+        }
+        i++;
+    }
+    return false;
+}
+
+static bool skip_braced_param_parser(const char *source, size_t start,
+                                     size_t *out_end) {
+    size_t i;
+    int depth;
+    char quote;
+
+    i = start + 2;
+    depth = 1;
+    quote = '\0';
+    while (source[i] != '\0') {
+        char ch;
+
+        ch = source[i];
+        if (quote == '\0') {
+            if (ch == '\\' && source[i + 1] != '\0') {
+                i += 2;
+                continue;
+            }
+            if (ch == '\'' || ch == '"') {
+                quote = ch;
+                i++;
+                continue;
+            }
+            if (ch == '{') {
+                depth++;
+            } else if (ch == '}') {
+                depth--;
+                if (depth == 0) {
+                    *out_end = i;
+                    return true;
+                }
+            }
+        } else if ((quote == '\'' && ch == '\'') ||
+                   (quote == '"' && ch == '"')) {
+            quote = '\0';
+        } else if (quote == '"' && ch == '\\' && source[i + 1] != '\0') {
+            i++;
+        }
+        i++;
+    }
+    return false;
+}
+
+static bool find_pattern_clause_close_parser(const char *source, size_t start,
+                                             size_t *out_end) {
+    size_t i;
+    char quote;
+
+    i = start;
+    quote = '\0';
+    while (source[i] != '\0') {
+        char ch;
+
+        ch = source[i];
+        if (quote == '\0') {
+            if (ch == '\\' && source[i + 1] != '\0') {
+                i += 2;
+                continue;
+            }
+            if (ch == '\'' || ch == '"') {
+                quote = ch;
+                i++;
+                continue;
+            }
+            if (ch == '`') {
+                size_t end;
+
+                if (!skip_backtick_subst_parser(source, i, &end)) {
+                    return false;
+                }
+                i = end + 1;
+                continue;
+            }
+            if (ch == '$' && source[i + 1] == '{') {
+                size_t end;
+
+                if (!skip_braced_param_parser(source, i, &end)) {
+                    return false;
+                }
+                i = end + 1;
+                continue;
+            }
+            if (ch == '$' && source[i + 1] == '(') {
+                size_t end;
+
+                if (!find_command_subst_end(source, i, &end)) {
+                    return false;
+                }
+                i = end + 1;
+                continue;
+            }
+            if (ch == ')') {
+                *out_end = i;
+                return true;
+            }
+            i++;
+            continue;
+        }
+
+        if ((quote == '\'' && ch == '\'') || (quote == '"' && ch == '"')) {
+            quote = '\0';
+        } else if (quote == '"' && ch == '\\' && source[i + 1] != '\0') {
+            i++;
+        }
+        i++;
+    }
+
+    return false;
+}
+
+static bool parse_case_structure(struct parser_ctx *ctx, const char *source,
+                                 size_t source_offset, char **word_expr_out,
+                                 struct ast_case_clause **clauses_out,
+                                 size_t *clause_count_out, int *err_out) {
+    size_t i;
+    size_t word_start;
+    size_t word_end;
+    bool found_in;
+    char quote;
+
+    *word_expr_out = NULL;
+    *clauses_out = NULL;
+    *clause_count_out = 0;
+
+    i = 0;
+    while (isspace((unsigned char)source[i])) {
+        i++;
+    }
+    if (strncmp(source + i, "case", 4) != 0 ||
+        !keyword_boundary(source[i + 4])) {
+        return false;
+    }
+    i += 4;
+
+    while (isspace((unsigned char)source[i])) {
+        i++;
+    }
+    word_start = i;
+    word_end = i;
+    found_in = false;
+    quote = '\0';
+
+    for (; source[i] != '\0'; i++) {
+        char ch;
+
+        ch = source[i];
+        if (quote == '\0') {
+            if (ch == '\\' && source[i + 1] != '\0') {
+                i++;
+                continue;
+            }
+            if (ch == '\'' || ch == '"') {
+                quote = ch;
+                continue;
+            }
+            if (isspace((unsigned char)ch)) {
+                size_t j;
+
+                j = i;
+                while (isspace((unsigned char)source[j])) {
+                    j++;
+                }
+                if (strncmp(source + j, "in", 2) == 0 &&
+                    keyword_boundary(source[j + 2])) {
+                    word_end = i;
+                    i = j + 2;
+                    found_in = true;
+                    break;
+                }
+            }
+        } else if (quote == '\'' && ch == '\'') {
+            quote = '\0';
+        } else if (quote == '"') {
+            if (ch == '\\' && source[i + 1] != '\0') {
+                i++;
+                continue;
+            }
+            if (ch == '"') {
+                quote = '\0';
+            }
+        }
+    }
+
+    if (!found_in) {
+        return false;
+    }
+
+    *word_expr_out = dup_trimmed_slice(source, word_start, word_end);
+
+    while (1) {
+        size_t pat_start;
+        size_t pat_end;
+        size_t cmd_start;
+        size_t cmd_end;
+        bool clause_ended_with_esac;
+        enum ast_case_clause_term terminator;
+        struct ast_case_clause clause;
+
+        while (isspace((unsigned char)source[i])) {
+            i++;
+        }
+
+        if (strncmp(source + i, "esac", 4) == 0 &&
+            keyword_boundary(source[i + 4])) {
+            size_t j;
+
+            j = i + 4;
+            while (isspace((unsigned char)source[j])) {
+                j++;
+            }
+            if (source[j] != '\0') {
+                return false;
+            }
+            break;
+        }
+
+        if (source[i] == '(') {
+            i++;
+        }
+        pat_start = i;
+        if (!find_pattern_clause_close_parser(source, i, &pat_end)) {
+            return false;
+        }
+        i = pat_end + 1;
+
+        i = skip_case_clause_leading_space_and_comments_parser(source, i);
+        cmd_start = i;
+        quote = '\0';
+        clause_ended_with_esac = false;
+        terminator = AST_CASE_TERM_END;
+        {
+            int nested_case_depth;
+
+            nested_case_depth = 0;
+            for (; source[i] != '\0'; i++) {
+                char ch;
+
+                ch = source[i];
+                if (quote == '\0') {
+                    if (ch == '\\' && source[i + 1] != '\0') {
+                        i++;
+                        continue;
+                    }
+                    if (ch == '\'' || ch == '"') {
+                        quote = ch;
+                        continue;
+                    }
+                    if ((isalpha((unsigned char)ch) || ch == '_') &&
+                        word_starts_command_position(source, i)) {
+                        if (strncmp(source + i, "case", 4) == 0 &&
+                            keyword_boundary(source[i + 4])) {
+                            nested_case_depth++;
+                            i += 3;
+                            continue;
+                        }
+                        if (strncmp(source + i, "esac", 4) == 0 &&
+                            keyword_boundary(source[i + 4])) {
+                            if (nested_case_depth == 0) {
+                                clause_ended_with_esac = true;
+                                break;
+                            }
+                            nested_case_depth--;
+                            i += 3;
+                            continue;
+                        }
+                    }
+                    if (nested_case_depth == 0 && ch == ';' &&
+                        source[i + 1] == ';' && source[i + 2] == '&') {
+                        terminator = AST_CASE_TERM_DBL_SEMI_AMP;
+                        break;
+                    }
+                    if (nested_case_depth == 0 && ch == ';' &&
+                        source[i + 1] == ';') {
+                        terminator = AST_CASE_TERM_DBL_SEMI;
+                        break;
+                    }
+                    if (nested_case_depth == 0 && ch == ';' &&
+                        source[i + 1] == '&') {
+                        terminator = AST_CASE_TERM_SEMI_AMP;
+                        break;
+                    }
+                } else if (quote == '\'' && ch == '\'') {
+                    quote = '\0';
+                } else if (quote == '"') {
+                    if (ch == '\\' && source[i + 1] != '\0') {
+                        i++;
+                        continue;
+                    }
+                    if (ch == '"') {
+                        quote = '\0';
+                    }
+                }
+            }
+        }
+
+        if (source[i] == '\0' && !clause_ended_with_esac) {
+            return false;
+        }
+
+        cmd_end = i;
+        memset(&clause, 0, sizeof(clause));
+        clause.patterns = dup_trimmed_slice(source, pat_start, pat_end);
+        clause.body = dup_trimmed_slice(source, cmd_start, cmd_end);
+        clause.terminator = terminator;
+        clause.body_node = parse_embedded_program_root(
+            ctx, clause.body, source_offset + cmd_start, err_out);
+        if (*err_out != 0) {
+            return false;
+        }
+        ast_case_clause_vec_push(clauses_out, clause_count_out, &clause);
+
+        if (clause_ended_with_esac || terminator == AST_CASE_TERM_END) {
+            break;
+        }
+
+        if (terminator == AST_CASE_TERM_DBL_SEMI_AMP) {
+            i += 3;
+        } else if (terminator == AST_CASE_TERM_DBL_SEMI ||
+                   terminator == AST_CASE_TERM_SEMI_AMP) {
+            i += 2;
+        }
+    }
+
+    return true;
+}
+
 static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
                                            size_t end, int *err_out) {
     struct ast_node *node;
@@ -978,13 +1350,32 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
         node->data.for_cmd.implicit_words = implicit_words;
     } else if (split_case_redirection_suffix(trimmed, &core, &redir_suffix)) {
         node = ast_new_node(ctx, AST_NODE_CASE, start, end);
-        node->data.case_cmd.core = core;
         node->data.case_cmd.redir_suffix = redir_suffix;
+        if (!parse_case_structure(ctx, core, trim_start,
+                                  &node->data.case_cmd.word_expr,
+                                  &node->data.case_cmd.clauses,
+                                  &node->data.case_cmd.clause_count,
+                                  err_out)) {
+            node->kind = AST_NODE_LEGACY;
+        }
+        if (*err_out != 0) {
+            return NULL;
+        }
+        arena_maybe_free(core);
     } else if (trimmed[0] != '\0' && strncmp(trimmed, "case", 4) == 0 &&
                keyword_boundary(trimmed[4])) {
         node = ast_new_node(ctx, AST_NODE_CASE, start, end);
-        node->data.case_cmd.core = arena_xstrdup(trimmed);
         node->data.case_cmd.redir_suffix = arena_xstrdup("");
+        if (!parse_case_structure(ctx, trimmed, trim_start,
+                                  &node->data.case_cmd.word_expr,
+                                  &node->data.case_cmd.clauses,
+                                  &node->data.case_cmd.clause_count,
+                                  err_out)) {
+            node->kind = AST_NODE_LEGACY;
+        }
+        if (*err_out != 0) {
+            return NULL;
+        }
     } else if (unwrap_subshell_group(trimmed, &inner_rel_start, &inner_rel_end,
                                      &redir_rel_start)) {
         node = ast_new_node(ctx, AST_NODE_SUBSHELL, start, end);

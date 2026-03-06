@@ -2,6 +2,7 @@
 
 /* posish - case command handling */
 
+#include "ast.h"
 #include "case_command.h"
 
 #include "arena.h"
@@ -589,6 +590,79 @@ static bool case_pattern_list_matches(struct shell_state *state,
     }
   }
   return false;
+}
+
+static int execute_case_clause_body(struct shell_state *state,
+                                    const struct ast_case_clause *clause,
+                                    case_command_runner_fn source_runner,
+                                    case_command_ast_runner_fn ast_runner) {
+  if (clause->body_node != NULL && ast_runner != NULL) {
+    return ast_runner(state, clause->body_node);
+  }
+  if (clause->body != NULL && clause->body[0] != '\0' &&
+      source_runner != NULL) {
+    return source_runner(state, clause->body);
+  }
+  return 0;
+}
+
+int execute_structured_case_command(struct shell_state *state,
+                                    const char *word_expr,
+                                    const struct ast_case_clause *clauses,
+                                    size_t clause_count,
+                                    case_command_runner_fn source_runner,
+                                    case_command_ast_runner_fn ast_runner) {
+  char *word;
+  bool matched;
+  bool force_execute;
+  bool test_after_match;
+  int status;
+  size_t i;
+
+  if (expand_case_word(word_expr, state, &word) != 0) {
+    return 2;
+  }
+
+  matched = false;
+  force_execute = false;
+  test_after_match = false;
+  status = 0;
+
+  for (i = 0; i < clause_count; i++) {
+    bool clause_selected;
+
+    if (force_execute) {
+      clause_selected = true;
+    } else if (!matched || test_after_match) {
+      clause_selected =
+          case_pattern_list_matches(state, clauses[i].patterns, word);
+    } else {
+      clause_selected = false;
+    }
+
+    if (clause_selected) {
+      status = execute_case_clause_body(state, &clauses[i], source_runner,
+                                        ast_runner);
+      matched = true;
+      if (clauses[i].terminator == AST_CASE_TERM_END ||
+          clauses[i].terminator == AST_CASE_TERM_DBL_SEMI) {
+        break;
+      }
+      if (clauses[i].terminator == AST_CASE_TERM_SEMI_AMP) {
+        force_execute = true;
+        test_after_match = false;
+      } else if (clauses[i].terminator == AST_CASE_TERM_DBL_SEMI_AMP) {
+        force_execute = false;
+        test_after_match = true;
+      }
+    } else {
+      force_execute = false;
+      test_after_match = false;
+    }
+  }
+
+  arena_maybe_free(word);
+  return status;
 }
 
 bool try_execute_case_command(struct shell_state *state, const char *source,

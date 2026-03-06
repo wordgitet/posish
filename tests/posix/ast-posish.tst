@@ -92,6 +92,32 @@ for:c
 for:d
 __OUT__
 
+test_o 'case nodes can live inside AST-managed lists and still bridge safely'
+echo before
+case xyz in
+    (abc) echo bad ;;
+    (xyz) # inline comment stays part of the clause header, not the body
+        echo yes ;;
+esac
+echo after
+__IN__
+before
+yes
+after
+__OUT__
+
+test_o 'case can run supported clause bodies through AST, including fallthrough'
+case xyz in
+    (xyz) echo one ;&
+    (abc) echo two ;;&
+    (xyz) echo three ;;
+esac
+__IN__
+one
+two
+three
+__OUT__
+
 test_o 'function definition inside command substitution still falls back safely'
 result=$(f() { echo ok; }; f)
 printf '%s\n' "$result"
