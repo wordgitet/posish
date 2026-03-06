@@ -43,6 +43,7 @@ REGRESSION_TEST_SOURCES = \
 	andor-p.tst \
 	pipeline-p.tst \
 	grouping-p.tst \
+	comment-p.tst \
 	if-p.tst \
 	for-p.tst \
 	until-p.tst \

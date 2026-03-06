@@ -672,7 +672,7 @@ static bool hash_starts_comment(const char *source, size_t pos) {
     return isspace((unsigned char)source[pos - 1]) || source[pos - 1] == ';' ||
            source[pos - 1] == '&' || source[pos - 1] == '|' ||
            source[pos - 1] == '(' || source[pos - 1] == ')' ||
-           source[pos - 1] == '{' || source[pos - 1] == '}';
+           source[pos - 1] == '}';
 }
 
 static bool line_has_comment_before(const char *buf, size_t line_start,

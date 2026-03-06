@@ -42,6 +42,8 @@ static struct ast_node *parse_embedded_program_root(struct parser_ctx *ctx,
                                                     const char *source,
                                                     size_t offset_hint,
                                                     int *err_out);
+static char *strip_parser_comments(const char *source);
+static bool looks_like_function_header_only(const char *source);
 static bool parse_case_structure(struct parser_ctx *ctx, const char *source,
                                  size_t source_offset, char **word_expr_out,
                                  struct ast_case_clause **clauses_out,
@@ -122,7 +124,7 @@ static bool keyword_preceded_by_list_separator(const char *source, size_t pos) {
            ch == ')' || ch == '{' || ch == '}';
 }
 
-static bool newline_continues_command(const char *source, size_t pos) {
+static bool newline_continues_command(const char *source, size_t len, size_t pos) {
     size_t i;
 
     if (source[pos] != '\n') {
@@ -133,6 +135,10 @@ static bool newline_continues_command(const char *source, size_t pos) {
     while (i > 0) {
         char ch;
 
+        if (shell_position_in_comment(source, len, i - 1)) {
+            i--;
+            continue;
+        }
         ch = source[i - 1];
         if (ch == ' ' || ch == '\t' || ch == '\n') {
             i--;
@@ -344,6 +350,69 @@ static bool parse_function_definition_text(const char *source, char **name_out,
     *name_out = dup_trimmed_slice(source, name_start, name_end);
     *body_out = dup_trimmed_slice(source, body_start, body_end);
     return true;
+}
+
+static char *strip_parser_comments(const char *source) {
+    size_t i;
+    size_t len;
+    size_t out_len;
+    char *out;
+
+    len = strlen(source);
+    out = arena_xmalloc(len + 1);
+    out_len = 0;
+
+    for (i = 0; i < len; i++) {
+        if (shell_position_in_comment(source, len, i)) {
+            continue;
+        }
+        out[out_len++] = source[i];
+    }
+    out[out_len] = '\0';
+    return out;
+}
+
+static bool looks_like_function_header_only(const char *source) {
+    size_t i;
+    char *cleaned;
+    bool result;
+
+    cleaned = strip_parser_comments(source);
+    i = 0;
+    while (cleaned[i] != '\0' && isspace((unsigned char)cleaned[i])) {
+        i++;
+    }
+    if (!is_name_start_char(cleaned[i])) {
+        arena_maybe_free(cleaned);
+        return false;
+    }
+    i++;
+    while (is_name_char(cleaned[i])) {
+        i++;
+    }
+    while (isspace((unsigned char)cleaned[i])) {
+        i++;
+    }
+    if (cleaned[i] != '(') {
+        arena_maybe_free(cleaned);
+        return false;
+    }
+    i++;
+    while (isspace((unsigned char)cleaned[i])) {
+        i++;
+    }
+    if (cleaned[i] != ')') {
+        arena_maybe_free(cleaned);
+        return false;
+    }
+    i++;
+    while (isspace((unsigned char)cleaned[i])) {
+        i++;
+    }
+
+    result = cleaned[i] == '\0';
+    arena_maybe_free(cleaned);
+    return result;
 }
 
 static char *dup_slice(const char *src, size_t start, size_t end) {
@@ -1273,6 +1342,8 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
                                            size_t end, int *err_out) {
     struct ast_node *node;
     char *trimmed;
+    char *comment_stripped;
+    char *syntax_source;
     char *cond;
     char *then_part;
     char *else_part;
@@ -1302,7 +1373,12 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
     }
 
     trimmed = dup_trimmed_slice(ctx->source, start, end);
-    if (trimmed[0] == '\0') {
+    comment_stripped = strip_parser_comments(trimmed);
+    syntax_source = dup_trimmed_slice(comment_stripped, 0, strlen(comment_stripped));
+
+    if (syntax_source[0] == '\0') {
+        arena_maybe_free(syntax_source);
+        arena_maybe_free(comment_stripped);
         arena_maybe_free(trimmed);
         node = ast_new_node(ctx, AST_NODE_EMPTY, start, end);
         return node;
@@ -1323,7 +1399,7 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
     implicit_words = false;
     is_until = false;
 
-    if (parse_function_definition_text(trimmed, &name, &fn_body)) {
+    if (parse_function_definition_text(syntax_source, &name, &fn_body)) {
         node = ast_new_node(ctx, AST_NODE_FUNCTION_DEF, start, end);
         node->data.funcdef.name = name;
         node->data.funcdef.body = fn_body;
@@ -1332,7 +1408,8 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
         if (*err_out != 0) {
             return NULL;
         }
-    } else if (parse_simple_if(trimmed, &cond, &then_part, &else_part, &redir_suffix)) {
+    } else if (parse_simple_if(syntax_source, &cond, &then_part, &else_part,
+                               &redir_suffix)) {
         node = ast_new_node(ctx, AST_NODE_IF, start, end);
         node->data.if_cmd.cond = cond;
         node->data.if_cmd.cond_node =
@@ -1356,7 +1433,7 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
             }
         }
         node->data.if_cmd.redir_suffix = redir_suffix;
-    } else if (parse_simple_while(trimmed, &cond, &body, &is_until,
+    } else if (parse_simple_while(syntax_source, &cond, &body, &is_until,
                                   &redir_suffix)) {
         node = ast_new_node(ctx, is_until ? AST_NODE_UNTIL : AST_NODE_WHILE,
                             start, end);
@@ -1373,7 +1450,7 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
             return NULL;
         }
         node->data.loop.redir_suffix = redir_suffix;
-    } else if (parse_simple_for(trimmed, &name, &words, &body,
+    } else if (parse_simple_for(syntax_source, &name, &words, &body,
                                 &implicit_words, &redir_suffix)) {
         node = ast_new_node(ctx, AST_NODE_FOR, start, end);
         node->data.for_cmd.name = name;
@@ -1386,7 +1463,7 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
         }
         node->data.for_cmd.redir_suffix = redir_suffix;
         node->data.for_cmd.implicit_words = implicit_words;
-    } else if (split_case_redirection_suffix(trimmed, &core, &redir_suffix)) {
+    } else if (split_case_redirection_suffix(syntax_source, &core, &redir_suffix)) {
         node = ast_new_node(ctx, AST_NODE_CASE, start, end);
         node->data.case_cmd.redir_suffix = redir_suffix;
         if (!parse_case_structure(ctx, core, trim_start,
@@ -1400,11 +1477,11 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
             return NULL;
         }
         arena_maybe_free(core);
-    } else if (trimmed[0] != '\0' && strncmp(trimmed, "case", 4) == 0 &&
-               keyword_boundary(trimmed[4])) {
+    } else if (syntax_source[0] != '\0' && strncmp(syntax_source, "case", 4) == 0 &&
+               keyword_boundary(syntax_source[4])) {
         node = ast_new_node(ctx, AST_NODE_CASE, start, end);
         node->data.case_cmd.redir_suffix = arena_xstrdup("");
-        if (!parse_case_structure(ctx, trimmed, trim_start,
+        if (!parse_case_structure(ctx, syntax_source, trim_start,
                                   &node->data.case_cmd.word_expr,
                                   &node->data.case_cmd.clauses,
                                   &node->data.case_cmd.clause_count,
@@ -1414,43 +1491,45 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
         if (*err_out != 0) {
             return NULL;
         }
-    } else if (unwrap_subshell_group(trimmed, &inner_rel_start, &inner_rel_end,
+    } else if (unwrap_subshell_group(syntax_source, &inner_rel_start, &inner_rel_end,
                                      &redir_rel_start)) {
         node = ast_new_node(ctx, AST_NODE_SUBSHELL, start, end);
-        node->data.group.body = dup_trimmed_slice(trimmed, inner_rel_start,
+        node->data.group.body = dup_trimmed_slice(syntax_source, inner_rel_start,
                                                   inner_rel_end);
         node->data.group.redir_suffix =
-            dup_trimmed_slice(trimmed, redir_rel_start, strlen(trimmed));
+            dup_trimmed_slice(syntax_source, redir_rel_start, strlen(syntax_source));
         node->data.group.body_node = parse_sequence(
             ctx, trim_start + inner_rel_start, trim_start + inner_rel_end,
             err_out);
         if (*err_out != 0) {
             return NULL;
         }
-    } else if (unwrap_brace_group(trimmed, &inner_rel_start, &inner_rel_end,
+    } else if (unwrap_brace_group(syntax_source, &inner_rel_start, &inner_rel_end,
                                   &redir_rel_start)) {
         node = ast_new_node(ctx, AST_NODE_BRACE_GROUP, start, end);
-        node->data.group.body = dup_trimmed_slice(trimmed, inner_rel_start,
+        node->data.group.body = dup_trimmed_slice(syntax_source, inner_rel_start,
                                                   inner_rel_end);
         node->data.group.redir_suffix =
-            dup_trimmed_slice(trimmed, redir_rel_start, strlen(trimmed));
+            dup_trimmed_slice(syntax_source, redir_rel_start, strlen(syntax_source));
         node->data.group.body_node = parse_sequence(
             ctx, trim_start + inner_rel_start, trim_start + inner_rel_end,
             err_out);
         if (*err_out != 0) {
             return NULL;
         }
-    } else if (source_contains_heredoc_operator(trimmed)) {
+    } else if (source_contains_heredoc_operator(syntax_source)) {
         node = ast_new_node(ctx, AST_NODE_LEGACY, start, end);
     } else {
         node = ast_new_node(ctx, AST_NODE_SIMPLE_COMMAND, start, end);
-        if (parse_simple_parts(ctx, trimmed, &node->data.simple.raw_words,
+        if (parse_simple_parts(ctx, syntax_source, &node->data.simple.raw_words,
                                &node->data.simple.redirs) != 0) {
             *err_out = -1;
             return NULL;
         }
     }
 
+    arena_maybe_free(syntax_source);
+    arena_maybe_free(comment_stripped);
     arena_maybe_free(trimmed);
     return node;
 }
@@ -1905,10 +1984,8 @@ static struct ast_node *parse_sequence(struct parser_ctx *ctx, size_t start,
                 while (comment_end < end && ctx->source[comment_end] != '\n') {
                     comment_end++;
                 }
-                i = comment_end == end ? comment_end : comment_end - 1;
-                if (comment_end < end && paren_depth == 0 && brace_depth == 0 &&
-                    if_depth == 0 && case_depth == 0 && loop_depth == 0) {
-                    delim = true;
+                if (comment_end > i) {
+                    i = comment_end - 1;
                 }
             }
         } else if (quote == '\0') {
@@ -2008,8 +2085,13 @@ static struct ast_node *parse_sequence(struct parser_ctx *ctx, size_t start,
                 delim = true;
             } else if (paren_depth == 0 && brace_depth == 0 &&
                        if_depth == 0 && case_depth == 0 && loop_depth == 0 &&
-                       ch == '\n' && !newline_continues_command(ctx->source, i)) {
-                delim = true;
+                       ch == '\n' &&
+                       !newline_continues_command(ctx->source, ctx->len, i)) {
+                char *head;
+
+                head = dup_slice(ctx->source, part_start, i);
+                delim = !looks_like_function_header_only(head);
+                arena_maybe_free(head);
             } else if (paren_depth == 0 && brace_depth == 0 &&
                        if_depth == 0 && case_depth == 0 && loop_depth == 0 &&
                        is_async_separator_amp(ctx->source, i)) {
