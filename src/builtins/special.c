@@ -333,7 +333,7 @@ static char *command_alias_value_dup(const char *name) {
 
 static int builtin_command_describe(struct shell_state *state, char *const argv[],
                                     size_t start, bool use_standard_path,
-                                    bool verbose) {
+                                    bool prefer_external, bool verbose) {
     size_t i;
     int status;
 
@@ -359,6 +359,22 @@ static int builtin_command_describe(struct shell_state *state, char *const argv[
             arena_maybe_free(path);
             continue;
         } else if (strcmp(argv[i], "test") == 0 || strcmp(argv[i], "[") == 0) {
+            if (prefer_external) {
+                path = find_command_path(argv[i], use_standard_path);
+                if (path == NULL) {
+                    status = 1;
+                    continue;
+                }
+                if (verbose) {
+                    printf("%s: a substitutive built-in for %s\n", argv[i],
+                           path);
+                } else {
+                    printf("%s\n", path);
+                }
+                fflush(stdout);
+                arena_maybe_free(path);
+                continue;
+            }
             /* Keep test-suite gate semantics honest: report builtin nature. */
             if (verbose) {
                 printf("%s is a shell builtin\n", argv[i]);
@@ -392,16 +408,7 @@ static int builtin_command_describe(struct shell_state *state, char *const argv[
 }
 
 static int wait_status_to_shell_status(int wstatus) {
-    if (WIFEXITED(wstatus)) {
-        return WEXITSTATUS(wstatus);
-    }
-    if (WIFSIGNALED(wstatus)) {
-        return 128 + WTERMSIG(wstatus);
-    }
-    if (WIFSTOPPED(wstatus)) {
-        return 128 + WSTOPSIG(wstatus);
-    }
-    return 1;
+    return shell_status_from_wait_status(wstatus);
 }
 
 static int default_status_for_flow_builtin(const struct shell_state *state) {
@@ -415,6 +422,7 @@ static int default_status_for_flow_builtin(const struct shell_state *state) {
 
 static int builtin_command(struct shell_state *state, char *const argv[]) {
     size_t i;
+    bool opt_b;
     bool opt_v;
     bool opt_V;
     bool opt_p;
@@ -425,6 +433,7 @@ static int builtin_command(struct shell_state *state, char *const argv[]) {
     char *saved_path_copy;
 
     i = 1;
+    opt_b = false;
     opt_v = false;
     opt_V = false;
     opt_p = false;
@@ -445,6 +454,10 @@ static int builtin_command(struct shell_state *state, char *const argv[]) {
         }
 
         for (j = 1; argv[i][j] != '\0'; j++) {
+            if (argv[i][j] == 'b') {
+                opt_b = true;
+                continue;
+            }
             if (argv[i][j] == 'v') {
                 opt_v = true;
                 opt_V = false;
@@ -467,7 +480,7 @@ static int builtin_command(struct shell_state *state, char *const argv[]) {
     }
 
     if (opt_v || opt_V) {
-        return builtin_command_describe(state, argv, i, opt_p, opt_V);
+        return builtin_command_describe(state, argv, i, opt_p, opt_b, opt_V);
     }
 
     if (argv[i] == NULL) {
@@ -492,8 +505,10 @@ static int builtin_command(struct shell_state *state, char *const argv[]) {
 
         saved_in_command_builtin = state->in_command_builtin;
         state->in_command_builtin = true;
-        if (builtin_is_substitutive_name(argv[i]) &&
-            !path_resolves_command(argv[i], opt_p)) {
+        if (opt_b && builtin_is_substitutive_name(argv[i])) {
+            handled = false;
+        } else if (builtin_is_substitutive_name(argv[i]) &&
+                   !path_resolves_command(argv[i], opt_p)) {
             handled = false;
         } else {
             status = builtin_dispatch(state, &argv[i], &handled);

@@ -40,16 +40,7 @@ static char *xstrdup_heap(const char *s) {
 }
 
 static int wait_status_to_shell_status(int status) {
-    if (WIFEXITED(status)) {
-        return WEXITSTATUS(status);
-    }
-    if (WIFSIGNALED(status)) {
-        return 128 + WTERMSIG(status);
-    }
-    if (WIFSTOPPED(status)) {
-        return 128 + WSTOPSIG(status);
-    }
-    return 1;
+    return shell_status_from_wait_status(status);
 }
 
 static bool cd_operand_ignores_cdpath(const char *operand) {
@@ -882,9 +873,14 @@ static int builtin_kill(char *const argv[]) {
             errno = 0;
             value = strtol(argv[i], &end, 10);
             if (errno == 0 && end != argv[i] && *end == '\0' && value > 128) {
+                int signo;
                 char *status_text;
 
-                status_text = pid_to_string((pid_t)(value - 128));
+                if (shell_status_signal_number((int)value, &signo)) {
+                    status_text = pid_to_string((pid_t)signo);
+                } else {
+                    status_text = pid_to_string((pid_t)(value - 128));
+                }
                 if (status_text == NULL) {
                     perror("malloc");
                     status = 1;

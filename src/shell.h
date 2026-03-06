@@ -78,6 +78,9 @@ struct shell_state {
 
 void shell_state_init(struct shell_state *state);
 void shell_state_destroy(struct shell_state *state);
+int shell_status_from_wait_status(int status);
+bool shell_status_signal_number(int status, int *signo_out);
+bool shell_status_should_relay_signal(int status, int *signo_out);
 void shell_refresh_signal_policy(struct shell_state *state);
 void shell_init_startup_env(struct shell_state *state, const char *argv0);
 int shell_run_startup_files(struct shell_state *state);

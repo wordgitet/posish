@@ -145,8 +145,8 @@ static int eval_unary(const char *op, const char *arg, bool *out)
     }
     if (strcmp(op, "-t") == 0) {
         if (!parse_integer_operand(arg, &fdnum) || fdnum < 0) {
-            test_errorf("bad file descriptor: %s", arg);
-            return 2;
+            *out = false;
+            return 0;
         }
         *out = isatty((int)fdnum) != 0;
         return 0;

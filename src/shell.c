@@ -771,6 +771,52 @@ static size_t trim_end_ignoring_trailing_comment(const char *buf, size_t len) {
     return end;
 }
 
+static bool command_text_is_effectively_empty(const char *buf) {
+    size_t len;
+    size_t line_start;
+
+    if (buf == NULL) {
+        return true;
+    }
+
+    len = strlen(buf);
+    line_start = 0;
+    while (line_start < len) {
+        size_t line_end;
+        size_t start;
+        size_t end;
+        size_t comment_pos;
+
+        line_end = line_start;
+        while (line_end < len && buf[line_end] != '\n') {
+            line_end++;
+        }
+
+        start = line_start;
+        while (start < line_end && isspace((unsigned char)buf[start])) {
+            start++;
+        }
+
+        end = line_end;
+        comment_pos = line_end;
+        if (line_has_comment_before(buf, line_start, line_end, &comment_pos)) {
+            end = comment_pos;
+        }
+        while (end > start && isspace((unsigned char)buf[end - 1])) {
+            end--;
+        }
+        if (start < end) {
+            return false;
+        }
+
+        line_start = line_end;
+        if (line_start < len && buf[line_start] == '\n') {
+            line_start++;
+        }
+    }
+    return true;
+}
+
 static bool looks_like_function_header_only_input(const char *buf, size_t len) {
     size_t i;
     size_t out_len;
@@ -1596,6 +1642,45 @@ void shell_state_destroy(struct shell_state *state) {
     arena_destroy(&state->arena_perm);
 }
 
+int shell_status_from_wait_status(int status) {
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+        return 256 + 128 + WTERMSIG(status);
+    }
+    if (WIFSTOPPED(status)) {
+        return 256 + 128 + WSTOPSIG(status);
+    }
+    return 1;
+}
+
+bool shell_status_signal_number(int status, int *signo_out) {
+    int signo;
+
+    signo = 0;
+    if (status > 256 + 128) {
+        signo = status - (256 + 128);
+    } else if (status > 128) {
+        signo = status - 128;
+    }
+
+    if (signo <= 0 || signo >= NSIG) {
+        return false;
+    }
+    if (signo_out != NULL) {
+        *signo_out = signo;
+    }
+    return true;
+}
+
+bool shell_status_should_relay_signal(int status, int *signo_out) {
+    if (status <= 256 + 128) {
+        return false;
+    }
+    return shell_status_signal_number(status, signo_out);
+}
+
 void shell_refresh_signal_policy(struct shell_state *state) {
     int signo;
 
@@ -1919,7 +2004,7 @@ int shell_run_command(struct shell_state *state, const char *command) {
     while (*p == ' ' || *p == '\t' || *p == '\n') {
         p++;
     }
-    if (*p == '\0') {
+    if (*p == '\0' || command_text_is_effectively_empty(command_text)) {
         arena_maybe_free(command_copy);
         shell_run_pending_traps(state);
         return state->last_status;

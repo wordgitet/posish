@@ -69,6 +69,16 @@ static bool command_text_needs_more_input(const char *source,
                                           bool include_heredoc);
 static bool looks_like_function_header_only(const char *source);
 
+static void exit_shell_child_status(int status) {
+    int signo;
+
+    if (shell_status_should_relay_signal(status, &signo)) {
+        signal(signo, SIG_DFL);
+        raise(signo);
+    }
+    _exit(status);
+}
+
 static void *xrealloc(void *ptr, size_t size) {
     return arena_xrealloc(ptr, size);
 }
@@ -1854,12 +1864,12 @@ static int run_external_argv(struct shell_state *state, char *const argv[],
         jobs_note_process_status(pid, status);
         trace_log(POSISH_TRACE_SIGNALS, "external pid=%ld stopped sig=%d",
                   (long)pid, WSTOPSIG(status));
-        return 128 + WSTOPSIG(status);
+        return shell_status_from_wait_status(status);
     }
     if (WIFSIGNALED(status)) {
         trace_log(POSISH_TRACE_SIGNALS, "external pid=%ld signaled sig=%d",
                   (long)pid, WTERMSIG(status));
-        return 128 + WTERMSIG(status);
+        return shell_status_from_wait_status(status);
     }
     return 1;
 }
@@ -2261,7 +2271,7 @@ static int execute_simple_command(struct shell_state *state, const char *source,
                 return WEXITSTATUS(wstatus);
             }
             if (WIFSIGNALED(wstatus)) {
-                return 128 + WTERMSIG(wstatus);
+                return shell_status_from_wait_status(wstatus);
             }
             return 1;
         }
@@ -2628,7 +2638,7 @@ static int run_subshell_command(struct shell_state *parent_state,
             st = local_state.exit_status;
         }
         fflush(NULL);
-        _exit(st);
+        exit_shell_child_status(st);
     }
 
     if (parent_state->monitor_mode) {
@@ -2660,12 +2670,12 @@ static int run_subshell_command(struct shell_state *parent_state,
         jobs_note_process_status(pid, status);
         trace_log(POSISH_TRACE_SIGNALS, "subshell pid=%ld stopped sig=%d",
                   (long)pid, WSTOPSIG(status));
-        return 128 + WSTOPSIG(status);
+        return shell_status_from_wait_status(status);
     }
     if (WIFSIGNALED(status)) {
         trace_log(POSISH_TRACE_SIGNALS, "subshell pid=%ld signaled sig=%d",
                   (long)pid, WTERMSIG(status));
-        return 128 + WTERMSIG(status);
+        return shell_status_from_wait_status(status);
     }
     return 1;
 }
@@ -2772,7 +2782,7 @@ static int run_async_list(struct shell_state *state, const char *source) {
             st = local_state.exit_status;
         }
         fflush(NULL);
-        _exit(st);
+        exit_shell_child_status(st);
     }
 
     if (state->monitor_mode) {
@@ -3709,9 +3719,9 @@ static int execute_pipeline(struct shell_state *state, const char *source) {
                     jobs_note_process_status(pids[j], wait_statuses[j]);
                 }
             }
-            command_status = 128 + WSTOPSIG(wstatus);
+            command_status = shell_status_from_wait_status(wstatus);
         } else if (WIFSIGNALED(wstatus)) {
-            command_status = 128 + WTERMSIG(wstatus);
+            command_status = shell_status_from_wait_status(wstatus);
         } else {
             command_status = 1;
         }

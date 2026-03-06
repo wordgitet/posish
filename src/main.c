@@ -250,5 +250,13 @@ int main(int argc, char **argv) {
 
     jobs_destroy();
     shell_state_destroy(&state);
+    {
+        int signo;
+
+        if (shell_status_should_relay_signal(ret, &signo)) {
+            signal(signo, SIG_DFL);
+            raise(signo);
+        }
+    }
     return ret;
 }
