@@ -99,7 +99,6 @@ static bool split_case_redirection_suffix(const char *source, char **core_out,
 static bool is_async_separator_amp(const char *source, size_t pos);
 static bool ast_node_is_direct_exec_compatible(const struct ast_node *node);
 static bool ast_node_uses_operator_execution(const struct ast_node *node);
-static bool is_ast_compound_candidate(const char *source);
 static bool try_run_ast_compound_command(struct shell_state *state,
                                          const char *source,
                                          bool allow_builtin,
@@ -373,110 +372,6 @@ static bool ast_node_uses_operator_execution(const struct ast_node *node) {
         return false;
     }
 
-    return false;
-}
-
-static bool is_ast_compound_candidate(const char *source) {
-    char *fn_name;
-    char *fn_body;
-    char *if_cond;
-    char *if_then;
-    char *if_else;
-    char *if_redirs;
-    char *loop_cond;
-    char *loop_body;
-    char *loop_redirs;
-    char *for_name;
-    char *for_words;
-    char *for_body;
-    char *for_redirs;
-    char *case_core;
-    char *case_suffix;
-    char *inner;
-    char *group_redirs;
-    bool loop_is_until;
-    bool for_implicit_words;
-
-    if (source == NULL || source[0] == '\0') {
-        return false;
-    }
-
-    fn_name = NULL;
-    fn_body = NULL;
-    if_cond = NULL;
-    if_then = NULL;
-    if_else = NULL;
-    if_redirs = NULL;
-    loop_cond = NULL;
-    loop_body = NULL;
-    loop_redirs = NULL;
-    for_name = NULL;
-    for_words = NULL;
-    for_body = NULL;
-    for_redirs = NULL;
-    case_core = NULL;
-    case_suffix = NULL;
-    inner = NULL;
-    group_redirs = NULL;
-    loop_is_until = false;
-    for_implicit_words = false;
-
-    if (strstr(source, "<<") != NULL) {
-        return false;
-    }
-    if (parse_function_definition(source, &fn_name, &fn_body)) {
-        arena_maybe_free(fn_name);
-        arena_maybe_free(fn_body);
-        return true;
-    }
-    if (parse_simple_if(source, &if_cond, &if_then, &if_else, &if_redirs)) {
-        arena_maybe_free(if_cond);
-        arena_maybe_free(if_then);
-        arena_maybe_free(if_else);
-        arena_maybe_free(if_redirs);
-        return true;
-    }
-    if (parse_simple_while(source, &loop_cond, &loop_body, &loop_is_until,
-                           &loop_redirs)) {
-        arena_maybe_free(loop_cond);
-        arena_maybe_free(loop_body);
-        arena_maybe_free(loop_redirs);
-        return true;
-    }
-    if (parse_simple_for(source, &for_name, &for_words, &for_body,
-                         &for_implicit_words, &for_redirs)) {
-        arena_maybe_free(for_name);
-        arena_maybe_free(for_words);
-        arena_maybe_free(for_body);
-        arena_maybe_free(for_redirs);
-        return true;
-    }
-    if (split_case_redirection_suffix(source, &case_core, &case_suffix)) {
-        arena_maybe_free(case_core);
-        arena_maybe_free(case_suffix);
-        return true;
-    }
-    arena_maybe_free(case_core);
-    arena_maybe_free(case_suffix);
-    if (strncmp(source, "case", 4) == 0 && keyword_boundary(source[4])) {
-        return true;
-    }
-    if (unwrap_subshell_group(source, &inner, &group_redirs)) {
-        arena_maybe_free(inner);
-        arena_maybe_free(group_redirs);
-        return true;
-    }
-    arena_maybe_free(inner);
-    arena_maybe_free(group_redirs);
-    inner = NULL;
-    group_redirs = NULL;
-    if (unwrap_brace_group(source, &inner, &group_redirs)) {
-        arena_maybe_free(inner);
-        arena_maybe_free(group_redirs);
-        return true;
-    }
-    arena_maybe_free(inner);
-    arena_maybe_free(group_redirs);
     return false;
 }
 
@@ -3582,14 +3477,8 @@ static bool split_case_redirection_suffix(const char *source, char **core_out,
     return true;
 }
 
-static int run_legacy_atom_fallback(struct shell_state *state, char *trimmed,
-                                    bool allow_builtin) {
-    char *inner;
-    char *subshell_redirs;
-    char *brace_inner;
-    char *brace_redirs;
-    char *fn_name;
-    char *fn_body;
+static bool run_legacy_control_command(struct shell_state *state, char *trimmed,
+                                       int *status_out) {
     char *if_cond;
     char *if_then;
     char *if_else;
@@ -3607,8 +3496,6 @@ static int run_legacy_atom_fallback(struct shell_state *state, char *trimmed,
     bool for_implicit_words;
     int status;
 
-    fn_name = NULL;
-    fn_body = NULL;
     if_cond = NULL;
     if_then = NULL;
     if_else = NULL;
@@ -3624,18 +3511,6 @@ static int run_legacy_atom_fallback(struct shell_state *state, char *trimmed,
     case_redir_suffix = NULL;
     while_is_until = false;
     for_implicit_words = false;
-    inner = NULL;
-    subshell_redirs = NULL;
-    brace_inner = NULL;
-    brace_redirs = NULL;
-
-    if (parse_function_definition(trimmed, &fn_name, &fn_body)) {
-        status = shell_set_function(state, fn_name, fn_body);
-        arena_maybe_free(fn_name);
-        arena_maybe_free(fn_body);
-        arena_maybe_free(trimmed);
-        return status;
-    }
 
     if (parse_simple_if(trimmed, &if_cond, &if_then, &if_else, &if_redirs)) {
         struct redir_vec if_redir_vec;
@@ -3689,7 +3564,8 @@ if_done:
         arena_maybe_free(if_then);
         arena_maybe_free(if_else);
         arena_maybe_free(trimmed);
-        return status;
+        *status_out = status;
+        return true;
     }
 
     if (parse_simple_while(trimmed, &while_cond, &while_body, &while_is_until,
@@ -3765,7 +3641,8 @@ while_done:
         arena_maybe_free(while_cond);
         arena_maybe_free(while_body);
         arena_maybe_free(trimmed);
-        return status;
+        *status_out = status;
+        return true;
     }
 
     if (parse_simple_for(trimmed, &for_name, &for_words, &for_body,
@@ -3822,7 +3699,8 @@ while_done:
                 status = 2;
                 goto for_done;
             }
-            if (collect_words_and_redirs(&for_lexed, &for_raw_words, &for_redirs) != 0) {
+            if (collect_words_and_redirs(&for_lexed, &for_raw_words, &for_redirs) !=
+                0) {
                 status = 2;
                 goto for_done;
             }
@@ -3885,7 +3763,8 @@ for_done:
         arena_maybe_free(for_words);
         arena_maybe_free(for_body);
         arena_maybe_free(trimmed);
-        return status;
+        *status_out = status;
+        return true;
     }
 
     if (split_case_redirection_suffix(trimmed, &case_core, &case_redir_suffix)) {
@@ -3922,11 +3801,45 @@ case_done:
         arena_maybe_free(case_core);
         arena_maybe_free(case_redir_suffix);
         arena_maybe_free(trimmed);
-        return status;
+        *status_out = status;
+        return true;
     }
 
     if (try_execute_case_command(state, trimmed, &status, execute_program_text)) {
         arena_maybe_free(trimmed);
+        *status_out = status;
+        return true;
+    }
+
+    return false;
+}
+
+static int run_legacy_atom_fallback(struct shell_state *state, char *trimmed,
+                                    bool allow_builtin) {
+    char *inner;
+    char *subshell_redirs;
+    char *brace_inner;
+    char *brace_redirs;
+    char *fn_name;
+    char *fn_body;
+    int status;
+
+    fn_name = NULL;
+    fn_body = NULL;
+    inner = NULL;
+    subshell_redirs = NULL;
+    brace_inner = NULL;
+    brace_redirs = NULL;
+
+    if (parse_function_definition(trimmed, &fn_name, &fn_body)) {
+        status = shell_set_function(state, fn_name, fn_body);
+        arena_maybe_free(fn_name);
+        arena_maybe_free(fn_body);
+        arena_maybe_free(trimmed);
+        return status;
+    }
+
+    if (run_legacy_control_command(state, trimmed, &status)) {
         return status;
     }
 
@@ -3976,8 +3889,7 @@ static int execute_command_atom(struct shell_state *state, const char *source,
         return 0;
     }
 
-    if (is_ast_compound_candidate(trimmed) &&
-        try_run_ast_compound_command(state, trimmed, allow_builtin, &status)) {
+    if (try_run_ast_compound_command(state, trimmed, allow_builtin, &status)) {
         arena_maybe_free(trimmed);
         return status;
     }
