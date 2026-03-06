@@ -22,6 +22,7 @@ struct shell_state {
     int last_cmdsub_status;
     bool cmdsub_performed;
     pid_t shell_pid;
+    size_t prompt_command_index;
     bool errexit;
     bool errexit_ignored;
     bool should_exit;
@@ -68,6 +69,7 @@ struct shell_state {
     size_t unexported_count;
     char **positional_params;
     size_t positional_count;
+    char *shell_name;
     struct arena arena_perm;
     struct arena arena_script;
     struct arena arena_cmd;

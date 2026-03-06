@@ -36,6 +36,7 @@ SRC = \
 	src/trace.c \
 	src/vars.c \
 	src/options.c \
+	src/prompt.c \
 	src/path.c \
 	src/error.c \
 	src/arena.c \
@@ -62,6 +63,7 @@ OBJ = \
 	src/trace.o \
 	src/vars.o \
 	src/options.o \
+	src/prompt.o \
 	src/path.o \
 	src/error.o \
 	src/arena.o \

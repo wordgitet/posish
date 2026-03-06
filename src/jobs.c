@@ -592,3 +592,7 @@ bool jobs_has_stopped(void) {
   }
   return false;
 }
+
+size_t jobs_count_active(void) {
+  return g_job_count;
+}

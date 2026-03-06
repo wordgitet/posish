@@ -8,6 +8,7 @@
 #include "arena.h"
 #include "jobs.h"
 #include "options.h"
+#include "prompt.h"
 #include "signals.h"
 #include "vars.h"
 
@@ -208,6 +209,7 @@ int main(int argc, char **argv) {
     (void)setenv("0", special_0, 1);
 
     state.interactive = run_interactive;
+    prompt_init_defaults(&state, argv[0]);
     (void)refresh_signal_policy;
     shell_refresh_signal_policy(&state);
 

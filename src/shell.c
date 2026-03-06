@@ -10,6 +10,7 @@
 #include "error.h"
 #include "exec.h"
 #include "parser.h"
+#include "prompt.h"
 #include "signals.h"
 #include "trace.h"
 
@@ -1480,6 +1481,7 @@ void shell_state_init(struct shell_state *state) {
     state->cmdsub_performed = false;
     /* Keep $$ stable across subshell/cmdsub contexts for POSIX semantics. */
     state->shell_pid = getpid();
+    state->prompt_command_index = 1;
     state->errexit = false;
     state->errexit_ignored = false;
     state->should_exit = false;
@@ -1528,6 +1530,7 @@ void shell_state_init(struct shell_state *state) {
     state->unexported_count = 0;
     state->positional_params = NULL;
     state->positional_count = 0;
+    state->shell_name = NULL;
 }
 
 void shell_state_destroy(struct shell_state *state) {
@@ -1958,7 +1961,16 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
         }
 
         if (line_mode_input && isatty(STDOUT_FILENO)) {
-            fputs(secondary_prompt ? "> " : "posish$ ", stdout);
+            char *prompt_text;
+
+            prompt_text = NULL;
+            if (prompt_render(state, secondary_prompt ? "PS2" : "PS1",
+                              &prompt_text) != 0) {
+                fputs(secondary_prompt ? "> " : "$ ", stdout);
+            } else {
+                fputs(prompt_text == NULL ? "" : prompt_text, stdout);
+            }
+            arena_maybe_free(prompt_text);
             fflush(stdout);
         }
 
@@ -2009,6 +2021,7 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
             (void)setenv("POSISH_LINENO_BASE", base_buf, 1);
         }
         shell_run_command(state, command);
+        state->prompt_command_index++;
         pending_heredoc_clear(&pending_heredoc);
         command_len = 0;
         if (command != NULL) {

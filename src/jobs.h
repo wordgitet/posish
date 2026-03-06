@@ -5,6 +5,7 @@
 #ifndef POSISH_JOBS_H
 #define POSISH_JOBS_H
 
+#include <stddef.h>
 #include <stdbool.h>
 #include <sys/types.h>
 
@@ -41,5 +42,6 @@ bool jobs_find_by_pid(pid_t pid, struct jobs_entry_info *out);
 bool jobs_job_is_completed(pid_t pgid);
 bool jobs_get_job_wait_status(pid_t pgid, int *wait_status_out);
 bool jobs_has_stopped(void);
+size_t jobs_count_active(void);
 
 #endif
