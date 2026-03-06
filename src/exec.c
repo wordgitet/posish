@@ -397,7 +397,7 @@ static bool is_ast_compound_candidate(const char *source) {
     bool loop_is_until;
     bool for_implicit_words;
 
-    if (source == NULL || source[0] == '\0' || strstr(source, "<<") != NULL) {
+    if (source == NULL || source[0] == '\0') {
         return false;
     }
 
@@ -425,6 +425,9 @@ static bool is_ast_compound_candidate(const char *source) {
         arena_maybe_free(fn_name);
         arena_maybe_free(fn_body);
         return true;
+    }
+    if (strstr(source, "<<") != NULL) {
+        return false;
     }
     if (parse_simple_if(source, &if_cond, &if_then, &if_else, &if_redirs)) {
         arena_maybe_free(if_cond);
@@ -1540,98 +1543,9 @@ static bool looks_like_function_header_only(const char *source) {
     return source[i] == '\0';
 }
 
-static bool program_contains_quoted_heredoc(const char *source) {
-    size_t i;
-    char quote;
-
-    i = 0;
-    quote = '\0';
-    while (source[i] != '\0') {
-        char ch;
-
-        ch = source[i];
-        if (quote == '\0') {
-            if (ch == '\\' && source[i + 1] != '\0') {
-                i += 2;
-                continue;
-            }
-            if (ch == '\'' || ch == '"') {
-                quote = ch;
-                i++;
-                continue;
-            }
-            if (ch == '<' && source[i + 1] == '<') {
-                size_t j;
-                bool saw_quote_or_backslash;
-
-                j = i + 2;
-                if (source[j] == '-') {
-                    j++;
-                }
-                while (source[j] == ' ' || source[j] == '\t') {
-                    j++;
-                }
-                saw_quote_or_backslash = false;
-                while (source[j] != '\0' && !isspace((unsigned char)source[j]) &&
-                       source[j] != ';' && source[j] != '&' && source[j] != '|' &&
-                       source[j] != '<' && source[j] != '>') {
-                    if (source[j] == '\'' || source[j] == '"' || source[j] == '\\') {
-                        saw_quote_or_backslash = true;
-                    }
-                    if (source[j] == '\\' && source[j + 1] != '\0') {
-                        j += 2;
-                        continue;
-                    }
-                    if (source[j] == '\'' || source[j] == '"') {
-                        char q;
-
-                        q = source[j++];
-                        while (source[j] != '\0' && source[j] != q) {
-                            if (q == '"' && source[j] == '\\' &&
-                                source[j + 1] != '\0') {
-                                j += 2;
-                                continue;
-                            }
-                            j++;
-                        }
-                        if (source[j] == q) {
-                            j++;
-                        }
-                        continue;
-                    }
-                    j++;
-                }
-                if (saw_quote_or_backslash) {
-                    return true;
-                }
-                i = j;
-                continue;
-            }
-        } else if (quote == '\'' && ch == '\'') {
-            quote = '\0';
-        } else if (quote == '"') {
-            if (ch == '\\' && source[i + 1] != '\0') {
-                i += 2;
-                continue;
-            }
-            if (ch == '"') {
-                quote = '\0';
-            }
-        }
-        i++;
-    }
-
-    return false;
-}
-
 static bool has_pending_flow_control(const struct shell_state *state) {
     return state->break_levels > 0 || state->continue_levels > 0 ||
            state->return_requested;
-}
-
-static bool ignore_helper_function_declaration(const char *source) {
-    (void)source;
-    return false;
 }
 
 static int find_redir_operator_pos(const char *token, size_t *pos_out) {
@@ -3676,8 +3590,6 @@ static int execute_command_atom(struct shell_state *state, const char *source,
     char *subshell_redirs;
     char *brace_inner;
     char *brace_redirs;
-    char *fn_name;
-    char *fn_body;
     char *if_cond;
     char *if_then;
     char *if_else;
@@ -3714,8 +3626,6 @@ static int execute_command_atom(struct shell_state *state, const char *source,
         return 0;
     }
 
-    fn_name = NULL;
-    fn_body = NULL;
     if_cond = NULL;
     if_then = NULL;
     if_else = NULL;
@@ -3735,19 +3645,6 @@ static int execute_command_atom(struct shell_state *state, const char *source,
     subshell_redirs = NULL;
     brace_inner = NULL;
     brace_redirs = NULL;
-
-    if (parse_function_definition(trimmed, &fn_name, &fn_body)) {
-        status = shell_set_function(state, fn_name, fn_body);
-        arena_maybe_free(fn_name);
-        arena_maybe_free(fn_body);
-        arena_maybe_free(trimmed);
-        return status;
-    }
-
-    if (ignore_helper_function_declaration(trimmed)) {
-        arena_maybe_free(trimmed);
-        return 0;
-    }
 
     if (is_ast_compound_candidate(trimmed) &&
         try_run_ast_compound_command(state, trimmed, allow_builtin, &status)) {
@@ -5200,7 +5097,6 @@ static int execute_program_text_internal(struct shell_state *state,
     int case_depth;
     int loop_depth;
     int status;
-    bool skip_next_done;
     bool pending_heredoc;
     char *pending_function_head;
     char *pending_raw;
@@ -5217,7 +5113,6 @@ static int execute_program_text_internal(struct shell_state *state,
     loop_depth = 0;
     start = 0;
     status = 0;
-    skip_next_done = false;
     pending_heredoc = false;
     pending_function_head = NULL;
     pending_raw = NULL;
@@ -5473,13 +5368,7 @@ static int execute_program_text_internal(struct shell_state *state,
                 /* Keep $LINENO aligned to each top-level command start. */
                 set_lineno_for_command(source, command_start);
                 state->errexit_ignored = false;
-                if (skip_next_done && strcmp(part, "done") == 0) {
-                    skip_next_done = false;
-                    status = 0;
-                } else if (ignore_helper_function_declaration(part)) {
-                    skip_next_done = true;
-                    status = 0;
-                } else {
+                {
                     char *fn_probe_name;
                     char *fn_probe_body;
                     bool snippet_is_function_def;

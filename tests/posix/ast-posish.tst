@@ -126,6 +126,17 @@ __IN__
 direct
 __OUT__
 
+test_o 'function definition with heredoc body can be registered through AST'
+f() {
+    cat <<'EOF'
+heredoc
+EOF
+}
+f
+__IN__
+heredoc
+__OUT__
+
 test_o 'function definition inside command substitution stays safe'
 result=$(f() { echo ok; }; f)
 printf '%s\n' "$result"
