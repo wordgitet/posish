@@ -421,13 +421,13 @@ static bool is_ast_compound_candidate(const char *source) {
     loop_is_until = false;
     for_implicit_words = false;
 
+    if (strstr(source, "<<") != NULL) {
+        return false;
+    }
     if (parse_function_definition(source, &fn_name, &fn_body)) {
         arena_maybe_free(fn_name);
         arena_maybe_free(fn_body);
         return true;
-    }
-    if (strstr(source, "<<") != NULL) {
-        return false;
     }
     if (parse_simple_if(source, &if_cond, &if_then, &if_else, &if_redirs)) {
         arena_maybe_free(if_cond);
@@ -3582,14 +3582,14 @@ static bool split_case_redirection_suffix(const char *source, char **core_out,
     return true;
 }
 
-static int execute_command_atom(struct shell_state *state, const char *source,
-                                bool allow_builtin) {
-    char *collapsed;
-    char *trimmed;
+static int run_legacy_atom_fallback(struct shell_state *state, char *trimmed,
+                                    bool allow_builtin) {
     char *inner;
     char *subshell_redirs;
     char *brace_inner;
     char *brace_redirs;
+    char *fn_name;
+    char *fn_body;
     char *if_cond;
     char *if_then;
     char *if_else;
@@ -3607,25 +3607,8 @@ static int execute_command_atom(struct shell_state *state, const char *source,
     bool for_implicit_words;
     int status;
 
-    trimmed = dup_slice(source, 0, strlen(source));
-    collapsed = collapse_line_continuations(trimmed);
-    arena_maybe_free(trimmed);
-    trimmed = dup_trimmed_slice(collapsed, 0, strlen(collapsed));
-    arena_maybe_free(collapsed);
-    if (trimmed[0] == '\0') {
-        arena_maybe_free(trimmed);
-        return 0;
-    }
-
-    /*
-     * `set +n` (or `set +o noexec`) is allowed to run while in noexec mode so
-     * scripts can turn execution back on. Everything else is parse-only.
-     */
-    if (state->noexec && !noexec_allows_set_toggle(trimmed)) {
-        arena_maybe_free(trimmed);
-        return 0;
-    }
-
+    fn_name = NULL;
+    fn_body = NULL;
     if_cond = NULL;
     if_then = NULL;
     if_else = NULL;
@@ -3646,8 +3629,10 @@ static int execute_command_atom(struct shell_state *state, const char *source,
     brace_inner = NULL;
     brace_redirs = NULL;
 
-    if (is_ast_compound_candidate(trimmed) &&
-        try_run_ast_compound_command(state, trimmed, allow_builtin, &status)) {
+    if (parse_function_definition(trimmed, &fn_name, &fn_body)) {
+        status = shell_set_function(state, fn_name, fn_body);
+        arena_maybe_free(fn_name);
+        arena_maybe_free(fn_body);
         arena_maybe_free(trimmed);
         return status;
     }
@@ -3964,6 +3949,40 @@ case_done:
 
     arena_maybe_free(trimmed);
     return status;
+}
+
+static int execute_command_atom(struct shell_state *state, const char *source,
+                                bool allow_builtin) {
+    char *collapsed;
+    char *trimmed;
+    int status;
+
+    trimmed = dup_slice(source, 0, strlen(source));
+    collapsed = collapse_line_continuations(trimmed);
+    arena_maybe_free(trimmed);
+    trimmed = dup_trimmed_slice(collapsed, 0, strlen(collapsed));
+    arena_maybe_free(collapsed);
+    if (trimmed[0] == '\0') {
+        arena_maybe_free(trimmed);
+        return 0;
+    }
+
+    /*
+     * `set +n` (or `set +o noexec`) is allowed to run while in noexec mode so
+     * scripts can turn execution back on. Everything else is parse-only.
+     */
+    if (state->noexec && !noexec_allows_set_toggle(trimmed)) {
+        arena_maybe_free(trimmed);
+        return 0;
+    }
+
+    if (is_ast_compound_candidate(trimmed) &&
+        try_run_ast_compound_command(state, trimmed, allow_builtin, &status)) {
+        arena_maybe_free(trimmed);
+        return status;
+    }
+
+    return run_legacy_atom_fallback(state, trimmed, allow_builtin);
 }
 
 static void exec_child_command(struct shell_state *parent_state, const char *source) {

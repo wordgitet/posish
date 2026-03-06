@@ -126,13 +126,15 @@ __IN__
 direct
 __OUT__
 
-test_o 'function definition with heredoc body can be registered through AST'
+test_o 'function definition with heredoc body stays safe during migration'
+"$TESTEE" -s <<'__SCRIPT__'
 f() {
     cat <<'EOF'
 heredoc
 EOF
 }
 f
+__SCRIPT__
 __IN__
 heredoc
 __OUT__
