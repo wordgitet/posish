@@ -46,6 +46,8 @@ static int run_startup_path(struct shell_state *state, const char *path,
 static int expand_startup_path(struct shell_state *state, const char *text,
                                char **out);
 static char *home_startup_path(const char *leaf);
+static int shell_run_stream_named(struct shell_state *state, FILE *stream,
+                                  bool interactive, const char *source_name);
 
 static size_t skip_backtick_subst(const char *buf, size_t i, size_t len) {
     i++;
@@ -1535,6 +1537,8 @@ void shell_state_init(struct shell_state *state) {
     /* Keep $$ stable across subshell/cmdsub contexts for POSIX semantics. */
     state->shell_pid = getpid();
     state->prompt_command_index = 1;
+    state->current_source_name = NULL;
+    state->current_source_base_line = 1;
     state->errexit = false;
     state->errexit_ignored = false;
     state->should_exit = false;
@@ -1604,6 +1608,8 @@ void shell_state_destroy(struct shell_state *state) {
     state->positional_params = NULL;
     state->positional_count = 0;
     state->login_shell = false;
+    state->current_source_name = NULL;
+    state->current_source_base_line = 1;
     state->explicit_non_interactive = false;
     state->parent_was_interactive = false;
     state->errexit_ignored = false;
@@ -2069,7 +2075,8 @@ int shell_run_command(struct shell_state *state, const char *command) {
     return status;
 }
 
-int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) {
+static int shell_run_stream_named(struct shell_state *state, FILE *stream,
+                                  bool interactive, const char *source_name) {
     char *line;
     char *command;
     size_t cap;
@@ -2098,6 +2105,9 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
     pending_heredoc.marker_index = 0;
     pending_heredoc.active = false;
     state->interactive = interactive;
+    state->current_source_name =
+        (source_name == NULL || source_name[0] == '\0') ? "<input>" : source_name;
+    state->current_source_base_line = 1;
 
     if (line_mode_input && !interactive) {
         /*
@@ -2164,6 +2174,7 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
 
             snprintf(base_buf, sizeof(base_buf), "%zu", command_start_line - 1);
             (void)setenv("POSISH_LINENO_BASE", base_buf, 1);
+            state->current_source_base_line = command_start_line;
             shell_run_command(state, command);
             pending_heredoc_clear(&pending_heredoc);
             command_len = 0;
@@ -2195,21 +2206,22 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
                     state, command, command_len, need_more, true);
             }
             if (need_more) {
-                posish_error_at("<input>", line_no, 1, "syntax",
-                                "unexpected EOF while looking for matching quote");
+                posish_error_at_idf(state->current_source_name, line_no, 1,
+                                    POSERR_UNEXPECTED_EOF_MATCHING_QUOTE);
                 state->last_status = 2;
             } else {
                 char base_buf[32];
 
                 snprintf(base_buf, sizeof(base_buf), "%zu", command_start_line - 1);
                 (void)setenv("POSISH_LINENO_BASE", base_buf, 1);
+                state->current_source_base_line = command_start_line;
                 shell_run_command(state, command);
                 pending_heredoc_clear(&pending_heredoc);
                 ran_command = true;
             }
         }
         shell_run_pending_traps(state);
-        if (!ran_command && !state->should_exit) {
+        if (!ran_command && !state->should_exit && command_len == 0) {
             /* Executing an empty script resets $? to success. */
             state->last_status = 0;
         }
@@ -2291,6 +2303,7 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
             snprintf(base_buf, sizeof(base_buf), "%zu", command_start_line - 1);
             (void)setenv("POSISH_LINENO_BASE", base_buf, 1);
         }
+        state->current_source_base_line = command_start_line;
         shell_run_command(state, command);
         state->prompt_command_index++;
         pending_heredoc_clear(&pending_heredoc);
@@ -2319,9 +2332,9 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
             }
         }
         if (need_more) {
-        posish_error_at("<input>", line_no, 1, "syntax",
-                        "unexpected EOF while looking for matching quote");
-        state->last_status = 2;
+            posish_error_at_idf(state->current_source_name, line_no, 1,
+                                POSERR_UNEXPECTED_EOF_MATCHING_QUOTE);
+            state->last_status = 2;
         }
     }
 
@@ -2335,6 +2348,10 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
     }
 
     return state->last_status;
+}
+
+int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) {
+    return shell_run_stream_named(state, stream, interactive, "<input>");
 }
 
 int shell_run_file_mode(struct shell_state *state, const char *path,
@@ -2355,7 +2372,7 @@ int shell_run_file_mode(struct shell_state *state, const char *path,
     }
 
     saved_interactive = state->interactive;
-    status = shell_run_stream(state, fp, interactive);
+    status = shell_run_stream_named(state, fp, interactive, path);
     state->interactive = saved_interactive;
     fclose(fp);
     return status;

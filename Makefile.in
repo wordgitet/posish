@@ -38,6 +38,7 @@ SRC = \
 	src/options.c \
 	src/prompt.c \
 	src/path.c \
+	src/error_catalog.c \
 	src/error.c \
 	src/arena.c \
 	src/builtins/special.c \
@@ -65,6 +66,7 @@ OBJ = \
 	src/options.o \
 	src/prompt.o \
 	src/path.o \
+	src/error_catalog.o \
 	src/error.o \
 	src/arena.o \
 	src/builtins/special.o \

@@ -1550,7 +1550,7 @@ static int collect_words_and_redirs(const struct token_vec *expanded, struct wor
         if (needs_word) {
             i++;
             if (i >= expanded->len) {
-                posish_errorf("missing redirection operand");
+                posish_error_idf(POSERR_MISSING_REDIRECTION_OPERAND);
                 return -1;
             }
 
@@ -1602,7 +1602,7 @@ static int expand_redirection_operands(struct shell_state *state,
                 arena_maybe_free(out_vec.items[j]);
             }
             arena_maybe_free(out_vec.items);
-            posish_errorf("ambiguous redirection");
+            posish_error_idf(POSERR_AMBIGUOUS_REDIRECTION);
             return 1;
         }
 
@@ -1614,8 +1614,8 @@ static int expand_redirection_operands(struct shell_state *state,
             redirs->items[i].kind == REDIR_DUP_OUT) {
             if (parse_dup_operand(redirs->items[i].path, &redirs->items[i]) !=
                 0) {
-                posish_errorf("invalid file descriptor redirection: %s",
-                              redirs->items[i].path);
+                posish_error_idf(POSERR_INVALID_FD_REDIRECTION,
+                                 redirs->items[i].path);
                 return 1;
             }
             arena_maybe_free(redirs->items[i].path);
@@ -1965,7 +1965,7 @@ static int parse_redirections_from_source(const char *source, struct shell_state
     }
 
     if (words.len != 0) {
-        posish_errorf("unsupported tokens after grouped command");
+        posish_error_idf(POSERR_UNSUPPORTED_TOKENS_AFTER_GROUP);
         word_vec_free(&words);
         redir_vec_free(redirs);
         lexer_free_tokens(&expanded);
@@ -2033,11 +2033,12 @@ static int execute_simple_command(struct shell_state *state, const char *source,
     assignment_special = false;
 
     if (has_unsupported_syntax(source)) {
-        posish_errorf("complex shell syntax is not implemented yet");
+        posish_error_idf(POSERR_COMPLEX_SYNTAX_UNIMPLEMENTED);
         return 2;
     }
 
-    if (lexer_split_words(source, &lexed) != 0) {
+    if (lexer_split_words_at(state->current_source_name, source,
+                             state->current_source_base_line, &lexed) != 0) {
         return 2;
     }
 
@@ -2055,7 +2056,7 @@ static int execute_simple_command(struct shell_state *state, const char *source,
     in_vec.items = raw_words.items + assign_count;
     in_vec.len = raw_words.len - assign_count;
     if (in_vec.len > 0 && is_reserved_word_as_command(in_vec.items[0])) {
-        posish_errorf("syntax error near unexpected token `%s'", in_vec.items[0]);
+        posish_error_idf(POSERR_UNEXPECTED_TOKEN, in_vec.items[0]);
         if (!state->interactive) {
             state->should_exit = true;
             state->exit_status = 2;

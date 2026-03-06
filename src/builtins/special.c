@@ -487,7 +487,7 @@ static int builtin_command(struct shell_state *state, char *const argv[]) {
                 continue;
             }
 
-            posish_errorf("command: invalid option: -%c", argv[i][j]);
+            posish_error_idf(POSERR_COMMAND_INVALID_OPTION, argv[i][j]);
             return 2;
         }
         i++;
@@ -628,19 +628,19 @@ static int builtin_shift(struct shell_state *state, char *const argv[]) {
         errno = 0;
         n = strtol(argv[i], &end, 10);
         if (errno != 0 || end == argv[i] || *end != '\0' || n < 0) {
-            posish_errorf("shift: invalid shift count: %s", argv[i]);
+            posish_error_idf(POSERR_SHIFT_INVALID_COUNT, argv[i]);
             return 1;
         }
         i++;
     }
     if (argv[i] != NULL) {
-        posish_errorf("shift: too many arguments");
+        posish_error_idf(POSERR_SHIFT_TOO_MANY_ARGUMENTS);
         return 1;
     }
 
     shift_count = (size_t)n;
     if (shift_count > state->positional_count) {
-        posish_errorf("shift: shift count out of range");
+        posish_error_idf(POSERR_SHIFT_COUNT_OUT_OF_RANGE);
         return 1;
     }
     if (shift_count == 0) {
@@ -700,7 +700,7 @@ static int builtin_set(struct shell_state *state, char *const argv[]) {
             }
             name = argv[i + 1];
             if (!options_apply_long(state, name, enable, &refresh_signal_policy)) {
-                posish_errorf("set: invalid option name: %s", name);
+                posish_error_idf(POSERR_SET_INVALID_OPTION_NAME, name);
                 return 2;
             }
             if (strcmp(name, "interactive") == 0) {
@@ -726,7 +726,7 @@ static int builtin_set(struct shell_state *state, char *const argv[]) {
 
                 if (!options_apply_long(state, name, enable,
                                         &refresh_signal_policy)) {
-                    posish_errorf("set: invalid option name: %s", name);
+                    posish_error_idf(POSERR_SET_INVALID_OPTION_NAME, name);
                     return 2;
                 }
                 if (strcmp(name, "interactive") == 0) {
@@ -737,7 +737,7 @@ static int builtin_set(struct shell_state *state, char *const argv[]) {
 
             if (!options_apply_short(state, opt[j], enable,
                                      &refresh_signal_policy)) {
-                posish_errorf("set: invalid option: -%c", opt[j]);
+                posish_error_idf(POSERR_SET_INVALID_OPTION, opt[j]);
                 return 2;
             }
             if (opt[j] == 'i') {
@@ -764,7 +764,7 @@ static int parse_loop_count_operand(const char *name, const char *text,
     errno = 0;
     n = strtol(text, &end, 10);
     if (errno != 0 || end == text || *end != '\0' || n <= 0 || n > INT_MAX) {
-        posish_errorf("%s: invalid loop count: %s", name, text);
+        posish_error_idf(POSERR_LOOP_INVALID_COUNT, name, text);
         return 1;
     }
 
@@ -785,13 +785,13 @@ static int builtin_break_or_continue(struct shell_state *state, char *const argv
             return 1;
         }
         if (argv[2] != NULL) {
-            posish_errorf("%s: too many arguments", name);
+            posish_error_idf(POSERR_LOOP_TOO_MANY_ARGUMENTS, name);
             return 1;
         }
     }
 
     if (state->loop_depth <= 0) {
-        posish_errorf("%s: only meaningful in a loop", name);
+        posish_error_idf(POSERR_LOOP_ONLY_IN_LOOP, name);
         return 1;
     }
 
@@ -821,7 +821,7 @@ static int builtin_return(struct shell_state *state, char *const argv[]) {
         errno = 0;
         n = strtol(argv[i], &end, 10);
         if (errno != 0 || end == argv[i] || *end != '\0') {
-            posish_errorf("return: numeric argument required: %s", argv[i]);
+            posish_error_idf(POSERR_RETURN_NUMERIC_ARGUMENT_REQUIRED, argv[i]);
             return 2;
         }
         status = (unsigned char)n;
@@ -829,12 +829,12 @@ static int builtin_return(struct shell_state *state, char *const argv[]) {
     }
 
     if (argv[i] != NULL) {
-        posish_errorf("return: too many arguments");
+        posish_error_idf(POSERR_RETURN_TOO_MANY_ARGUMENTS);
         return 1;
     }
 
     if (state->function_depth <= 0 && state->dot_depth <= 0) {
-        posish_errorf("return: can only be used in a function or sourced script");
+        posish_error_idf(POSERR_RETURN_OUTSIDE_CONTEXT);
         return 1;
     }
 
@@ -854,13 +854,13 @@ static int builtin_dot(struct shell_state *state, char *const argv[]) {
         i++;
     }
     if (argv[i] == NULL) {
-        posish_errorf(".: filename argument required");
+        posish_error_idf(POSERR_DOT_FILENAME_ARGUMENT_REQUIRED);
         return 2;
     }
 
     path = find_dot_script_path(argv[i]);
     if (path == NULL) {
-        posish_errorf(".: %s: file not found", argv[i]);
+        posish_error_idf(POSERR_DOT_FILE_NOT_FOUND, argv[i]);
         if (!state->interactive && !state->in_command_builtin) {
             state->should_exit = true;
             state->exit_status = 1;
@@ -1111,7 +1111,7 @@ static int builtin_unset(struct shell_state *state, char *const argv[]) {
             } else if (argv[i][j] == 'v') {
                 mode = UNSET_VARIABLE;
             } else {
-                posish_errorf("unset: invalid option: -%c", argv[i][j]);
+                posish_error_idf(POSERR_UNSET_INVALID_OPTION, argv[i][j]);
                 if (!state->interactive) {
                     state->should_exit = true;
                     state->exit_status = 2;
@@ -1128,7 +1128,7 @@ static int builtin_unset(struct shell_state *state, char *const argv[]) {
 
         if (mode == UNSET_FUNCTION) {
             if (!vars_is_name_valid(argv[i])) {
-                posish_errorf("unset: invalid function name: %s", argv[i]);
+                posish_error_idf(POSERR_UNSET_INVALID_FUNCTION_NAME, argv[i]);
                 status = 1;
                 continue;
             }
@@ -1170,7 +1170,7 @@ static int builtin_export(struct shell_state *state, char *const argv[]) {
             if (argv[i][j] == 'p') {
                 print_only = true;
             } else {
-                posish_errorf("export: invalid option: -%c", argv[i][j]);
+                posish_error_idf(POSERR_EXPORT_INVALID_OPTION, argv[i][j]);
                 return 2;
             }
         }
@@ -1205,7 +1205,7 @@ static int builtin_export(struct shell_state *state, char *const argv[]) {
         }
 
         if (!vars_is_name_valid(argv[i])) {
-            posish_errorf("export: invalid variable name: %s", argv[i]);
+            posish_error_idf(POSERR_EXPORT_INVALID_VARIABLE_NAME, argv[i]);
             status = 1;
             continue;
         }
@@ -1487,7 +1487,7 @@ static int builtin_read(struct shell_state *state, char *const argv[]) {
                 } else {
                     i++;
                     if (argv[i] == NULL || argv[i][0] == '\0') {
-                        posish_errorf("read: option -d requires an argument");
+                        posish_error_idf(POSERR_READ_OPTION_REQUIRES_ARGUMENT);
                         return 2;
                     }
                     delimiter = (unsigned char)argv[i][0];
@@ -1495,7 +1495,7 @@ static int builtin_read(struct shell_state *state, char *const argv[]) {
                 }
                 continue;
             }
-            posish_errorf("read: invalid option: -%c", *opt);
+            posish_error_idf(POSERR_READ_INVALID_OPTION, *opt);
             return 2;
         }
         i++;
@@ -1701,7 +1701,7 @@ static int builtin_readonly(struct shell_state *state, char *const argv[]) {
             if (argv[i][j] == 'p') {
                 print_only = true;
             } else {
-                posish_errorf("readonly: invalid option: -%c", argv[i][j]);
+                posish_error_idf(POSERR_READONLY_INVALID_OPTION, argv[i][j]);
                 return 2;
             }
         }
@@ -2041,7 +2041,7 @@ static int trap_print_selected(const struct shell_state *state, bool print_all,
 
         signo = trap_signal_number(argv[i]);
         if (signo < 0) {
-            posish_errorf("trap: invalid signal: %s", argv[i]);
+            posish_error_idf(POSERR_TRAP_INVALID_SIGNAL, argv[i]);
             status = 1;
             continue;
         }
@@ -2150,7 +2150,7 @@ static int builtin_trap(struct shell_state *state, char *const argv[]) {
         argi--;
     }
     if (argv[argi] == NULL) {
-        posish_errorf("trap: missing condition");
+        posish_error_idf(POSERR_TRAP_MISSING_CONDITION);
         return 2;
     }
 
@@ -2178,7 +2178,7 @@ static int builtin_trap(struct shell_state *state, char *const argv[]) {
 
             signo = trap_signal_number(argv[i]);
             if (signo < 0) {
-                posish_errorf("trap: invalid signal: %s", argv[i]);
+                posish_error_idf(POSERR_TRAP_INVALID_SIGNAL, argv[i]);
                 status = 1;
                 continue;
             }
@@ -2337,12 +2337,12 @@ int builtin_try_special(struct shell_state *state, char *const argv[], bool *han
             errno = 0;
             status = (int)strtol(argv[i], &end, 10);
             if (errno != 0 || end == argv[i] || *end != '\0') {
-                posish_errorf("exit: numeric argument required: %s", argv[i]);
+                posish_error_idf(POSERR_EXIT_NUMERIC_ARGUMENT_REQUIRED, argv[i]);
                 status = 2;
             }
             i++;
             if (argv[i] != NULL) {
-                posish_errorf("exit: too many arguments");
+                posish_error_idf(POSERR_EXIT_TOO_MANY_ARGUMENTS);
                 *handled = true;
                 return 1;
             }

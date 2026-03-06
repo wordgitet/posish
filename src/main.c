@@ -229,6 +229,8 @@ int main(int argc, char **argv) {
     if (state.should_exit) {
         status = state.exit_status;
     } else if (command != NULL) {
+        state.current_source_name = "<command>";
+        state.current_source_base_line = 1;
         status = shell_run_command(&state, command);
     } else if (read_stdin_script) {
         status = shell_run_stream(&state, stdin, run_interactive);

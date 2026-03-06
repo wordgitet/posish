@@ -23,6 +23,8 @@ struct shell_state {
     bool cmdsub_performed;
     pid_t shell_pid;
     size_t prompt_command_index;
+    const char *current_source_name;
+    size_t current_source_base_line;
     bool errexit;
     bool errexit_ignored;
     bool should_exit;

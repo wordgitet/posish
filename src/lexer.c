@@ -12,9 +12,13 @@
 #include <stdlib.h>
 
 static void buf_push(char **buf, size_t *len, size_t *cap, char ch);
+static void report_lexer_error(const char *source_name, const char *line,
+                               size_t base_line, const char *pos,
+                               enum posish_error_id id);
 
 static int append_command_subst(const char **p_ptr, char **buf, size_t *len,
-                                size_t *cap) {
+                                size_t *cap, const char *source_name,
+                                const char *line, size_t base_line) {
     const char *p;
     int depth;
     int quote;
@@ -58,12 +62,14 @@ static int append_command_subst(const char **p_ptr, char **buf, size_t *len,
         p++;
     }
 
-    posish_errorf("unterminated command substitution");
+    report_lexer_error(source_name, line, base_line, p,
+                       POSERR_UNTERMINATED_COMMAND_SUBSTITUTION);
     return -1;
 }
 
 static int append_backtick_subst(const char **p_ptr, char **buf, size_t *len,
-                                 size_t *cap) {
+                                 size_t *cap, const char *source_name,
+                                 const char *line, size_t base_line) {
     const char *p;
 
     p = *p_ptr;
@@ -81,12 +87,15 @@ static int append_backtick_subst(const char **p_ptr, char **buf, size_t *len,
         p++;
     }
 
-    posish_errorf("unterminated backtick command substitution");
+    report_lexer_error(source_name, line, base_line, p,
+                       POSERR_UNTERMINATED_BACKTICK_SUBSTITUTION);
     return -1;
 }
 
 static int append_dollar_single_quote(const char **p_ptr, char **buf,
-                                      size_t *len, size_t *cap) {
+                                      size_t *len, size_t *cap,
+                                      const char *source_name,
+                                      const char *line, size_t base_line) {
     const char *p;
 
     p = *p_ptr;
@@ -111,12 +120,15 @@ static int append_dollar_single_quote(const char **p_ptr, char **buf,
         p++;
     }
 
-    posish_errorf("unterminated dollar-single-quoted string");
+    report_lexer_error(source_name, line, base_line, p,
+                       POSERR_UNTERMINATED_DOLLAR_SINGLE_QUOTE);
     return -1;
 }
 
 static int append_braced_param_subst(const char **p_ptr, char **buf, size_t *len,
-                                     size_t *cap, bool dquote_context) {
+                                     size_t *cap, bool dquote_context,
+                                     const char *source_name, const char *line,
+                                     size_t base_line) {
     const char *p;
     int depth;
     int quote;
@@ -159,8 +171,34 @@ static int append_braced_param_subst(const char **p_ptr, char **buf, size_t *len
         p++;
     }
 
-    posish_errorf("unterminated parameter expansion");
+    report_lexer_error(source_name, line, base_line, p,
+                       POSERR_UNTERMINATED_PARAMETER_EXPANSION);
     return -1;
+}
+
+static void report_lexer_error(const char *source_name, const char *line,
+                               size_t base_line, const char *pos,
+                               enum posish_error_id id) {
+    size_t line_no;
+    const char *line_start;
+    const char *p;
+
+    if (source_name == NULL || line == NULL || pos == NULL) {
+        posish_error_idf(id);
+        return;
+    }
+
+    line_no = base_line == 0 ? 1 : base_line;
+    line_start = line;
+    for (p = line; *p != '\0' && p < pos; p++) {
+        if (*p == '\n') {
+            line_no++;
+            line_start = p + 1;
+        }
+    }
+
+    posish_error_at_idf(source_name, line_no, (size_t)(pos - line_start) + 1,
+                        id);
 }
 
 static void vec_push(struct token_vec *vec, char *word) {
@@ -194,7 +232,8 @@ void lexer_free_tokens(struct token_vec *tokens) {
     tokens->len = 0;
 }
 
-int lexer_split_words(const char *line, struct token_vec *out) {
+int lexer_split_words_at(const char *source_name, const char *line,
+                         size_t base_line, struct token_vec *out) {
     const char *p;
 
     out->items = NULL;
@@ -230,7 +269,8 @@ int lexer_split_words(const char *line, struct token_vec *out) {
             }
 
             if (quote != '\'' && ch == '$' && p[1] == '(') {
-                if (append_command_subst(&p, &buf, &len, &cap) != 0) {
+                if (append_command_subst(&p, &buf, &len, &cap, source_name,
+                                         line, base_line) != 0) {
                     lexer_free_tokens(out);
                     return -1;
                 }
@@ -238,7 +278,9 @@ int lexer_split_words(const char *line, struct token_vec *out) {
                 continue;
             }
             if (quote != '\'' && ch == '$' && p[1] == '\'') {
-                if (append_dollar_single_quote(&p, &buf, &len, &cap) != 0) {
+                if (append_dollar_single_quote(&p, &buf, &len, &cap,
+                                               source_name, line,
+                                               base_line) != 0) {
                     lexer_free_tokens(out);
                     return -1;
                 }
@@ -247,7 +289,8 @@ int lexer_split_words(const char *line, struct token_vec *out) {
             }
             if (quote != '\'' && ch == '$' && p[1] == '{') {
                 if (append_braced_param_subst(&p, &buf, &len, &cap,
-                                              quote == '"') != 0) {
+                                              quote == '"', source_name, line,
+                                              base_line) != 0) {
                     lexer_free_tokens(out);
                     return -1;
                 }
@@ -255,7 +298,8 @@ int lexer_split_words(const char *line, struct token_vec *out) {
                 continue;
             }
             if (quote != '\'' && ch == '`') {
-                if (append_backtick_subst(&p, &buf, &len, &cap) != 0) {
+                if (append_backtick_subst(&p, &buf, &len, &cap, source_name,
+                                          line, base_line) != 0) {
                     lexer_free_tokens(out);
                     return -1;
                 }
@@ -291,7 +335,8 @@ int lexer_split_words(const char *line, struct token_vec *out) {
             }
             if (ch == '\\' && quote != '\'') {
                 if (p[1] == '\0') {
-                    posish_errorf("trailing backslash in command");
+                    report_lexer_error(source_name, line, base_line, p,
+                                       POSERR_TRAILING_BACKSLASH);
                     lexer_free_tokens(out);
                     return -1;
                 }
@@ -312,7 +357,8 @@ int lexer_split_words(const char *line, struct token_vec *out) {
         }
 
         if (quote != 0) {
-            posish_errorf("unterminated quote in command");
+            report_lexer_error(source_name, line, base_line, p,
+                               POSERR_UNTERMINATED_QUOTE);
             lexer_free_tokens(out);
             return -1;
         }
@@ -326,4 +372,8 @@ int lexer_split_words(const char *line, struct token_vec *out) {
     }
 
     return 0;
+}
+
+int lexer_split_words(const char *line, struct token_vec *out) {
+    return lexer_split_words_at(NULL, line, 1, out);
 }

@@ -213,14 +213,14 @@ static int builtin_cd(struct shell_state *state, char *const argv[]) {
                 opt_e = true;
                 continue;
             }
-            posish_errorf("cd: invalid option: -%c", argv[i][j]);
+            posish_error_idf(POSERR_CD_INVALID_OPTION, argv[i][j]);
             return 2;
         }
         i++;
     }
 
     if (argv[i] != NULL && argv[i + 1] != NULL) {
-        posish_errorf("cd: too many arguments");
+        posish_error_idf(POSERR_CD_TOO_MANY_ARGUMENTS);
         return 1;
     }
 
@@ -229,13 +229,13 @@ static int builtin_cd(struct shell_state *state, char *const argv[]) {
     if (operand == NULL) {
         target = getenv("HOME");
         if (target == NULL || target[0] == '\0') {
-            posish_errorf("cd: HOME is not set");
+            posish_error_idf(POSERR_CD_HOME_NOT_SET);
             return 1;
         }
     } else if (strcmp(operand, "-") == 0) {
         target = getenv("OLDPWD");
         if (target == NULL || target[0] == '\0') {
-            posish_errorf("cd: OLDPWD is not set");
+            posish_error_idf(POSERR_CD_OLDPWD_NOT_SET);
             return 1;
         }
         print_path = true;
@@ -416,14 +416,14 @@ static int builtin_pwd(char *const argv[]) {
                 physical = true;
                 continue;
             }
-            posish_errorf("pwd: invalid option: -%c", argv[i][j]);
+            posish_error_idf(POSERR_PWD_INVALID_OPTION, argv[i][j]);
             return 2;
         }
         i++;
     }
 
     if (argv[i] != NULL) {
-        posish_errorf("pwd: too many arguments");
+        posish_error_idf(POSERR_PWD_TOO_MANY_ARGUMENTS);
         return 1;
     }
 
@@ -671,7 +671,7 @@ static int builtin_umask(char *const argv[]) {
             continue;
         }
         if (argv[i][0] == '-' && argv[i][1] != '\0') {
-            posish_errorf("umask: invalid option: %s", argv[i]);
+            posish_error_idf(POSERR_UMASK_INVALID_OPTION, argv[i]);
             return 2;
         }
         break;
@@ -679,7 +679,7 @@ static int builtin_umask(char *const argv[]) {
 
     operand = argv[i];
     if (operand != NULL && argv[i + 1] != NULL) {
-        posish_errorf("umask: too many operands");
+        posish_error_idf(POSERR_UMASK_TOO_MANY_OPERANDS);
         return 1;
     }
 
@@ -698,7 +698,7 @@ static int builtin_umask(char *const argv[]) {
     new_mask = current_mask;
     if (parse_octal_umask(operand, &new_mask) != 0 &&
         parse_symbolic_umask(operand, &new_mask) != 0) {
-        posish_errorf("umask: invalid mode: %s", operand);
+        posish_error_idf(POSERR_UMASK_INVALID_MODE, operand);
         return 1;
     }
 
@@ -865,7 +865,7 @@ static int builtin_printf_numeric_arg(struct builtin_printf_state *st, int *out)
     if (builtin_printf_parse_int(arg, out) == 0) {
         return 0;
     }
-    posish_errorf("printf: expected numeric value: %s", arg);
+    posish_error_idf(POSERR_PRINTF_EXPECTED_NUMERIC_VALUE, arg);
     st->status = 1;
     *out = 0;
     return -1;
@@ -1090,7 +1090,7 @@ static int builtin_printf_one_pass(struct builtin_printf_state *st,
 
             conv = *p;
             if (conv == '\0') {
-                posish_errorf("printf: missing format character");
+                posish_error_idf(POSERR_PRINTF_MISSING_FORMAT_CHARACTER);
                 st->status = 1;
                 return 1;
             }
@@ -1147,7 +1147,7 @@ static int builtin_printf_one_pass(struct builtin_printf_state *st,
 
                 arg = builtin_printf_arg_or_default(st, "0");
                 if (builtin_printf_parse_signed(arg, &value) != 0) {
-                    posish_errorf("printf: expected numeric value: %s", arg);
+                    posish_error_idf(POSERR_PRINTF_EXPECTED_NUMERIC_VALUE, arg);
                     st->status = 1;
                     value = 0;
                 }
@@ -1166,7 +1166,7 @@ static int builtin_printf_one_pass(struct builtin_printf_state *st,
 
                 arg = builtin_printf_arg_or_default(st, "0");
                 if (builtin_printf_parse_unsigned(arg, &value) != 0) {
-                    posish_errorf("printf: expected numeric value: %s", arg);
+                    posish_error_idf(POSERR_PRINTF_EXPECTED_NUMERIC_VALUE, arg);
                     st->status = 1;
                     value = 0;
                 }
@@ -1179,7 +1179,7 @@ static int builtin_printf_one_pass(struct builtin_printf_state *st,
                 continue;
             }
 
-            posish_errorf("printf: unsupported conversion: %%%c", conv);
+            posish_error_idf(POSERR_PRINTF_UNSUPPORTED_CONVERSION, conv);
             st->status = 1;
             return 1;
         }
@@ -1195,7 +1195,7 @@ static int builtin_printf(char *const argv[]) {
     int flush_status;
 
     if (argv[1] == NULL) {
-        posish_errorf("printf: missing format operand");
+        posish_error_idf(POSERR_PRINTF_MISSING_FORMAT_OPERAND);
         return 1;
     }
 
@@ -1377,11 +1377,11 @@ static int builtin_kill(char *const argv[]) {
             lookup = jobs_get_by_spec(argv[i], &job);
             if (lookup != JOBS_LOOKUP_OK || job.pgid <= 0) {
                 if (lookup == JOBS_LOOKUP_AMBIGUOUS) {
-                    posish_errorf("kill: ambiguous job: %s", argv[i]);
+                    posish_error_idf(POSERR_KILL_AMBIGUOUS_JOB, argv[i]);
                 } else if (lookup == JOBS_LOOKUP_INVALID) {
-                    posish_errorf("kill: invalid job spec: %s", argv[i]);
+                    posish_error_idf(POSERR_KILL_INVALID_JOB_SPEC, argv[i]);
                 } else {
-                    posish_errorf("kill: no such job: %s", argv[i]);
+                    posish_error_idf(POSERR_KILL_NO_SUCH_JOB, argv[i]);
                 }
                 status = 1;
                 goto done;
@@ -1568,7 +1568,7 @@ static int builtin_alias(char *const argv[]) {
         eq = strchr(argv[i], '=');
         if (eq == NULL) {
             if (!alias_name_valid(argv[i])) {
-                posish_errorf("alias: invalid name: %s", argv[i]);
+                posish_error_idf(POSERR_ALIAS_INVALID_NAME, argv[i]);
                 status = 1;
                 continue;
             }
@@ -1579,7 +1579,7 @@ static int builtin_alias(char *const argv[]) {
             }
             value = getenv(key);
             if (value == NULL) {
-                posish_errorf("alias: %s: not found", argv[i]);
+                posish_error_idf(POSERR_ALIAS_NOT_FOUND, argv[i]);
                 arena_maybe_free(key);
                 status = 1;
                 continue;
@@ -1598,7 +1598,7 @@ static int builtin_alias(char *const argv[]) {
         value = eq + 1;
 
         if (!alias_name_valid(name)) {
-            posish_errorf("alias: invalid name: %s", name);
+            posish_error_idf(POSERR_ALIAS_INVALID_NAME, name);
             arena_maybe_free(name);
             status = 1;
             continue;
@@ -1641,12 +1641,12 @@ static int builtin_unalias(char *const argv[]) {
             i++;
             continue;
         }
-        posish_errorf("unalias: invalid option: %s", argv[i]);
+        posish_error_idf(POSERR_UNALIAS_INVALID_OPTION, argv[i]);
         return 2;
     }
 
     if (!clear_all && argv[i] == NULL) {
-        posish_errorf("unalias: missing operand");
+        posish_error_idf(POSERR_UNALIAS_MISSING_OPERAND);
         return 1;
     }
 
@@ -1695,7 +1695,7 @@ static int builtin_unalias(char *const argv[]) {
         char *key;
 
         if (!alias_name_valid(argv[i])) {
-            posish_errorf("unalias: invalid name: %s", argv[i]);
+            posish_error_idf(POSERR_UNALIAS_INVALID_NAME, argv[i]);
             status = 1;
             continue;
         }
@@ -1705,7 +1705,7 @@ static int builtin_unalias(char *const argv[]) {
             return 1;
         }
         if (getenv(key) == NULL) {
-            posish_errorf("unalias: %s: not found", argv[i]);
+            posish_error_idf(POSERR_UNALIAS_NOT_FOUND, argv[i]);
             arena_maybe_free(key);
             status = 1;
             continue;
@@ -1770,14 +1770,14 @@ static int builtin_getopts(struct shell_state *state, char *const argv[]) {
     char optind_text[32];
 
     if (argv[1] == NULL || argv[2] == NULL) {
-        posish_errorf("getopts: missing operands");
+        posish_error_idf(POSERR_GETOPTS_MISSING_OPERANDS);
         return 1;
     }
 
     optstring = argv[1];
     varname = argv[2];
     if (!vars_is_name_valid(varname)) {
-        posish_errorf("getopts: invalid variable name: %s", varname);
+        posish_error_idf(POSERR_GETOPTS_INVALID_VARIABLE_NAME, varname);
         return 1;
     }
 
@@ -1856,7 +1856,7 @@ static int builtin_getopts(struct shell_state *state, char *const argv[]) {
             }
         } else {
             (void)getopts_unset_var(state, "OPTARG");
-            posish_errorf("getopts: illegal option -- %c", optch);
+            posish_error_idf(POSERR_GETOPTS_ILLEGAL_OPTION, optch);
         }
     } else if (match[1] == ':') {
         const char *optarg_value;
@@ -1884,8 +1884,8 @@ static int builtin_getopts(struct shell_state *state, char *const argv[]) {
                     return 1;
                 }
                 (void)getopts_unset_var(state, "OPTARG");
-                posish_errorf("getopts: option requires an argument -- %c",
-                              optch);
+                posish_error_idf(POSERR_GETOPTS_OPTION_REQUIRES_ARGUMENT,
+                                 optch);
             }
             snprintf(optind_text, sizeof(optind_text), "%lu", optind);
             if (getopts_set_var(state, "OPTIND", optind_text) != 0) {
@@ -1947,7 +1947,7 @@ static int builtin_hash(char *const argv[]) {
             continue;
         }
         if (argv[i][0] == '-') {
-            posish_errorf("hash: invalid option: %s", argv[i]);
+            posish_error_idf(POSERR_HASH_INVALID_OPTION, argv[i]);
             return 2;
         }
     }
@@ -1964,7 +1964,7 @@ static int builtin_type(char *const argv[]) {
     int status;
 
     if (argv[1] == NULL) {
-        posish_errorf("type: missing operand");
+        posish_error_idf(POSERR_TYPE_MISSING_OPERAND);
         return 1;
     }
 
@@ -2138,11 +2138,11 @@ static void forget_completed_job_by_pid(pid_t pid) {
 static void report_job_lookup_error(const char *builtin_name, const char *spec,
                                     enum jobs_lookup_result lookup) {
     if (lookup == JOBS_LOOKUP_AMBIGUOUS) {
-        posish_errorf("%s: ambiguous job: %s", builtin_name, spec);
+        posish_error_idf(POSERR_JOBSPEC_AMBIGUOUS, builtin_name, spec);
     } else if (lookup == JOBS_LOOKUP_INVALID) {
-        posish_errorf("%s: invalid job spec: %s", builtin_name, spec);
+        posish_error_idf(POSERR_JOBSPEC_INVALID, builtin_name, spec);
     } else {
-        posish_errorf("%s: no such job: %s", builtin_name, spec);
+        posish_error_idf(POSERR_JOBSPEC_NO_SUCH, builtin_name, spec);
     }
 }
 
@@ -2196,7 +2196,7 @@ static int builtin_wait(struct shell_state *state, char *const argv[]) {
                 last_status = 127;
                 continue;
             }
-            posish_errorf("wait: unsupported operand: %s", argv[i]);
+            posish_error_idf(POSERR_WAIT_UNSUPPORTED_OPERAND, argv[i]);
             last_status = 1;
             continue;
         }
@@ -2315,7 +2315,7 @@ static int builtin_fg(struct shell_state *state, char *const argv[]) {
     struct jobs_entry_info job;
 
     if (!state->monitor_mode) {
-        posish_errorf("fg: job control is disabled");
+        posish_error_idf(POSERR_FG_JOB_CONTROL_DISABLED);
         return 1;
     }
 
@@ -2323,7 +2323,7 @@ static int builtin_fg(struct shell_state *state, char *const argv[]) {
         enum jobs_lookup_result lookup;
 
         if (argv[2] != NULL) {
-            posish_errorf("fg: too many arguments");
+            posish_error_idf(POSERR_FG_TOO_MANY_ARGUMENTS);
             return 1;
         }
         lookup = jobs_get_by_spec(argv[1], &job);
@@ -2333,7 +2333,7 @@ static int builtin_fg(struct shell_state *state, char *const argv[]) {
         }
     } else {
         if (!jobs_get_current(true, &job) && !jobs_get_current(false, &job)) {
-            posish_errorf("fg: no current job");
+            posish_error_idf(POSERR_FG_NO_CURRENT_JOB);
             return 1;
         }
     }
@@ -2350,7 +2350,7 @@ static int builtin_bg(struct shell_state *state, char *const argv[]) {
     int status;
 
     if (!state->monitor_mode) {
-        posish_errorf("bg: job control is disabled");
+        posish_error_idf(POSERR_BG_JOB_CONTROL_DISABLED);
         return 1;
     }
 
@@ -2359,7 +2359,7 @@ static int builtin_bg(struct shell_state *state, char *const argv[]) {
         struct jobs_entry_info job;
 
         if (!jobs_get_current(true, &job) && !jobs_get_current(false, &job)) {
-            posish_errorf("bg: no current job");
+            posish_error_idf(POSERR_BG_NO_CURRENT_JOB);
             return 1;
         }
 
