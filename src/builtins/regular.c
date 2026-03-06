@@ -1222,31 +1222,6 @@ static int builtin_printf(char *const argv[]) {
     return st.status;
 }
 
-#if POSISH_TEST_HELPERS
-static int builtin_echoraw(char *const argv[]) {
-    size_t i;
-
-    for (i = 1; argv[i] != NULL; i++) {
-        if (i > 1) {
-            putchar(' ');
-        }
-        fputs(argv[i], stdout);
-    }
-    putchar('\n');
-    return 0;
-}
-
-static int builtin_bracket(char *const argv[]) {
-    size_t i;
-
-    for (i = 1; argv[i] != NULL; i++) {
-        printf("[%s]", argv[i]);
-    }
-    putchar('\n');
-    return 0;
-}
-#endif
-
 static char *pid_to_string(pid_t pid) {
     char buf[32];
     int len;
@@ -2417,36 +2392,6 @@ static int builtin_bg(struct shell_state *state, char *const argv[]) {
     return status;
 }
 
-#if POSISH_TEST_HELPERS
-static int builtin_make_command(char *const argv[]) {
-    size_t i;
-
-    for (i = 1; argv[i] != NULL; i++) {
-        FILE *fp;
-
-        fp = fopen(argv[i], "w");
-        if (fp == NULL) {
-            perror(argv[i]);
-            return 1;
-        }
-
-        /* Helper utility used by imported POSIX tests to create tiny scripts. */
-        fprintf(fp, "#!/bin/sh\n");
-        fprintf(fp, "echo \"Running %s\"\n", argv[i]);
-        if (fclose(fp) != 0) {
-            perror(argv[i]);
-            return 1;
-        }
-
-        if (chmod(argv[i], 0755) != 0) {
-            perror(argv[i]);
-            return 1;
-        }
-    }
-    return 0;
-}
-#endif
-
 int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handled) {
     int status;
 
@@ -2527,21 +2472,6 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
         *handled = true;
         return builtin_unalias(argv);
     }
-#if POSISH_TEST_HELPERS
-    if (strcmp(argv[0], "echoraw") == 0) {
-        *handled = true;
-        return builtin_echoraw(argv);
-    }
-    if (strcmp(argv[0], "bracket") == 0) {
-        *handled = true;
-        return builtin_bracket(argv);
-    }
-    if (strcmp(argv[0], "make_command") == 0) {
-        *handled = true;
-        return builtin_make_command(argv);
-    }
-#endif
-
     *handled = false;
     return 0;
 }
@@ -2569,12 +2499,6 @@ bool builtin_is_name(const char *name) {
             return true;
         }
     }
-#if POSISH_TEST_HELPERS
-    if (strcmp(name, "echoraw") == 0 || strcmp(name, "bracket") == 0 ||
-        strcmp(name, "make_command") == 0) {
-        return true;
-    }
-#endif
     return false;
 }
 

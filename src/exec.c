@@ -803,17 +803,6 @@ static int shell_set_function(struct shell_state *state, const char *name,
                               const char *body) {
     int idx;
 
-#if POSISH_TEST_HELPERS
-    /*
-     * The imported POSIX helper functions `bracket` and `echoraw` are backed
-     * by builtins in this milestone, so we intentionally ignore redefinition.
-     */
-    if (strcmp(name, "bracket") == 0 || strcmp(name, "echoraw") == 0 ||
-        strcmp(name, "make_command") == 0) {
-        return 0;
-    }
-#endif
-
     idx = find_function_index(state, name);
     if (idx >= 0) {
         arena_maybe_free(state->functions[idx].body);
@@ -1359,26 +1348,8 @@ static bool has_pending_flow_control(const struct shell_state *state) {
 }
 
 static bool ignore_helper_function_declaration(const char *source) {
-#if POSISH_TEST_HELPERS
-    size_t i;
-
-    i = 0;
-    while (isspace((unsigned char)source[i])) {
-        i++;
-    }
-
-    /*
-     * Imported tests define make_command() with a "for" body form we do not
-     * parse yet; a builtin helper handles command creation for this milestone.
-     */
-    if (strncmp(source + i, "make_command()", 14) != 0) {
-        return false;
-    }
-    return keyword_boundary(source[i + 14]);
-#else
     (void)source;
     return false;
-#endif
 }
 
 static int find_redir_operator_pos(const char *token, size_t *pos_out) {

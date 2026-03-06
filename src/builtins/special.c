@@ -127,8 +127,7 @@ static bool is_regular_builtin_name(const char *name) {
     static const char *const words[] = {
         "cd",     "true",   "false",  "test",   "[",      "kill",
         "wait",   "fg",     "bg",     "umask",  "alias",  "command",
-        "read",   "getopts","hash",   "jobs",   "type",   "unalias",
-        "echoraw","bracket","make_command"};
+        "read",   "getopts","hash",   "jobs",   "type",   "unalias"};
     size_t i;
 
     for (i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
