@@ -3791,6 +3791,9 @@ static int execute_ast_node(struct shell_state *state,
         return run_async_ast_node(state, node->data.unary.child);
     case AST_NODE_AND_OR:
         status = execute_ast_node(state, node->data.andor.items[0], true);
+        if (state->should_exit || has_pending_flow_control(state)) {
+            return status;
+        }
         for (i = 0; i + 1 < node->data.andor.len; i++) {
             if (node->data.andor.ops[i] == AST_ANDOR_AND) {
                 if (status == 0) {

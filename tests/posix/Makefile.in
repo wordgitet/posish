@@ -41,6 +41,9 @@ REGRESSION_TEST_SOURCES = \
 	pwd-p.tst \
 	trapcmdsub-p.tst \
 	andor-p.tst \
+	async-p.tst \
+	break-p.tst \
+	continue-p.tst \
 	pipeline-p.tst \
 	grouping-p.tst \
 	comment-p.tst \
@@ -50,6 +53,7 @@ REGRESSION_TEST_SOURCES = \
 	while-p.tst \
 	case-p.tst \
 	function-p.tst \
+	return-p.tst \
 	prompt-posish.tst \
 	startup-posish.tst \
 	diag-posish.tst \
