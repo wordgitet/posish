@@ -14,6 +14,7 @@
 #include "heredoc_command.h"
 #include "jobs.h"
 #include "lexer.h"
+#include "parser.h"
 #include "redir.h"
 #include "signals.h"
 #include "trace.h"
@@ -85,10 +86,24 @@ static bool find_dollar_single_quote_end(const char *source, size_t start,
                                          size_t *out_end);
 static bool command_text_needs_more_input(const char *source,
                                           bool include_heredoc);
+static bool parse_function_definition(const char *source, char **name_out,
+                                      char **body_out);
 static bool looks_like_function_header_only(const char *source);
+static bool keyword_boundary(char ch);
+static bool unwrap_subshell_group(const char *source, char **inner_out,
+                                  char **redir_suffix_out);
+static bool unwrap_brace_group(const char *source, char **inner_out,
+                               char **redir_suffix_out);
+static bool split_case_redirection_suffix(const char *source, char **core_out,
+                                          char **suffix_out);
 static bool is_async_separator_amp(const char *source, size_t pos);
 static bool ast_node_is_direct_exec_compatible(const struct ast_node *node);
 static bool ast_node_uses_operator_execution(const struct ast_node *node);
+static bool is_ast_compound_candidate(const char *source);
+static bool try_run_ast_compound_command(struct shell_state *state,
+                                         const char *source,
+                                         bool allow_builtin,
+                                         int *status_out);
 
 static void exit_shell_child_status(int status) {
     int signo;
@@ -359,6 +374,131 @@ static bool ast_node_uses_operator_execution(const struct ast_node *node) {
     }
 
     return false;
+}
+
+static bool is_ast_compound_candidate(const char *source) {
+    char *fn_name;
+    char *fn_body;
+    char *if_cond;
+    char *if_then;
+    char *if_else;
+    char *if_redirs;
+    char *loop_cond;
+    char *loop_body;
+    char *loop_redirs;
+    char *for_name;
+    char *for_words;
+    char *for_body;
+    char *for_redirs;
+    char *case_core;
+    char *case_suffix;
+    char *inner;
+    char *group_redirs;
+    bool loop_is_until;
+    bool for_implicit_words;
+
+    if (source == NULL || source[0] == '\0' || strstr(source, "<<") != NULL) {
+        return false;
+    }
+
+    fn_name = NULL;
+    fn_body = NULL;
+    if_cond = NULL;
+    if_then = NULL;
+    if_else = NULL;
+    if_redirs = NULL;
+    loop_cond = NULL;
+    loop_body = NULL;
+    loop_redirs = NULL;
+    for_name = NULL;
+    for_words = NULL;
+    for_body = NULL;
+    for_redirs = NULL;
+    case_core = NULL;
+    case_suffix = NULL;
+    inner = NULL;
+    group_redirs = NULL;
+    loop_is_until = false;
+    for_implicit_words = false;
+
+    if (parse_function_definition(source, &fn_name, &fn_body)) {
+        arena_maybe_free(fn_name);
+        arena_maybe_free(fn_body);
+        return true;
+    }
+    if (parse_simple_if(source, &if_cond, &if_then, &if_else, &if_redirs)) {
+        arena_maybe_free(if_cond);
+        arena_maybe_free(if_then);
+        arena_maybe_free(if_else);
+        arena_maybe_free(if_redirs);
+        return true;
+    }
+    if (parse_simple_while(source, &loop_cond, &loop_body, &loop_is_until,
+                           &loop_redirs)) {
+        arena_maybe_free(loop_cond);
+        arena_maybe_free(loop_body);
+        arena_maybe_free(loop_redirs);
+        return true;
+    }
+    if (parse_simple_for(source, &for_name, &for_words, &for_body,
+                         &for_implicit_words, &for_redirs)) {
+        arena_maybe_free(for_name);
+        arena_maybe_free(for_words);
+        arena_maybe_free(for_body);
+        arena_maybe_free(for_redirs);
+        return true;
+    }
+    if (split_case_redirection_suffix(source, &case_core, &case_suffix)) {
+        arena_maybe_free(case_core);
+        arena_maybe_free(case_suffix);
+        return true;
+    }
+    arena_maybe_free(case_core);
+    arena_maybe_free(case_suffix);
+    if (strncmp(source, "case", 4) == 0 && keyword_boundary(source[4])) {
+        return true;
+    }
+    if (unwrap_subshell_group(source, &inner, &group_redirs)) {
+        arena_maybe_free(inner);
+        arena_maybe_free(group_redirs);
+        return true;
+    }
+    arena_maybe_free(inner);
+    arena_maybe_free(group_redirs);
+    inner = NULL;
+    group_redirs = NULL;
+    if (unwrap_brace_group(source, &inner, &group_redirs)) {
+        arena_maybe_free(inner);
+        arena_maybe_free(group_redirs);
+        return true;
+    }
+    arena_maybe_free(inner);
+    arena_maybe_free(group_redirs);
+    return false;
+}
+
+static bool try_run_ast_compound_command(struct shell_state *state,
+                                         const char *source,
+                                         bool allow_builtin,
+                                         int *status_out) {
+    struct ast_program *program;
+
+    program = NULL;
+    if (parse_program(source, &program) != 0) {
+        *status_out = 2;
+        return true;
+    }
+    if (program == NULL || program->root == NULL) {
+        *status_out = 0;
+        return true;
+    }
+    if (!ast_node_is_direct_exec_compatible(program->root) ||
+        program->root->kind == AST_NODE_LEGACY) {
+        return false;
+    }
+
+    *status_out = execute_ast_node(state, program->root, allow_builtin);
+    return true;
 }
 
 static void word_vec_free(struct word_vec *words) {
@@ -3607,6 +3747,12 @@ static int execute_command_atom(struct shell_state *state, const char *source,
     if (ignore_helper_function_declaration(trimmed)) {
         arena_maybe_free(trimmed);
         return 0;
+    }
+
+    if (is_ast_compound_candidate(trimmed) &&
+        try_run_ast_compound_command(state, trimmed, allow_builtin, &status)) {
+        arena_maybe_free(trimmed);
+        return status;
     }
 
     if (parse_simple_if(trimmed, &if_cond, &if_then, &if_else, &if_redirs)) {
