@@ -97,8 +97,7 @@ static bool unwrap_brace_group(const char *source, char **inner_out,
 static bool split_case_redirection_suffix(const char *source, char **core_out,
                                           char **suffix_out);
 static bool is_async_separator_amp(const char *source, size_t pos);
-static bool ast_node_is_direct_exec_compatible(const struct ast_node *node);
-static bool ast_node_uses_operator_execution(const struct ast_node *node);
+static bool ast_node_is_ast_owned(const struct ast_node *node);
 static bool try_run_ast_compound_command(struct shell_state *state,
                                          const char *source,
                                          bool allow_builtin,
@@ -254,125 +253,8 @@ static void free_string_vec(char **vec, size_t len) {
     arena_maybe_free(vec);
 }
 
-static bool ast_node_is_direct_exec_compatible(const struct ast_node *node) {
-    size_t i;
-
-    if (node == NULL) {
-        return false;
-    }
-
-    switch (node->kind) {
-    case AST_NODE_EMPTY:
-    case AST_NODE_SIMPLE_COMMAND:
-        return true;
-    case AST_NODE_SEQUENCE:
-        for (i = 0; i < node->data.list.len; i++) {
-            if (!ast_node_is_direct_exec_compatible(node->data.list.items[i])) {
-                return false;
-            }
-        }
-        return true;
-    case AST_NODE_ASYNC:
-        return ast_node_is_direct_exec_compatible(node->data.unary.child);
-    case AST_NODE_AND_OR:
-        for (i = 0; i < node->data.andor.len; i++) {
-            if (!ast_node_is_direct_exec_compatible(node->data.andor.items[i])) {
-                return false;
-            }
-        }
-        return true;
-    case AST_NODE_PIPELINE:
-        for (i = 0; i < node->data.pipeline.len; i++) {
-            if (!ast_node_is_direct_exec_compatible(node->data.pipeline.items[i])) {
-                return false;
-            }
-        }
-        return true;
-    case AST_NODE_SUBSHELL:
-    case AST_NODE_BRACE_GROUP:
-        return node->data.group.body_node != NULL &&
-               ast_node_is_direct_exec_compatible(node->data.group.body_node);
-    case AST_NODE_IF:
-        return node->data.if_cmd.cond_node != NULL &&
-               node->data.if_cmd.then_node != NULL &&
-               ast_node_is_direct_exec_compatible(node->data.if_cmd.cond_node) &&
-               ast_node_is_direct_exec_compatible(node->data.if_cmd.then_node) &&
-               (node->data.if_cmd.else_node == NULL ||
-                ast_node_is_direct_exec_compatible(node->data.if_cmd.else_node));
-    case AST_NODE_WHILE:
-    case AST_NODE_UNTIL:
-        return node->data.loop.cond_node != NULL &&
-               node->data.loop.body_node != NULL &&
-               ast_node_is_direct_exec_compatible(node->data.loop.cond_node) &&
-               ast_node_is_direct_exec_compatible(node->data.loop.body_node);
-    case AST_NODE_FOR:
-        return node->data.for_cmd.body_node != NULL &&
-               ast_node_is_direct_exec_compatible(node->data.for_cmd.body_node);
-    case AST_NODE_FUNCTION_DEF:
-        return true;
-    case AST_NODE_CASE:
-        for (i = 0; i < node->data.case_cmd.clause_count; i++) {
-            if (node->data.case_cmd.clauses[i].body_node != NULL &&
-                !ast_node_is_direct_exec_compatible(
-                    node->data.case_cmd.clauses[i].body_node)) {
-                return false;
-            }
-        }
-        return true;
-    case AST_NODE_LEGACY:
-        return false;
-    }
-
-    return false;
-}
-
-static bool ast_node_uses_operator_execution(const struct ast_node *node) {
-    size_t i;
-
-    if (node == NULL) {
-        return false;
-    }
-
-    switch (node->kind) {
-    case AST_NODE_EMPTY:
-    case AST_NODE_SIMPLE_COMMAND:
-        return false;
-    case AST_NODE_SEQUENCE:
-        if (node->data.list.len > 1) {
-            return true;
-        }
-        for (i = 0; i < node->data.list.len; i++) {
-            if (ast_node_uses_operator_execution(node->data.list.items[i])) {
-                return true;
-            }
-        }
-        return false;
-    case AST_NODE_ASYNC:
-        return true;
-    case AST_NODE_AND_OR:
-        return node->data.andor.len > 1;
-    case AST_NODE_PIPELINE:
-        return node->data.pipeline.negate || node->data.pipeline.len > 1;
-    case AST_NODE_SUBSHELL:
-    case AST_NODE_BRACE_GROUP:
-        return node->data.group.body_node != NULL &&
-               ast_node_uses_operator_execution(node->data.group.body_node);
-    case AST_NODE_IF:
-        return true;
-    case AST_NODE_WHILE:
-    case AST_NODE_UNTIL:
-        return true;
-    case AST_NODE_FOR:
-        return true;
-    case AST_NODE_FUNCTION_DEF:
-        return true;
-    case AST_NODE_CASE:
-        return true;
-    case AST_NODE_LEGACY:
-        return false;
-    }
-
-    return false;
+static bool ast_node_is_ast_owned(const struct ast_node *node) {
+    return node != NULL && node->kind != AST_NODE_LEGACY;
 }
 
 static bool try_run_ast_compound_command(struct shell_state *state,
@@ -390,8 +272,7 @@ static bool try_run_ast_compound_command(struct shell_state *state,
         *status_out = 0;
         return true;
     }
-    if (!ast_node_is_direct_exec_compatible(program->root) ||
-        program->root->kind == AST_NODE_LEGACY) {
+    if (!ast_node_is_ast_owned(program->root)) {
         return false;
     }
 
@@ -5424,8 +5305,7 @@ int exec_run_program(struct shell_state *state, const struct ast_program *progra
         return 0;
     }
 
-    if (!ast_node_is_direct_exec_compatible(program->root) ||
-        !ast_node_uses_operator_execution(program->root)) {
+    if (!ast_node_is_ast_owned(program->root)) {
         return execute_program_text(state, program->source);
     }
 

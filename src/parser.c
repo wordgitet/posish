@@ -1906,7 +1906,8 @@ static struct ast_node *parse_sequence(struct parser_ctx *ctx, size_t start,
                     comment_end++;
                 }
                 i = comment_end == end ? comment_end : comment_end - 1;
-                if (comment_end < end) {
+                if (comment_end < end && paren_depth == 0 && brace_depth == 0 &&
+                    if_depth == 0 && case_depth == 0 && loop_depth == 0) {
                     delim = true;
                 }
             }

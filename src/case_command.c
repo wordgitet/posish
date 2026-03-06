@@ -596,11 +596,13 @@ static int execute_case_clause_body(struct shell_state *state,
                                     const struct ast_case_clause *clause,
                                     case_command_runner_fn source_runner,
                                     case_command_ast_runner_fn ast_runner) {
+  if (clause->body == NULL || clause->body[0] == '\0') {
+    return 0;
+  }
   if (clause->body_node != NULL && ast_runner != NULL) {
     return ast_runner(state, clause->body_node);
   }
-  if (clause->body != NULL && clause->body[0] != '\0' &&
-      source_runner != NULL) {
+  if (source_runner != NULL) {
     return source_runner(state, clause->body);
   }
   return 0;
