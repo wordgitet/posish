@@ -85,6 +85,7 @@ int main(int argc, char **argv) {
     refresh_signal_policy = false;
     command = NULL;
     parent_interactive = getenv("POSISH_PARENT_INTERACTIVE");
+    state.login_shell = argv[0] != NULL && argv[0][0] == '-';
     state.parent_was_interactive =
         parent_interactive != NULL && strcmp(parent_interactive, "1") == 0;
     while (i < argc) {
@@ -208,11 +209,6 @@ int main(int argc, char **argv) {
     }
     (void)setenv("0", special_0, 1);
 
-    state.interactive = run_interactive;
-    prompt_init_defaults(&state, argv[0]);
-    (void)refresh_signal_policy;
-    shell_refresh_signal_policy(&state);
-
     if (command != NULL) {
         (void)set_initial_positional_params(&state, argc, argv, i + 1);
     } else if (read_stdin_script) {
@@ -221,7 +217,18 @@ int main(int argc, char **argv) {
         (void)set_initial_positional_params(&state, argc, argv, i + 1);
     }
 
-    if (command != NULL) {
+    state.interactive = run_interactive;
+    shell_init_startup_env(&state, argv[0]);
+    (void)refresh_signal_policy;
+    shell_refresh_signal_policy(&state);
+    status = shell_run_startup_files(&state);
+    if (!state.should_exit) {
+        shell_refresh_signal_policy(&state);
+    }
+
+    if (state.should_exit) {
+        status = state.exit_status;
+    } else if (command != NULL) {
         status = shell_run_command(&state, command);
     } else if (read_stdin_script) {
         status = shell_run_stream(&state, stdin, run_interactive);

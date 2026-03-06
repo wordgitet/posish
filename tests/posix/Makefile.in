@@ -10,7 +10,7 @@ LDFLAGS = @LDFLAGS@
 LDLIBS = @LIBS@
 YASH_RUNNER = @YASH_RUNNER@
 
-SOURCES = checkfg.c ptwrap.c ptyfeed.c resetsig.c
+SOURCES = checkfg.c loginexec.c ptwrap.c ptyfeed.c resetsig.c
 TESTERS = $(SOURCES:.c=)
 
 POSIX_SIGNAL_TEST_SOURCES = sigcont1-p.tst sigcont2-p.tst sigcont3-p.tst sigcont4-p.tst sigcont5-p.tst sigcont6-p.tst sigcont7-p.tst sigcont8-p.tst sighup1-p.tst sighup2-p.tst sighup3-p.tst sighup4-p.tst sighup5-p.tst sighup6-p.tst sighup7-p.tst sighup8-p.tst sigint1-p.tst sigint2-p.tst sigint3-p.tst sigint4-p.tst sigint5-p.tst sigint6-p.tst sigint7-p.tst sigint8-p.tst sigquit1-p.tst sigquit2-p.tst sigquit3-p.tst sigquit4-p.tst sigquit5-p.tst sigquit6-p.tst sigquit7-p.tst sigquit8-p.tst sigstop3-p.tst sigstop7-p.tst sigterm1-p.tst sigterm2-p.tst sigterm3-p.tst sigterm4-p.tst sigterm5-p.tst sigterm6-p.tst sigterm7-p.tst sigterm8-p.tst sigtstp3-p.tst sigtstp4-p.tst sigtstp7-p.tst sigtstp8-p.tst sigttin3-p.tst sigttin4-p.tst sigttin7-p.tst sigttin8-p.tst sigttou3-p.tst sigttou4-p.tst sigttou7-p.tst sigttou8-p.tst sigurg1-p.tst sigurg2-p.tst sigurg3-p.tst sigurg4-p.tst sigurg5-p.tst sigurg6-p.tst sigurg7-p.tst sigurg8-p.tst
@@ -30,7 +30,7 @@ SMOKE_SUMMARY = summary-smoke.log
 STOP_TEST_SOURCES = sigstop3-p.tst sigstop7-p.tst sigtstp3-p.tst sigtstp4-p.tst sigtstp7-p.tst sigtstp8-p.tst sigttin3-p.tst sigttin4-p.tst sigttin7-p.tst sigttin8-p.tst sigttou3-p.tst sigttou4-p.tst sigttou7-p.tst sigttou8-p.tst
 SIGNAL_TEST_SOURCES = $(POSIX_SIGNAL_TEST_SOURCES)
 SIGNAL_SUMMARY = summary-signal.log
-REGRESSION_TEST_SOURCES = sigtstp4-p.tst sigttin4-p.tst sigttou4-p.tst command-p.tst jobspec-p.tst jobpipe-p.tst arithshift-p.tst pwd-p.tst trapcmdsub-p.tst prompt-posish.tst
+REGRESSION_TEST_SOURCES = sigtstp4-p.tst sigttin4-p.tst sigttou4-p.tst command-p.tst jobspec-p.tst jobpipe-p.tst arithshift-p.tst pwd-p.tst trapcmdsub-p.tst prompt-posish.tst startup-posish.tst
 FULLTRUTH_SUMMARY ?= summary-fulltruth.log
 FULLTRUTH_CLASSIFICATION_CSV ?= summary-fulltruth.csv
 TESTCASE_TIMEOUT ?= 0

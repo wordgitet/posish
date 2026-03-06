@@ -8,7 +8,9 @@
 
 #include "ast.h"
 #include "error.h"
+#include "expand.h"
 #include "exec.h"
+#include "lexer.h"
 #include "parser.h"
 #include "prompt.h"
 #include "signals.h"
@@ -39,6 +41,11 @@ static size_t skip_braced_param(const char *buf, size_t i, size_t len,
 static bool collect_heredoc_markers(const char *buf, size_t len,
                                     struct heredoc_marker **markers_out,
                                     size_t *count_out);
+static int run_startup_path(struct shell_state *state, const char *path,
+                            bool interactive);
+static int expand_startup_path(struct shell_state *state, const char *text,
+                               char **out);
+static char *home_startup_path(const char *leaf);
 
 static size_t skip_backtick_subst(const char *buf, size_t i, size_t len) {
     i++;
@@ -1488,6 +1495,7 @@ void shell_state_init(struct shell_state *state) {
     state->exit_status = 0;
     state->last_handled_signal = 0;
     state->interactive = false;
+    state->login_shell = false;
     state->explicit_non_interactive = false;
     state->parent_was_interactive = false;
     state->monitor_mode = false;
@@ -1549,6 +1557,7 @@ void shell_state_destroy(struct shell_state *state) {
     state->unexported_count = 0;
     state->positional_params = NULL;
     state->positional_count = 0;
+    state->login_shell = false;
     state->explicit_non_interactive = false;
     state->parent_was_interactive = false;
     state->errexit_ignored = false;
@@ -1616,6 +1625,183 @@ void shell_refresh_signal_policy(struct shell_state *state) {
         }
         signals_clear_pending(signo);
     }
+}
+
+void shell_init_startup_env(struct shell_state *state, const char *argv0) {
+    prompt_init_defaults(state, argv0);
+}
+
+static char *home_startup_path(const char *leaf) {
+    const char *home;
+    size_t home_len;
+    size_t leaf_len;
+    bool need_slash;
+    char *path;
+
+    home = getenv("HOME");
+    if (home == NULL || home[0] == '\0') {
+        return NULL;
+    }
+
+    home_len = strlen(home);
+    leaf_len = strlen(leaf);
+    need_slash = home[home_len - 1] != '/';
+    path = arena_alloc_in(NULL, home_len + (need_slash ? 1u : 0u) + leaf_len + 1u);
+    if (path == NULL) {
+        return NULL;
+    }
+
+    memcpy(path, home, home_len);
+    if (need_slash) {
+        path[home_len++] = '/';
+    }
+    memcpy(path + home_len, leaf, leaf_len);
+    path[home_len + leaf_len] = '\0';
+    return path;
+}
+
+static int expand_startup_path(struct shell_state *state, const char *text,
+                               char **out) {
+    struct token_vec lexed;
+    struct token_vec expanded;
+    struct arena *saved_arena;
+    struct arena_mark cmd_mark;
+    int rc;
+
+    *out = NULL;
+    if (text == NULL || text[0] == '\0') {
+        return 0;
+    }
+
+    saved_arena = arena_get_current();
+    arena_mark_take(&state->arena_cmd, &cmd_mark);
+    arena_set_current(&state->arena_cmd);
+
+    rc = lexer_split_words(text, &lexed);
+    if (rc != 0) {
+        state->last_status = 2;
+        goto done;
+    }
+
+    rc = expand_words(&lexed, &expanded, state, false);
+    lexer_free_tokens(&lexed);
+    if (rc != 0) {
+        state->last_status = 2;
+        goto done;
+    }
+
+    if (expanded.len == 0) {
+        lexer_free_tokens(&expanded);
+        rc = 0;
+        goto done;
+    }
+    if (expanded.len != 1) {
+        posish_errorf("ENV must expand to a single pathname");
+        lexer_free_tokens(&expanded);
+        state->last_status = 2;
+        rc = 2;
+        goto done;
+    }
+
+    *out = arena_xstrdup(expanded.items[0]);
+    lexer_free_tokens(&expanded);
+    rc = 0;
+
+done:
+    arena_mark_rewind(&state->arena_cmd, &cmd_mark);
+    arena_set_current(saved_arena);
+    return rc;
+}
+
+static int run_startup_path(struct shell_state *state, const char *path,
+                            bool interactive) {
+    if (path == NULL || path[0] == '\0') {
+        return 0;
+    }
+
+    if (access(path, F_OK) != 0) {
+        if (errno == ENOENT || errno == ENOTDIR) {
+            return 0;
+        }
+        perror(path);
+        state->last_status = 126;
+        return 126;
+    }
+
+    return shell_run_file_mode(state, path, interactive);
+}
+
+int shell_run_startup_files(struct shell_state *state) {
+    int status;
+    char *path;
+    const char *env_value;
+    const char *home;
+
+    status = 0;
+    home = getenv("HOME");
+
+    if (state->login_shell) {
+        path = home_startup_path(".posish_profile");
+        if (path == NULL) {
+            if (home == NULL || home[0] == '\0') {
+                goto maybe_env;
+            }
+            posish_errorf("failed to build ~/.posish_profile path");
+            state->last_status = 1;
+            return 1;
+        }
+        status = run_startup_path(state, path, state->interactive);
+        arena_maybe_free(path);
+        if (state->should_exit) {
+            return status;
+        }
+    }
+
+maybe_env:
+    if (state->interactive) {
+        env_value = getenv("ENV");
+        if (env_value != NULL && env_value[0] != '\0') {
+            path = NULL;
+            if (expand_startup_path(state, env_value, &path) != 0) {
+                if (state->last_status != 0) {
+                    status = state->last_status;
+                }
+            } else {
+                int env_status;
+
+                env_status = run_startup_path(state, path, true);
+                if (env_status != 0) {
+                    status = env_status;
+                }
+            }
+            arena_maybe_free(path);
+            if (state->should_exit) {
+                return status;
+            }
+        }
+
+        path = home_startup_path(".posishrc");
+        if (path == NULL) {
+            home = getenv("HOME");
+            if (home == NULL || home[0] == '\0') {
+                return status;
+            }
+            posish_errorf("failed to build ~/.posishrc path");
+            state->last_status = 1;
+            return 1;
+        }
+        {
+            int rc_status;
+
+            rc_status = run_startup_path(state, path, true);
+            if (rc_status != 0) {
+                status = rc_status;
+            }
+        }
+        arena_maybe_free(path);
+    }
+
+    return status;
 }
 
 void shell_run_pending_traps(struct shell_state *state) {
@@ -2066,10 +2252,12 @@ int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive) 
     return state->last_status;
 }
 
-int shell_run_file(struct shell_state *state, const char *path) {
+int shell_run_file_mode(struct shell_state *state, const char *path,
+                        bool interactive) {
     FILE *fp;
     int status;
     int open_errno;
+    bool saved_interactive;
 
     fp = fopen(path, "r");
     if (fp == NULL) {
@@ -2081,7 +2269,13 @@ int shell_run_file(struct shell_state *state, const char *path) {
         return 126;
     }
 
-    status = shell_run_stream(state, fp, false);
+    saved_interactive = state->interactive;
+    status = shell_run_stream(state, fp, interactive);
+    state->interactive = saved_interactive;
     fclose(fp);
     return status;
+}
+
+int shell_run_file(struct shell_state *state, const char *path) {
+    return shell_run_file_mode(state, path, false);
 }

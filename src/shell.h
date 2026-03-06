@@ -29,6 +29,7 @@ struct shell_state {
     int exit_status;
     int last_handled_signal;
     bool interactive;
+    bool login_shell;
     bool explicit_non_interactive;
     bool parent_was_interactive;
     bool monitor_mode;
@@ -78,10 +79,14 @@ struct shell_state {
 void shell_state_init(struct shell_state *state);
 void shell_state_destroy(struct shell_state *state);
 void shell_refresh_signal_policy(struct shell_state *state);
+void shell_init_startup_env(struct shell_state *state, const char *argv0);
+int shell_run_startup_files(struct shell_state *state);
 void shell_run_exit_trap(struct shell_state *state);
 void shell_run_pending_traps(struct shell_state *state);
 int shell_run_command(struct shell_state *state, const char *command);
 int shell_run_file(struct shell_state *state, const char *path);
+int shell_run_file_mode(struct shell_state *state, const char *path,
+                        bool interactive);
 int shell_run_stream(struct shell_state *state, FILE *stream, bool interactive);
 int shell_needs_more_input_text_mode(const char *buf, size_t len,
                                      bool include_heredoc);

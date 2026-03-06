@@ -120,6 +120,41 @@ If `make clean` fails because of those directories, prefer forcing a rebuild:
 make -B all CC=cc
 ```
 
+## Startup Behavior
+
+`posish` currently uses user-scoped startup files only.
+No system-wide startup files such as `/etc/profile` are loaded yet.
+
+Startup policy:
+
+- interactive shell:
+  - loads `ENV` if set
+  - then loads `~/.posishrc` if `HOME` is set
+- login shell:
+  - loads `~/.posish_profile` if `HOME` is set
+- interactive login shell:
+  - loads `~/.posish_profile`
+  - then `ENV`
+  - then `~/.posishrc`
+- non-interactive `-c` and script execution:
+  - load no startup files
+- non-interactive login shell:
+  - loads `~/.posish_profile` only
+
+Login shell detection follows the usual `argv[0][0] == '-'` convention.
+
+Prompt defaults remain interactive-only:
+
+- `PS1='\w \$ '` when unset
+- `PS2='> '` when unset
+
+Shell-owned variable baseline:
+
+- `IFS` is initialized to the default `<space><tab><newline>` baseline.
+- `OPTIND` starts at `1` and `OPTARG` starts unset.
+- `PATH`, `HOME`, `PWD`, `OLDPWD`, and `ENV` are preserved from the parent
+  environment unless normal shell execution updates them.
+
 ## Allocator Policy
 
 `posish` uses a real arena allocator for runtime ownership control:
