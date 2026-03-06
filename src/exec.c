@@ -73,6 +73,8 @@ static int run_if_ast(struct shell_state *state, const struct ast_node *node);
 static int run_loop_ast(struct shell_state *state, const struct ast_node *node,
                         bool is_until);
 static int run_for_ast(struct shell_state *state, const struct ast_node *node);
+static int run_function_def_ast(struct shell_state *state,
+                                const struct ast_node *node);
 static int run_case_ast(struct shell_state *state, const struct ast_node *node);
 static int execute_command_atom(struct shell_state *state, const char *source,
                                 bool allow_builtin);
@@ -292,6 +294,8 @@ static bool ast_node_is_direct_exec_compatible(const struct ast_node *node) {
     case AST_NODE_FOR:
         return node->data.for_cmd.body_node != NULL &&
                ast_node_is_direct_exec_compatible(node->data.for_cmd.body_node);
+    case AST_NODE_FUNCTION_DEF:
+        return true;
     case AST_NODE_CASE:
         for (i = 0; i < node->data.case_cmd.clause_count; i++) {
             if (node->data.case_cmd.clauses[i].body_node != NULL &&
@@ -345,6 +349,8 @@ static bool ast_node_uses_operator_execution(const struct ast_node *node) {
     case AST_NODE_UNTIL:
         return true;
     case AST_NODE_FOR:
+        return true;
+    case AST_NODE_FUNCTION_DEF:
         return true;
     case AST_NODE_CASE:
         return true;
@@ -3337,6 +3343,17 @@ done:
     return status;
 }
 
+static int run_function_def_ast(struct shell_state *state,
+                                const struct ast_node *node) {
+    if (node == NULL || node->data.funcdef.name == NULL ||
+        node->data.funcdef.body == NULL) {
+        return execute_command_atom(state, node != NULL ? node->source : "",
+                                    true);
+    }
+    return shell_set_function(state, node->data.funcdef.name,
+                              node->data.funcdef.body);
+}
+
 static int execute_case_ast_body_node(struct shell_state *state,
                                       const struct ast_node *node) {
     return execute_ast_node(state, node, true);
@@ -4307,6 +4324,8 @@ static int execute_ast_node(struct shell_state *state,
         return run_loop_ast(state, node, true);
     case AST_NODE_FOR:
         return run_for_ast(state, node);
+    case AST_NODE_FUNCTION_DEF:
+        return run_function_def_ast(state, node);
     case AST_NODE_CASE:
         return run_case_ast(state, node);
     case AST_NODE_LEGACY:

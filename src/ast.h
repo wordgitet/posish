@@ -32,6 +32,7 @@ enum ast_node_kind {
     AST_NODE_WHILE,
     AST_NODE_UNTIL,
     AST_NODE_FOR,
+    AST_NODE_FUNCTION_DEF,
     AST_NODE_CASE,
     AST_NODE_LEGACY
 };
@@ -117,6 +118,11 @@ struct ast_node {
             char *redir_suffix;
             bool implicit_words;
         } for_cmd;
+        struct {
+            char *name;
+            char *body;
+            struct ast_node *body_node;
+        } funcdef;
         struct {
             char *word_expr;
             struct ast_case_clause *clauses;

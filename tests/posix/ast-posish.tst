@@ -106,7 +106,8 @@ yes
 after
 __OUT__
 
-test_o 'case can run supported clause bodies through AST, including fallthrough'
+# Local extension check: ;& and ;;& are not portable across all sh variants.
+test_o 'extension: case fallthrough clauses can run through AST'
 case xyz in
     (xyz) echo one ;&
     (abc) echo two ;;&
@@ -118,7 +119,14 @@ two
 three
 __OUT__
 
-test_o 'function definition inside command substitution still falls back safely'
+test_o 'function definition can be registered through AST and then called'
+f() { echo direct; }
+f
+__IN__
+direct
+__OUT__
+
+test_o 'function definition inside command substitution stays safe'
 result=$(f() { echo ok; }; f)
 printf '%s\n' "$result"
 __IN__

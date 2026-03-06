@@ -35,7 +35,8 @@ static int parse_simple_parts(struct parser_ctx *ctx, const char *source,
                               struct ast_word_vec *raw_words,
                               struct redir_vec *redirs);
 static bool source_contains_heredoc_operator(const char *source);
-static bool looks_like_function_definition_text(const char *source);
+static bool parse_function_definition_text(const char *source, char **name_out,
+                                           char **body_out);
 static size_t line_at_offset(const struct parser_ctx *ctx, size_t offset);
 static struct ast_node *parse_embedded_program_root(struct parser_ctx *ctx,
                                                     const char *source,
@@ -45,6 +46,7 @@ static bool parse_case_structure(struct parser_ctx *ctx, const char *source,
                                  size_t source_offset, char **word_expr_out,
                                  struct ast_case_clause **clauses_out,
                                  size_t *clause_count_out, int *err_out);
+static char *dup_trimmed_slice(const char *src, size_t start, size_t end);
 
 static bool keyword_boundary(char ch) {
     return ch == '\0' || isspace((unsigned char)ch) || ch == ';' ||
@@ -283,13 +285,22 @@ static bool is_name_char(char ch) {
     return isalnum((unsigned char)ch) || ch == '_';
 }
 
-static bool looks_like_function_definition_text(const char *source) {
+static bool parse_function_definition_text(const char *source, char **name_out,
+                                           char **body_out) {
     size_t i;
+    size_t name_start;
+    size_t name_end;
+    size_t body_start;
+    size_t body_end;
+
+    *name_out = NULL;
+    *body_out = NULL;
 
     i = 0;
     while (isspace((unsigned char)source[i])) {
         i++;
     }
+    name_start = i;
     if (!is_name_start_char(source[i])) {
         return false;
     }
@@ -297,6 +308,7 @@ static bool looks_like_function_definition_text(const char *source) {
     while (is_name_char(source[i])) {
         i++;
     }
+    name_end = i;
 
     while (isspace((unsigned char)source[i])) {
         i++;
@@ -315,8 +327,23 @@ static bool looks_like_function_definition_text(const char *source) {
     while (isspace((unsigned char)source[i])) {
         i++;
     }
+    if (source[i] == '\0') {
+        return false;
+    }
 
-    return source[i] != '\0';
+    body_start = i;
+    body_end = strlen(source);
+    while (body_end > body_start &&
+           isspace((unsigned char)source[body_end - 1])) {
+        body_end--;
+    }
+    if (body_end <= body_start) {
+        return false;
+    }
+
+    *name_out = dup_trimmed_slice(source, name_start, name_end);
+    *body_out = dup_trimmed_slice(source, body_start, body_end);
+    return true;
 }
 
 static char *dup_slice(const char *src, size_t start, size_t end) {
@@ -1254,6 +1281,7 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
     bool is_until;
     char *name;
     char *words;
+    char *fn_body;
     bool implicit_words;
     char *core;
     size_t trim_start;
@@ -1287,6 +1315,7 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
     body = NULL;
     name = NULL;
     words = NULL;
+    fn_body = NULL;
     core = NULL;
     inner_rel_start = 0;
     inner_rel_end = 0;
@@ -1294,7 +1323,16 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
     implicit_words = false;
     is_until = false;
 
-    if (parse_simple_if(trimmed, &cond, &then_part, &else_part, &redir_suffix)) {
+    if (parse_function_definition_text(trimmed, &name, &fn_body)) {
+        node = ast_new_node(ctx, AST_NODE_FUNCTION_DEF, start, end);
+        node->data.funcdef.name = name;
+        node->data.funcdef.body = fn_body;
+        node->data.funcdef.body_node =
+            parse_embedded_program_root(ctx, fn_body, trim_start, err_out);
+        if (*err_out != 0) {
+            return NULL;
+        }
+    } else if (parse_simple_if(trimmed, &cond, &then_part, &else_part, &redir_suffix)) {
         node = ast_new_node(ctx, AST_NODE_IF, start, end);
         node->data.if_cmd.cond = cond;
         node->data.if_cmd.cond_node =
@@ -1402,8 +1440,7 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
         if (*err_out != 0) {
             return NULL;
         }
-    } else if (looks_like_function_definition_text(trimmed) ||
-               source_contains_heredoc_operator(trimmed)) {
+    } else if (source_contains_heredoc_operator(trimmed)) {
         node = ast_new_node(ctx, AST_NODE_LEGACY, start, end);
     } else {
         node = ast_new_node(ctx, AST_NODE_SIMPLE_COMMAND, start, end);
