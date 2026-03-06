@@ -35,6 +35,7 @@ REGRESSION_TEST_SOURCES = \
 	sigttin4-p.tst \
 	sigttou4-p.tst \
 	command-p.tst \
+	cmdsub-p.tst \
 	jobspec-p.tst \
 	jobpipe-p.tst \
 	arithshift-p.tst \
@@ -44,15 +45,18 @@ REGRESSION_TEST_SOURCES = \
 	async-p.tst \
 	break-p.tst \
 	continue-p.tst \
+	eval-p.tst \
 	pipeline-p.tst \
 	grouping-p.tst \
 	comment-p.tst \
 	if-p.tst \
 	for-p.tst \
+	input-p.tst \
 	until-p.tst \
 	while-p.tst \
 	case-p.tst \
 	function-p.tst \
+	redir-p.tst \
 	return-p.tst \
 	prompt-posish.tst \
 	startup-posish.tst \
