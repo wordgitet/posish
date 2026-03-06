@@ -60,6 +60,13 @@ static int execute_program_text_internal(struct shell_state *state,
                                          const char *source,
                                          bool apply_aliases);
 static int execute_andor(struct shell_state *state, const char *source);
+static int execute_ast_node(struct shell_state *state,
+                            const struct ast_node *node,
+                            bool allow_builtin);
+static int execute_ast_pipeline(struct shell_state *state,
+                                const struct ast_node *node);
+static int execute_command_atom(struct shell_state *state, const char *source,
+                                bool allow_builtin);
 static bool is_assignment_word(const char *word);
 static bool find_command_subst_end(const char *source, size_t start,
                                    size_t *out_end);
@@ -68,6 +75,9 @@ static bool find_dollar_single_quote_end(const char *source, size_t start,
 static bool command_text_needs_more_input(const char *source,
                                           bool include_heredoc);
 static bool looks_like_function_header_only(const char *source);
+static bool is_async_separator_amp(const char *source, size_t pos);
+static bool ast_node_is_direct_exec_compatible(const struct ast_node *node);
+static bool ast_node_uses_operator_execution(const struct ast_node *node);
 
 static void exit_shell_child_status(int status) {
     int signo;
@@ -217,6 +227,95 @@ static void free_string_vec(char **vec, size_t len) {
         arena_maybe_free(vec[i]);
     }
     arena_maybe_free(vec);
+}
+
+static bool ast_node_is_direct_exec_compatible(const struct ast_node *node) {
+    size_t i;
+
+    if (node == NULL) {
+        return false;
+    }
+
+    switch (node->kind) {
+    case AST_NODE_EMPTY:
+    case AST_NODE_SIMPLE_COMMAND:
+        return true;
+    case AST_NODE_SEQUENCE:
+        for (i = 0; i < node->data.list.len; i++) {
+            if (!ast_node_is_direct_exec_compatible(node->data.list.items[i])) {
+                return false;
+            }
+        }
+        return true;
+    case AST_NODE_ASYNC:
+        return ast_node_is_direct_exec_compatible(node->data.unary.child);
+    case AST_NODE_AND_OR:
+        for (i = 0; i < node->data.andor.len; i++) {
+            if (!ast_node_is_direct_exec_compatible(node->data.andor.items[i])) {
+                return false;
+            }
+        }
+        return true;
+    case AST_NODE_PIPELINE:
+        for (i = 0; i < node->data.pipeline.len; i++) {
+            if (!ast_node_is_direct_exec_compatible(node->data.pipeline.items[i])) {
+                return false;
+            }
+        }
+        return true;
+    case AST_NODE_SUBSHELL:
+    case AST_NODE_BRACE_GROUP:
+    case AST_NODE_IF:
+    case AST_NODE_WHILE:
+    case AST_NODE_UNTIL:
+    case AST_NODE_FOR:
+    case AST_NODE_CASE:
+    case AST_NODE_LEGACY:
+        return false;
+    }
+
+    return false;
+}
+
+static bool ast_node_uses_operator_execution(const struct ast_node *node) {
+    size_t i;
+
+    if (node == NULL) {
+        return false;
+    }
+
+    switch (node->kind) {
+    case AST_NODE_EMPTY:
+    case AST_NODE_SIMPLE_COMMAND:
+        return false;
+    case AST_NODE_SEQUENCE:
+        if (node->data.list.len > 1) {
+            return true;
+        }
+        for (i = 0; i < node->data.list.len; i++) {
+            if (ast_node_uses_operator_execution(node->data.list.items[i])) {
+                return true;
+            }
+        }
+        return false;
+    case AST_NODE_ASYNC:
+        return true;
+    case AST_NODE_AND_OR:
+        return node->data.andor.len > 1;
+    case AST_NODE_PIPELINE:
+        return node->data.pipeline.negate || node->data.pipeline.len > 1;
+    case AST_NODE_SUBSHELL:
+    case AST_NODE_BRACE_GROUP:
+    case AST_NODE_IF:
+    case AST_NODE_WHILE:
+    case AST_NODE_UNTIL:
+    case AST_NODE_FOR:
+    case AST_NODE_CASE:
+    case AST_NODE_LEGACY:
+        return false;
+    }
+
+    return false;
 }
 
 static void word_vec_free(struct word_vec *words) {
@@ -1948,9 +2047,10 @@ static int parse_redirections_from_source(const char *source, struct shell_state
     return 0;
 }
 
-static int execute_simple_command(struct shell_state *state, const char *source,
-                                  bool allow_builtin) {
-    struct token_vec lexed;
+static int execute_simple_command_parts(struct shell_state *state,
+                                        const struct ast_word_vec *ast_raw_words,
+                                        const struct redir_vec *ast_redirs,
+                                        bool allow_builtin) {
     struct word_vec raw_words;
     struct token_vec expanded;
     struct token_vec assign_expanded;
@@ -1978,10 +2078,8 @@ static int execute_simple_command(struct shell_state *state, const char *source,
     bool redirs_only_command;
     struct token_vec in_vec;
 
-    lexed.items = NULL;
-    lexed.len = 0;
-    raw_words.items = NULL;
-    raw_words.len = 0;
+    raw_words.items = ast_raw_words->items;
+    raw_words.len = ast_raw_words->len;
     expanded.items = NULL;
     expanded.len = 0;
     assign_expanded.items = NULL;
@@ -1990,8 +2088,8 @@ static int execute_simple_command(struct shell_state *state, const char *source,
     cmd_expanded.len = 0;
     words.items = NULL;
     words.len = 0;
-    redirs.items = NULL;
-    redirs.len = 0;
+    redirs.items = ast_redirs->items;
+    redirs.len = ast_redirs->len;
     argv = NULL;
     status = 0;
     handled = false;
@@ -2003,20 +2101,6 @@ static int execute_simple_command(struct shell_state *state, const char *source,
     redirs_only_command = false;
     assignment_special = false;
 
-    if (has_unsupported_syntax(source)) {
-        posish_error_idf(POSERR_COMPLEX_SYNTAX_UNIMPLEMENTED);
-        return 2;
-    }
-
-    if (lexer_split_words_at(state->current_source_name, source,
-                             state->current_source_base_line, &lexed) != 0) {
-        return 2;
-    }
-
-    if (collect_words_and_redirs(&lexed, &raw_words, &redirs) != 0) {
-        status = 2;
-        goto done;
-    }
     redirs_only_command = raw_words.len == 0;
 
     assign_count = 0;
@@ -2062,7 +2146,6 @@ static int execute_simple_command(struct shell_state *state, const char *source,
             }
 
             if (expand_words(&one_in, &one_out, state, split_fields) != 0) {
-                lexer_free_tokens(&cmd_expanded);
                 status = 2;
                 goto done;
             }
@@ -2167,7 +2250,6 @@ static int execute_simple_command(struct shell_state *state, const char *source,
     }
 
     word_vec_free(&raw_words);
-    lexer_free_tokens(&lexed);
 
     if (words.len == 0) {
         if (redirs_only_command) {
@@ -2444,7 +2526,42 @@ done:
     lexer_free_tokens(&expanded);
     lexer_free_tokens(&assign_expanded);
     lexer_free_tokens(&cmd_expanded);
+    return status;
+}
+
+static int execute_simple_command(struct shell_state *state, const char *source,
+                                  bool allow_builtin) {
+    struct token_vec lexed;
+    struct ast_word_vec raw_words;
+    struct redir_vec redirs;
+    int status;
+
+    lexed.items = NULL;
+    lexed.len = 0;
+    raw_words.items = NULL;
+    raw_words.len = 0;
+    redirs.items = NULL;
+    redirs.len = 0;
+
+    if (has_unsupported_syntax(source)) {
+        posish_error_idf(POSERR_COMPLEX_SYNTAX_UNIMPLEMENTED);
+        return 2;
+    }
+
+    if (lexer_split_words_at(state->current_source_name, source,
+                             state->current_source_base_line, &lexed) != 0) {
+        return 2;
+    }
+
+    if (collect_words_and_redirs(&lexed, (struct word_vec *)&raw_words,
+                                 &redirs) != 0) {
+        lexer_free_tokens(&lexed);
+        return 2;
+    }
     lexer_free_tokens(&lexed);
+
+    status = execute_simple_command_parts(state, &raw_words, &redirs,
+                                          allow_builtin);
     return status;
 }
 
@@ -3343,6 +3460,383 @@ static void exec_child_command(struct shell_state *parent_state, const char *sou
     }
     fflush(NULL);
     _exit(status);
+}
+
+static void exec_child_ast_node(struct shell_state *parent_state,
+                                const struct ast_node *node) {
+    struct shell_state local_state;
+    struct arena_mark child_mark;
+    int status;
+
+    local_state = *parent_state;
+    arena_init(&local_state.arena_perm, parent_state->arena_perm.default_block_size);
+    arena_init(&local_state.arena_script,
+               parent_state->arena_script.default_block_size);
+    arena_init(&local_state.arena_cmd, parent_state->arena_cmd.default_block_size);
+    arena_set_current(&local_state.arena_cmd);
+    arena_mark_take(&local_state.arena_cmd, &child_mark);
+    local_state.should_exit = false;
+    local_state.exit_status = 0;
+    local_state.running_signal_trap = false;
+    local_state.running_exit_trap = false;
+    local_state.main_context = false;
+
+    status = execute_ast_node(&local_state, node, true);
+    arena_mark_rewind(&local_state.arena_cmd, &child_mark);
+    if (local_state.should_exit) {
+        status = local_state.exit_status;
+    }
+    fflush(NULL);
+    _exit(status);
+}
+
+static int run_async_ast_node(struct shell_state *state,
+                              const struct ast_node *node) {
+    pid_t pid;
+
+    trace_log(POSISH_TRACE_SIGNALS, "spawn async ast source=%s", node->source);
+    pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        return 1;
+    }
+
+    if (pid == 0) {
+        struct shell_state local_state;
+        int st;
+        int nullfd;
+
+        if (state->monitor_mode) {
+            (void)setpgid(0, 0);
+        }
+
+        local_state = *state;
+        arena_init(&local_state.arena_perm, state->arena_perm.default_block_size);
+        arena_init(&local_state.arena_script, state->arena_script.default_block_size);
+        arena_init(&local_state.arena_cmd, state->arena_cmd.default_block_size);
+        arena_set_current(&local_state.arena_perm);
+        local_state.should_exit = false;
+        local_state.exit_status = 0;
+        local_state.running_signal_trap = false;
+        local_state.running_exit_trap = false;
+        local_state.in_async_context = true;
+        local_state.main_context = false;
+        signals_reset_traps_for_child(&local_state);
+        signals_reset_exit_trap_for_child(&local_state);
+#ifdef SIGINT
+        if (!state->monitor_mode) {
+            (void)signals_set_ignored(SIGINT);
+            local_state.signal_cleared[SIGINT] = false;
+        }
+#endif
+#ifdef SIGQUIT
+        if (!state->monitor_mode) {
+            (void)signals_set_ignored(SIGQUIT);
+            local_state.signal_cleared[SIGQUIT] = false;
+        }
+#endif
+        if (!state->monitor_mode) {
+            nullfd = open("/dev/null", O_RDONLY);
+            if (nullfd >= 0) {
+                if (dup2(nullfd, STDIN_FILENO) < 0) {
+                    perror("dup2");
+                    _exit(1);
+                }
+                if (nullfd != STDIN_FILENO) {
+                    close(nullfd);
+                }
+            }
+        }
+
+        st = execute_ast_node(&local_state, node, true);
+        shell_run_pending_traps(&local_state);
+        shell_run_exit_trap(&local_state);
+        if (local_state.should_exit) {
+            st = local_state.exit_status;
+        }
+        fflush(NULL);
+        exit_shell_child_status(st);
+    }
+
+    if (state->monitor_mode) {
+        (void)setpgid(pid, pid);
+    }
+
+    state->last_async_pid = pid;
+    jobs_track_async(pid, pid, node->source);
+    trace_log(POSISH_TRACE_SIGNALS, "async ast pid=%ld", (long)pid);
+    return 0;
+}
+
+static int execute_ast_pipeline(struct shell_state *state,
+                                const struct ast_node *node) {
+    pid_t *pids;
+    pid_t pipeline_pgid;
+    bool isolate_pipeline_pgid;
+    bool pipefail_snapshot;
+    int *command_statuses;
+    int *wait_statuses;
+    bool *have_wait_statuses;
+    int last_status;
+    int in_fd;
+    size_t i;
+
+    if (node->data.pipeline.len == 0) {
+        return 0;
+    }
+    if (node->data.pipeline.len == 1) {
+        int status;
+        bool ignored;
+
+        status = execute_ast_node(state, node->data.pipeline.items[0], true);
+        ignored = state->errexit_ignored;
+        state->errexit_ignored = status != 0 && ignored;
+        state->last_status = status;
+        if (node->data.pipeline.negate) {
+            state->errexit_ignored = true;
+            state->last_status = status == 0 ? 1 : 0;
+            return state->last_status;
+        }
+        return status;
+    }
+
+    pids = arena_xmalloc(sizeof(*pids) * node->data.pipeline.len);
+    command_statuses =
+        arena_xmalloc(sizeof(*command_statuses) * node->data.pipeline.len);
+    wait_statuses = arena_xmalloc(sizeof(*wait_statuses) * node->data.pipeline.len);
+    have_wait_statuses =
+        arena_xmalloc(sizeof(*have_wait_statuses) * node->data.pipeline.len);
+    memset(wait_statuses, 0, sizeof(*wait_statuses) * node->data.pipeline.len);
+    memset(have_wait_statuses, 0,
+           sizeof(*have_wait_statuses) * node->data.pipeline.len);
+    pipeline_pgid = -1;
+    isolate_pipeline_pgid = state->monitor_mode && state->main_context;
+    pipefail_snapshot = state->pipefail;
+    in_fd = -1;
+
+    for (i = 0; i < node->data.pipeline.len; i++) {
+        int pipefd[2];
+        pid_t pid;
+
+        pipefd[0] = -1;
+        pipefd[1] = -1;
+
+        if (i + 1 < node->data.pipeline.len) {
+            if (pipe(pipefd) != 0) {
+                perror("pipe");
+                return 1;
+            }
+        }
+
+        pid = fork();
+        if (pid < 0) {
+            perror("fork");
+            if (pipefd[0] >= 0) {
+                close(pipefd[0]);
+                close(pipefd[1]);
+            }
+            return 1;
+        }
+
+        if (pid == 0) {
+            if (isolate_pipeline_pgid) {
+                pid_t target_pgid;
+
+                target_pgid = (i == 0) ? 0 : pipeline_pgid;
+                if (setpgid(0, target_pgid) != 0 && errno != EACCES &&
+                    errno != ESRCH && errno != EPERM && errno != EINVAL) {
+                    _exit(1);
+                }
+            }
+
+            if (in_fd >= 0) {
+                if (dup2(in_fd, STDIN_FILENO) < 0) {
+                    perror("dup2");
+                    _exit(1);
+                }
+            }
+            if (pipefd[1] >= 0) {
+                if (dup2(pipefd[1], STDOUT_FILENO) < 0) {
+                    perror("dup2");
+                    _exit(1);
+                }
+            }
+
+            if (in_fd >= 0) {
+                close(in_fd);
+            }
+            if (pipefd[0] >= 0) {
+                close(pipefd[0]);
+            }
+            if (pipefd[1] >= 0) {
+                close(pipefd[1]);
+            }
+
+            exec_child_ast_node(state, node->data.pipeline.items[i]);
+        }
+
+        pids[i] = pid;
+        if (isolate_pipeline_pgid) {
+            if (pipeline_pgid <= 0) {
+                pipeline_pgid = pid;
+            }
+            if (setpgid(pid, pipeline_pgid) != 0 && errno != EACCES &&
+                errno != ESRCH && errno != EPERM && errno != EINVAL) {
+                /* keep running */
+            }
+        }
+
+        if (in_fd >= 0) {
+            close(in_fd);
+        }
+        if (pipefd[1] >= 0) {
+            close(pipefd[1]);
+        }
+        in_fd = pipefd[0];
+    }
+
+    if (in_fd >= 0) {
+        close(in_fd);
+    }
+
+    last_status = 0;
+    for (i = 0; i < node->data.pipeline.len; i++) {
+        int wstatus;
+        pid_t w;
+        int command_status;
+
+        for (;;) {
+            w = waitpid(pids[i], &wstatus, WUNTRACED);
+            if (w < 0 && errno == EINTR) {
+                shell_run_pending_traps(state);
+                continue;
+            }
+            break;
+        }
+
+        if (w < 0) {
+            perror("waitpid");
+            command_statuses[i] = 1;
+            continue;
+        }
+
+        wait_statuses[i] = wstatus;
+        have_wait_statuses[i] = true;
+
+        if (WIFEXITED(wstatus)) {
+            command_status = WEXITSTATUS(wstatus);
+        } else if (WIFSTOPPED(wstatus)) {
+            pid_t job_pgid;
+            pid_t status_pid;
+            size_t j;
+
+            job_pgid = isolate_pipeline_pgid && pipeline_pgid > 0 ? pipeline_pgid
+                                                                  : pids[i];
+            status_pid = pids[node->data.pipeline.len - 1];
+            jobs_track_job(job_pgid, pids, node->data.pipeline.len, status_pid,
+                           node->source, true);
+            for (j = 0; j < node->data.pipeline.len; j++) {
+                if (have_wait_statuses[j]) {
+                    jobs_note_process_status(pids[j], wait_statuses[j]);
+                }
+            }
+            command_status = shell_status_from_wait_status(wstatus);
+        } else if (WIFSIGNALED(wstatus)) {
+            command_status = shell_status_from_wait_status(wstatus);
+        } else {
+            command_status = 1;
+        }
+        command_statuses[i] = command_status;
+    }
+
+    if (pipefail_snapshot) {
+        int last_non_zero;
+
+        last_non_zero = 0;
+        for (i = 0; i < node->data.pipeline.len; i++) {
+            if (command_statuses[i] != 0) {
+                last_non_zero = command_statuses[i];
+            }
+        }
+        last_status = last_non_zero;
+    } else {
+        last_status = command_statuses[node->data.pipeline.len - 1];
+    }
+
+    if (node->data.pipeline.negate) {
+        state->errexit_ignored = true;
+        state->last_status = last_status == 0 ? 1 : 0;
+        return state->last_status;
+    }
+    state->errexit_ignored = false;
+    state->last_status = last_status;
+    return last_status;
+}
+
+static int execute_ast_node(struct shell_state *state,
+                            const struct ast_node *node,
+                            bool allow_builtin) {
+    size_t i;
+    int status;
+
+    if (node == NULL) {
+        return 0;
+    }
+
+    switch (node->kind) {
+    case AST_NODE_EMPTY:
+        return 0;
+    case AST_NODE_SEQUENCE:
+        status = 0;
+        for (i = 0; i < node->data.list.len; i++) {
+            status = execute_ast_node(state, node->data.list.items[i], true);
+            state->last_status = status;
+            shell_run_pending_traps(state);
+            if (state->should_exit || has_pending_flow_control(state)) {
+                break;
+            }
+        }
+        return status;
+    case AST_NODE_ASYNC:
+        return run_async_ast_node(state, node->data.unary.child);
+    case AST_NODE_AND_OR:
+        status = execute_ast_node(state, node->data.andor.items[0], true);
+        for (i = 0; i + 1 < node->data.andor.len; i++) {
+            if (node->data.andor.ops[i] == AST_ANDOR_AND) {
+                if (status == 0) {
+                    status = execute_ast_node(state, node->data.andor.items[i + 1],
+                                              true);
+                } else {
+                    state->errexit_ignored = true;
+                }
+            } else if (status != 0) {
+                status = execute_ast_node(state, node->data.andor.items[i + 1],
+                                          true);
+            }
+            if (state->should_exit || has_pending_flow_control(state)) {
+                break;
+            }
+        }
+        return status;
+    case AST_NODE_PIPELINE:
+        return execute_ast_pipeline(state, node);
+    case AST_NODE_SIMPLE_COMMAND:
+        return execute_simple_command_parts(state, &node->data.simple.raw_words,
+                                            &node->data.simple.redirs,
+                                            allow_builtin);
+    case AST_NODE_SUBSHELL:
+    case AST_NODE_BRACE_GROUP:
+    case AST_NODE_IF:
+    case AST_NODE_WHILE:
+    case AST_NODE_UNTIL:
+    case AST_NODE_FOR:
+    case AST_NODE_CASE:
+        return execute_command_atom(state, node->source, allow_builtin);
+    case AST_NODE_LEGACY:
+        return execute_program_text(state, node->source);
+    }
+
+    return 1;
 }
 
 static int execute_pipeline(struct shell_state *state, const char *source) {
@@ -4464,22 +4958,14 @@ static int execute_program_text_internal(struct shell_state *state,
 }
 
 int exec_run_program(struct shell_state *state, const struct ast_program *program) {
-    char *normalized;
-    char *cleaned;
-    int status;
-
-    if (program_contains_quoted_heredoc(program->source)) {
-        /*
-         * Preserve physical lines for quoted here-doc bodies so backslashes and
-         * continuations stay literal inside the body text.
-         */
-        normalized = arena_xstrdup(program->source);
-    } else {
-        normalized = collapse_line_continuations(program->source);
+    if (program == NULL || program->root == NULL) {
+        return 0;
     }
-    cleaned = strip_comments(normalized);
-    arena_maybe_free(normalized);
-    status = execute_program_text(state, cleaned);
-    arena_maybe_free(cleaned);
-    return status;
+
+    if (!ast_node_is_direct_exec_compatible(program->root) ||
+        !ast_node_uses_operator_execution(program->root)) {
+        return execute_program_text(state, program->source);
+    }
+
+    return execute_ast_node(state, program->root, true);
 }

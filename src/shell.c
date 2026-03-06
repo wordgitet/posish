@@ -2033,7 +2033,9 @@ int shell_run_command(struct shell_state *state, const char *command) {
         arena_set_current(active_arena);
     }
 
-    if (parse_program(command_text, &program) != 0) {
+    if (parse_program_at(state->current_source_name,
+                         state->current_source_base_line,
+                         command_text, &program) != 0) {
         if (!top_level_command) {
             arena_mark_rewind(active_arena, &nested_mark);
         }

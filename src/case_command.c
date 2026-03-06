@@ -34,6 +34,21 @@ static char *dup_trimmed_slice(const char *src, size_t start, size_t end) {
   return out;
 }
 
+static size_t skip_case_clause_leading_space_and_comments(const char *source,
+                                                          size_t pos) {
+  while (1) {
+    while (isspace((unsigned char)source[pos])) {
+      pos++;
+    }
+    if (source[pos] != '#') {
+      return pos;
+    }
+    while (source[pos] != '\0' && source[pos] != '\n') {
+      pos++;
+    }
+  }
+}
+
 static bool is_fully_quoted_pattern(const char *raw) {
   size_t len;
   size_t i;
@@ -710,10 +725,7 @@ bool try_execute_case_command(struct shell_state *state, const char *source,
     }
     i = pat_end + 1;
 
-    while (isspace((unsigned char)source[i])) {
-      i++;
-    }
-
+    i = skip_case_clause_leading_space_and_comments(source, i);
     cmd_start = i;
     quote = '\0';
     clause_ended_with_esac = false;
