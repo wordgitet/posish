@@ -966,7 +966,8 @@ static bool keyword_preceded_by_list_separator(const char *source, size_t pos) {
            ch == ')' || ch == '{' || ch == '}';
 }
 
-static bool newline_continues_command(const char *source, size_t pos) {
+static bool newline_continues_command(const char *source, size_t len,
+                                      size_t pos) {
     size_t i;
 
     if (source[pos] != '\n') {
@@ -974,8 +975,19 @@ static bool newline_continues_command(const char *source, size_t pos) {
     }
 
     i = pos;
-    while (i > 0 && (source[i - 1] == ' ' || source[i - 1] == '\t')) {
-        i--;
+    while (i > 0) {
+        char ch;
+
+        if (shell_position_in_comment(source, len, i - 1)) {
+            i--;
+            continue;
+        }
+        ch = source[i - 1];
+        if (ch == ' ' || ch == '\t' || ch == '\n') {
+            i--;
+            continue;
+        }
+        break;
     }
     if (i == 0) {
         return false;
@@ -1287,36 +1299,44 @@ static bool parse_function_definition(const char *source, char **name_out, char 
 
 static bool looks_like_function_header_only(const char *source) {
     size_t i;
+    char *cleaned;
+    bool result;
 
+    cleaned = strip_comments(source);
     i = 0;
-    while (isspace((unsigned char)source[i])) {
+    while (isspace((unsigned char)cleaned[i])) {
         i++;
     }
-    if (!is_name_start_char(source[i])) {
+    if (!is_name_start_char(cleaned[i])) {
+        arena_maybe_free(cleaned);
         return false;
     }
     i++;
-    while (is_name_char(source[i])) {
+    while (is_name_char(cleaned[i])) {
         i++;
     }
-    while (isspace((unsigned char)source[i])) {
+    while (isspace((unsigned char)cleaned[i])) {
         i++;
     }
-    if (source[i] != '(') {
+    if (cleaned[i] != '(') {
+        arena_maybe_free(cleaned);
         return false;
     }
     i++;
-    while (isspace((unsigned char)source[i])) {
+    while (isspace((unsigned char)cleaned[i])) {
         i++;
     }
-    if (source[i] != ')') {
+    if (cleaned[i] != ')') {
+        arena_maybe_free(cleaned);
         return false;
     }
     i++;
-    while (isspace((unsigned char)source[i])) {
+    while (isspace((unsigned char)cleaned[i])) {
         i++;
     }
-    return source[i] == '\0';
+    result = cleaned[i] == '\0';
+    arena_maybe_free(cleaned);
+    return result;
 }
 
 static bool has_pending_flow_control(const struct shell_state *state) {
@@ -4563,6 +4583,7 @@ static int execute_program_text_internal(struct shell_state *state,
     char *pending_function_head;
     char *pending_raw;
     size_t pending_start;
+    size_t source_len;
     struct arena *saved_arena;
     struct arena_mark program_mark;
     bool have_program_mark;
@@ -4579,6 +4600,7 @@ static int execute_program_text_internal(struct shell_state *state,
     pending_function_head = NULL;
     pending_raw = NULL;
     pending_start = 0;
+    source_len = strlen(source);
     saved_arena = arena_get_current();
     have_program_mark = saved_arena != NULL;
     if (have_program_mark) {
@@ -4594,6 +4616,20 @@ static int execute_program_text_internal(struct shell_state *state,
 
         if (ch == '\0') {
             delim = true;
+        } else if (shell_position_in_comment(source, source_len, i)) {
+            if (ch == '#') {
+                size_t comment_end;
+
+                comment_end = i;
+                while (source[comment_end] != '\0' &&
+                       source[comment_end] != '\n') {
+                    comment_end++;
+                }
+                if (comment_end > i) {
+                    i = comment_end - 1;
+                }
+            }
+            continue;
         } else if (quote == '\0') {
             if (ch == '\\' && source[i + 1] != '\0') {
                 i++;
@@ -4684,7 +4720,7 @@ static int execute_program_text_internal(struct shell_state *state,
                        if_depth == 0 && case_depth == 0 && loop_depth == 0 &&
                        ((ch == ';' && !pending_heredoc) ||
                         (ch == '\n' &&
-                         (!newline_continues_command(source, i) ||
+                         (!newline_continues_command(source, source_len, i) ||
                           pending_heredoc)) ||
                         /*
                          * Treat only a control-operator '&' as async
@@ -4903,7 +4939,10 @@ static int execute_program_text_internal(struct shell_state *state,
                                                                    false);
                             arena_maybe_free(alias_cleaned);
                         } else {
-                            status = execute_andor(state, part);
+                            if (!try_run_ast_compound_command(state, part, true,
+                                                              &status)) {
+                                status = execute_andor(state, part);
+                            }
                         }
                         state->last_status = status;
                         if (status != 0 && state->errexit && !state->interactive &&
@@ -4953,6 +4992,16 @@ static int execute_program_text_internal(struct shell_state *state,
 int exec_run_program(struct shell_state *state, const struct ast_program *program) {
     if (program == NULL || program->root == NULL) {
         return 0;
+    }
+
+    /*
+     * Shell input remains line-oriented for alias and continuation semantics.
+     * Keep whole-program AST execution for single-line snippets, but route
+     * multi-line source through the existing incremental executor so later
+     * lines can observe state changes from earlier ones.
+     */
+    if (strchr(program->source, '\n') != NULL) {
+        return execute_program_text(state, program->source);
     }
 
     if (!ast_node_is_ast_owned(program->root)) {
