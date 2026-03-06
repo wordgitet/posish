@@ -1,0 +1,472 @@
+.TH POSISH 1 "March 2026" "posish 0.1.3+" "User Commands"
+.SH NAME
+posish \- POSIX-first shell with documented extensions
+.SH SYNOPSIS
+.B posish
+[\-abCefhimnuvx] [+\-abCefhimnuvx] [\-o
+.IR option ]
+... [+
+.B o
+.IR option ]
+... [\-s]
+[\-c
+.IR command
+[
+.IR command_name
+[
+.IR argument
+...
+]]]
+[
+.IR command_file
+[
+.IR argument
+...
+]]
+.br
+.B posish
+.B \-\-version
+.SH DESCRIPTION
+.B posish
+is a C11 shell implementation that aims for POSIX behavior first and keeps its
+extensions documented.  It supports interactive use, script execution,
+job control, startup files, and a small prompt-expansion language.
+.PP
+This manual describes current behavior.  It does not promise compatibility
+beyond what is explicitly documented here.
+.SH INVOCATION
+If
+.B \-\-version
+is given as the first argument,
+.B posish
+prints its version and exits.
+.PP
+If
+.B \-c
+is used, the next operand is taken as the command string.  If another operand
+follows, it becomes
+.BR $0 ;
+later operands become the positional parameters.
+.PP
+If a command file operand is present,
+.B posish
+executes that file in non-interactive mode.
+.PP
+With no
+.B \-c
+and no command file,
+.B posish
+reads commands from standard input.  It enters interactive mode by default only
+when standard input is a terminal, unless interactivity is forced with
+.BR \-i .
+.PP
+A shell whose
+.B argv[0]
+starts with
+.B \-
+is treated as a login shell.
+.SH OPTIONS
+.TP
+.B \-\-version
+Print the shell version and exit.
+.TP
+.BI \-c " command"
+Execute
+.I command
+instead of reading commands from a file or standard input.
+.TP
+.B \-i
+Force interactive mode.
+.TP
+.B \-s
+Read commands from standard input.
+.TP
+.BI \-o " option"
+.TP
+.BI +o " option"
+Enable or disable a named shell option.
+.TP
+.BR \-a ", " +a
+Enable or disable
+.BR allexport .
+.TP
+.BR \-b ", " +b
+Enable or disable
+.BR notify .
+.TP
+.BR \-C ", " +C
+Enable or disable
+.BR noclobber .
+.TP
+.BR \-e ", " +e
+Enable or disable
+.BR errexit .
+.TP
+.BR \-f ", " +f
+Enable or disable
+.BR noglob .
+.TP
+.BR \-h ", " +h
+Enable or disable
+.BR hashondef .
+.TP
+.BR \-i ", " +i
+Enable or disable
+.BR interactive .
+.TP
+.BR \-m ", " +m
+Enable or disable
+.BR monitor .
+.TP
+.BR \-n ", " +n
+Enable or disable
+.BR noexec .
+.TP
+.BR \-u ", " +u
+Enable or disable
+.BR nounset .
+.TP
+.BR \-v ", " +v
+Enable or disable
+.BR verbose .
+.TP
+.BR \-x ", " +x
+Enable or disable
+.BR xtrace .
+.PP
+Named options currently include:
+.BR allexport ,
+.BR notify ,
+.BR noclobber ,
+.BR errexit ,
+.BR noglob ,
+.BR hashondef ,
+.BR interactive ,
+.BR monitor ,
+.BR noexec ,
+.BR nounset ,
+.BR verbose ,
+.BR xtrace ,
+.BR pipefail ,
+and
+.BR ignoreeof .
+.SH STARTUP FILES
+.B posish
+currently loads only user-scoped startup files.
+No system-wide startup files such as
+.I /etc/profile
+are used.
+.PP
+Startup order is:
+.TP
+interactive shell
+.B ENV
+(if set), then
+.IR ~/.posishrc
+(if
+.B HOME
+is set)
+.TP
+login shell
+.IR ~/.posish_profile
+(if
+.B HOME
+is set)
+.TP
+interactive login shell
+.IR ~/.posish_profile ,
+then
+.BR ENV ,
+then
+.IR ~/.posishrc
+.TP
+non-interactive
+.B \-c
+or command file execution
+No startup files are loaded.
+.TP
+non-interactive login shell
+.IR ~/.posish_profile
+only
+.PP
+If
+.B HOME
+is unset or empty,
+.I ~/.posish_profile
+and
+.I ~/.posishrc
+are skipped.
+.PP
+Missing startup files are silent.  Existing but unreadable startup files produce
+a diagnostic.
+.SH PROMPTS
+In interactive shells,
+.B posish
+initializes prompt variables only when they are unset:
+.TP
+.B PS1
+defaults to
+.BR "\ew \e$ " .
+.TP
+.B PS2
+defaults to
+.BR "> " .
+.PP
+Prompt rendering performs simple parameter expansion, then prompt escape
+expansion.  Command substitution and arithmetic expansion are not performed in
+prompts.
+.PP
+Supported prompt parameter forms are:
+.BR $name ,
+.BR ${name} ,
+.BR $? ,
+.BR $$ ,
+.BR $! ,
+.BR $# ,
+and
+.BR $0 .
+Unsupported parameter operators are left literal.
+.PP
+Supported prompt escapes are:
+.TP
+.B \e\e
+literal backslash
+.TP
+.B \ea
+bell
+.TP
+.B \ee
+escape byte
+.TP
+.B \en
+newline
+.TP
+.B \er
+carriage return
+.TP
+.B \eu
+user name
+.TP
+.B \eh
+short host name
+.TP
+.B \eH
+full host name
+.TP
+.B \es
+shell name
+.TP
+.B \ew
+current working directory, shortened with
+.B ~
+when under
+.BR HOME
+.TP
+.B \eW
+basename of
+.BR \ew
+.TP
+.B \ed
+date in
+.B "%a %b %d"
+format
+.TP
+.B \et
+time in 24-hour
+.B HH:MM:SS
+format
+.TP
+.B \eT
+time in 12-hour
+.B HH:MM:SS
+format
+.TP
+.B \eA
+time in 24-hour
+.B HH:MM
+format
+.TP
+.B \e$
+.B #
+for effective uid 0, otherwise
+.BR $
+.TP
+.B \e#
+interactive top-level command counter
+.TP
+.B \ej
+active tracked job count
+.PP
+Unknown prompt escapes are rendered as the escaped character.
+.SH SIMPLE COMMANDS AND BUILTINS
+.B posish
+supports the usual shell command forms: simple commands, pipelines, async
+lists, subshells, and brace groups.
+.PP
+Special builtins include:
+.BR : ,
+.BR . ,
+.BR break ,
+.BR continue ,
+.BR eval ,
+.BR exec ,
+.BR exit ,
+.BR export ,
+.BR readonly ,
+.BR return ,
+.BR set ,
+.BR shift ,
+.BR times ,
+.BR trap ,
+and
+.BR unset .
+.PP
+Regular builtins include:
+.BR cd ,
+.BR pwd ,
+.BR true ,
+.BR false ,
+.BR echo ,
+.BR printf ,
+.BR test ,
+.BR [ ,
+.BR kill ,
+.BR wait ,
+.BR fg ,
+.BR bg ,
+.BR umask ,
+.BR alias ,
+.BR unalias ,
+.BR getopts ,
+.BR hash ,
+.BR jobs ,
+and
+.BR type .
+.PP
+For command discovery,
+.BR pwd ,
+.BR echo ,
+and
+.BR printf
+are reported in substitutive style by
+.BR "command -v"
+and
+.BR "command -V" .
+For example,
+.B command -V echo
+reports that
+.B echo
+is a substitutive built-in for the external
+.IR echo (1)
+path that would otherwise be found.
+.PP
+The current
+.B echo
+implementation prints its operands separated by single spaces and always adds a
+trailing newline.  It does not currently interpret
+.B \-n
+or backslash escapes as options.
+.SH EXPANSIONS
+.B posish
+supports the standard shell expansion pipeline used by its parser and
+executor, including parameter expansion, command substitution, arithmetic
+expansion, field splitting, and pathname expansion where applicable.
+.PP
+Prompt expansion is separate from normal command-word expansion and is limited
+to the forms described in
+.BR PROMPTS .
+.SH REDIRECTIONS
+The shell supports input, output, append, heredoc, and descriptor-duplication
+redirections in the executor's current POSIX test contract.
+.PP
+Redirection errors such as missing operands, ambiguous expansions, or invalid
+descriptor duplication operands produce diagnostics and cause the command to
+fail.
+.SH JOB CONTROL
+When monitor mode is enabled, stopped and background jobs are tracked by job
+and process group rather than by a single pid.
+.PP
+Jobspecs support:
+.BR % ,
+.BR %+ ,
+.BR %% ,
+.BR %- ,
+.BI % number ,
+.BI % string ,
+and
+.BI %? string .
+.PP
+.BR fg ,
+.BR bg ,
+.BR wait ,
+and
+.BR kill
+operate on whole jobs.  For pipelines, job status follows the rightmost command
+in the pipeline.
+.SH EXIT STATUS
+A simple command normally exits with the status returned by the executed
+builtin, function, or utility.
+.PP
+Syntax errors generally produce status 2.  Signal termination is reported using
+the shell's encoded status internally and is relayed as a real terminating
+signal on final process exit where appropriate.
+.SH ENVIRONMENT
+Important shell-related variables include:
+.TP
+.B ENV
+Interactive startup hook, executed before
+.IR ~/.posishrc .
+.TP
+.B HOME
+Used to resolve
+.I ~/.posish_profile
+and
+.IR ~/.posishrc ,
+and for prompt
+.B \ew
+home shortening.
+.TP
+.BR IFS
+Initialized to the default <space><tab><newline> baseline.
+.TP
+.BR OPTIND
+Initialized to
+.BR 1 .
+.TP
+.BR OPTARG
+Starts unset.
+.TP
+.BR PATH ,
+.BR PWD ,
+.BR OLDPWD
+Imported from the parent environment unless normal shell execution updates
+them.
+.TP
+.BR PS1 ,
+.BR PS2
+Interactive prompts, initialized only when unset.
+.SH CONFORMANCE AND EXTENSIONS
+.B posish
+targets POSIX shell behavior first.
+.PP
+Documented extensions currently include:
+- prompt escapes in
+.B PS1
+and
+.BR PS2
+- user startup files
+.I ~/.posish_profile
+and
+.I ~/.posishrc
+- additional named shell options such as
+.B pipefail
+and
+.BR ignoreeof
+.PP
+The test strategy is POSIX-first and uses imported yash POSIX tests as a major
+validation source.
+.SH BUGS
+The shell is still under active development.
+.PP
+Not every user-facing behavior is guaranteed to match other shells outside the
+documented contract above.

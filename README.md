@@ -2,6 +2,12 @@
 
 `posish` is a work-in-progress POSIX shell implementation in C11.
 
+Reference manual:
+
+```sh
+man ./posish.1
+```
+
 Current state:
 - Compilable shell core with iterative POSIX parser/executor implementation.
 - POSIX test harness vendored from yash (`*-p.tst` only).
@@ -121,6 +127,8 @@ make -B all CC=cc
 ```
 
 ## Startup Behavior
+
+For the full invocation and shell-behavior reference, see `posish.1`.
 
 `posish` currently uses user-scoped startup files only.
 No system-wide startup files such as `/etc/profile` are loaded yet.

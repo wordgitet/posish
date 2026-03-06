@@ -18,7 +18,13 @@
 #include <unistd.h>
 
 static void usage(const char *argv0) {
-    fprintf(stderr, "usage: %s [-c command] [script]\n", argv0);
+    fprintf(stderr,
+            "usage: %s [-abCefhimnuvx] [+abCefhimnuvx] [-o option]... "
+            "[+o option]... [-s]\n"
+            "       [-c command [command_name [argument...]]]\n"
+            "       [command_file [argument...]]\n"
+            "       %s --version\n",
+            argv0, argv0);
 }
 
 static int set_initial_positional_params(struct shell_state *state, int argc,
