@@ -65,6 +65,14 @@ static int execute_ast_node(struct shell_state *state,
                             bool allow_builtin);
 static int execute_ast_pipeline(struct shell_state *state,
                                 const struct ast_node *node);
+static int run_subshell_group_ast(struct shell_state *state,
+                                  const struct ast_node *node);
+static int run_brace_group_ast(struct shell_state *state,
+                               const struct ast_node *node);
+static int run_if_ast(struct shell_state *state, const struct ast_node *node);
+static int run_loop_ast(struct shell_state *state, const struct ast_node *node,
+                        bool is_until);
+static int run_for_ast(struct shell_state *state, const struct ast_node *node);
 static int execute_command_atom(struct shell_state *state, const char *source,
                                 bool allow_builtin);
 static bool is_assignment_word(const char *word);
@@ -265,10 +273,24 @@ static bool ast_node_is_direct_exec_compatible(const struct ast_node *node) {
         return true;
     case AST_NODE_SUBSHELL:
     case AST_NODE_BRACE_GROUP:
+        return node->data.group.body_node != NULL &&
+               ast_node_is_direct_exec_compatible(node->data.group.body_node);
     case AST_NODE_IF:
+        return node->data.if_cmd.cond_node != NULL &&
+               node->data.if_cmd.then_node != NULL &&
+               ast_node_is_direct_exec_compatible(node->data.if_cmd.cond_node) &&
+               ast_node_is_direct_exec_compatible(node->data.if_cmd.then_node) &&
+               (node->data.if_cmd.else_node == NULL ||
+                ast_node_is_direct_exec_compatible(node->data.if_cmd.else_node));
     case AST_NODE_WHILE:
     case AST_NODE_UNTIL:
+        return node->data.loop.cond_node != NULL &&
+               node->data.loop.body_node != NULL &&
+               ast_node_is_direct_exec_compatible(node->data.loop.cond_node) &&
+               ast_node_is_direct_exec_compatible(node->data.loop.body_node);
     case AST_NODE_FOR:
+        return node->data.for_cmd.body_node != NULL &&
+               ast_node_is_direct_exec_compatible(node->data.for_cmd.body_node);
     case AST_NODE_CASE:
     case AST_NODE_LEGACY:
         return false;
@@ -306,10 +328,15 @@ static bool ast_node_uses_operator_execution(const struct ast_node *node) {
         return node->data.pipeline.negate || node->data.pipeline.len > 1;
     case AST_NODE_SUBSHELL:
     case AST_NODE_BRACE_GROUP:
+        return node->data.group.body_node != NULL &&
+               ast_node_uses_operator_execution(node->data.group.body_node);
     case AST_NODE_IF:
+        return true;
     case AST_NODE_WHILE:
     case AST_NODE_UNTIL:
+        return true;
     case AST_NODE_FOR:
+        return true;
     case AST_NODE_CASE:
     case AST_NODE_LEGACY:
         return false;
@@ -2801,6 +2828,108 @@ static int run_subshell_group_command(struct shell_state *state,
     return status;
 }
 
+static int run_subshell_group_ast(struct shell_state *state,
+                                  const struct ast_node *node) {
+    struct redir_vec redirs;
+    struct fd_backup_vec backups;
+    pid_t pid;
+    int status;
+
+    if (node == NULL || node->data.group.body_node == NULL) {
+        return execute_command_atom(state, node != NULL ? node->source : "",
+                                    true);
+    }
+
+    if (parse_redirections_from_source(node->data.group.redir_suffix, state,
+                                       &redirs) != 0) {
+        return 2;
+    }
+
+    backups.items = NULL;
+    backups.len = 0;
+    if (apply_redirections(&redirs, true, state->noclobber, &backups) != 0) {
+        fd_backup_restore(&backups);
+        redir_vec_free(&redirs);
+        return 1;
+    }
+
+    trace_log(POSISH_TRACE_SIGNALS, "spawn AST subshell");
+    pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        fd_backup_restore(&backups);
+        redir_vec_free(&redirs);
+        return 1;
+    }
+
+    if (pid == 0) {
+        struct shell_state local_state;
+        int st;
+
+        if (state->monitor_mode) {
+            (void)setpgid(0, 0);
+        }
+
+        local_state = *state;
+        arena_init(&local_state.arena_perm,
+                   state->arena_perm.default_block_size);
+        arena_init(&local_state.arena_script,
+                   state->arena_script.default_block_size);
+        arena_init(&local_state.arena_cmd,
+                   state->arena_cmd.default_block_size);
+        arena_set_current(&local_state.arena_perm);
+        local_state.should_exit = false;
+        local_state.exit_status = 0;
+        local_state.running_signal_trap = false;
+        local_state.running_exit_trap = false;
+        local_state.main_context = false;
+        signals_reset_traps_for_child(&local_state);
+        signals_reset_exit_trap_for_child(&local_state);
+
+        st = execute_ast_node(&local_state, node->data.group.body_node, true);
+        shell_run_pending_traps(&local_state);
+        shell_run_exit_trap(&local_state);
+        if (local_state.should_exit) {
+            st = local_state.exit_status;
+        }
+        fflush(NULL);
+        exit_shell_child_status(st);
+    }
+
+    if (state->monitor_mode) {
+        (void)setpgid(pid, pid);
+    }
+
+    for (;;) {
+        if (waitpid(pid, &status, WUNTRACED) < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("waitpid");
+            fd_backup_restore(&backups);
+            redir_vec_free(&redirs);
+            return 1;
+        }
+        break;
+    }
+
+    fd_backup_restore(&backups);
+    redir_vec_free(&redirs);
+
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    if (WIFSTOPPED(status)) {
+        jobs_track_job(pid, &pid, 1, pid, node->source, true);
+        jobs_note_process_status(pid, status);
+        return shell_status_from_wait_status(status);
+    }
+    if (WIFSIGNALED(status)) {
+        return shell_status_from_wait_status(status);
+    }
+    return 1;
+}
+
 static int run_async_list(struct shell_state *state, const char *source) {
     pid_t pid;
 
@@ -2912,6 +3041,289 @@ static int run_brace_group_command(struct shell_state *state, const char *body,
     status = execute_program_text(state, body);
     fd_backup_restore(&backups);
     redir_vec_free(&redirs);
+    return status;
+}
+
+static int run_brace_group_ast(struct shell_state *state,
+                               const struct ast_node *node) {
+    struct redir_vec redirs;
+    struct fd_backup_vec backups;
+    int status;
+
+    if (node == NULL || node->data.group.body_node == NULL) {
+        return execute_command_atom(state, node != NULL ? node->source : "",
+                                    true);
+    }
+
+    if (parse_redirections_from_source(node->data.group.redir_suffix, state,
+                                       &redirs) != 0) {
+        return 2;
+    }
+
+    backups.items = NULL;
+    backups.len = 0;
+    if (apply_redirections(&redirs, true, state->noclobber, &backups) != 0) {
+        fd_backup_restore(&backups);
+        redir_vec_free(&redirs);
+        return 1;
+    }
+
+    status = execute_ast_node(state, node->data.group.body_node, true);
+    fd_backup_restore(&backups);
+    redir_vec_free(&redirs);
+    return status;
+}
+
+static int run_if_ast(struct shell_state *state, const struct ast_node *node) {
+    struct redir_vec redirs;
+    struct fd_backup_vec backups;
+    bool redir_applied;
+    bool saved_errexit;
+    int status;
+
+    if (node == NULL || node->data.if_cmd.cond_node == NULL ||
+        node->data.if_cmd.then_node == NULL) {
+        return execute_command_atom(state, node != NULL ? node->source : "",
+                                    true);
+    }
+
+    redirs.items = NULL;
+    redirs.len = 0;
+    backups.items = NULL;
+    backups.len = 0;
+    redir_applied = false;
+
+    if (node->data.if_cmd.redir_suffix != NULL &&
+        node->data.if_cmd.redir_suffix[0] != '\0') {
+        if (parse_redirections_from_source(node->data.if_cmd.redir_suffix, state,
+                                           &redirs) != 0) {
+            return 2;
+        }
+        if (apply_redirections(&redirs, true, state->noclobber, &backups) != 0) {
+            fd_backup_restore(&backups);
+            redir_vec_free(&redirs);
+            return 1;
+        }
+        redir_applied = true;
+    }
+
+    saved_errexit = state->errexit;
+    state->errexit = false;
+    status = execute_ast_node(state, node->data.if_cmd.cond_node, true);
+    state->errexit = saved_errexit;
+    if (!state->should_exit && !state->return_requested &&
+        !has_pending_flow_control(state)) {
+        if (status == 0) {
+            status = execute_ast_node(state, node->data.if_cmd.then_node, true);
+        } else if (node->data.if_cmd.else_node != NULL) {
+            status = execute_ast_node(state, node->data.if_cmd.else_node, true);
+        } else {
+            status = 0;
+        }
+    }
+
+    if (redir_applied) {
+        fd_backup_restore(&backups);
+    }
+    redir_vec_free(&redirs);
+    return status;
+}
+
+static int run_loop_ast(struct shell_state *state, const struct ast_node *node,
+                        bool is_until) {
+    struct redir_vec redirs;
+    struct fd_backup_vec backups;
+    bool redir_applied;
+    int status;
+
+    if (node == NULL || node->data.loop.cond_node == NULL ||
+        node->data.loop.body_node == NULL) {
+        return execute_command_atom(state, node != NULL ? node->source : "",
+                                    true);
+    }
+
+    status = 0;
+    redirs.items = NULL;
+    redirs.len = 0;
+    backups.items = NULL;
+    backups.len = 0;
+    redir_applied = false;
+
+    if (node->data.loop.redir_suffix != NULL &&
+        node->data.loop.redir_suffix[0] != '\0') {
+        if (parse_redirections_from_source(node->data.loop.redir_suffix, state,
+                                           &redirs) != 0) {
+            return 2;
+        }
+        if (apply_redirections(&redirs, true, state->noclobber, &backups) != 0) {
+            fd_backup_restore(&backups);
+            redir_vec_free(&redirs);
+            return 1;
+        }
+        redir_applied = true;
+    }
+
+    state->loop_depth++;
+    while (!state->should_exit) {
+        int cond_status;
+        bool saved_errexit;
+
+        saved_errexit = state->errexit;
+        state->errexit = false;
+        cond_status = execute_ast_node(state, node->data.loop.cond_node, true);
+        state->errexit = saved_errexit;
+        if (state->should_exit || state->return_requested) {
+            break;
+        }
+        if ((!is_until && cond_status != 0) || (is_until && cond_status == 0)) {
+            break;
+        }
+        status = execute_ast_node(state, node->data.loop.body_node, true);
+        if (state->should_exit || state->return_requested) {
+            break;
+        }
+        if (state->break_levels > 0) {
+            state->break_levels--;
+            status = 0;
+            break;
+        }
+        if (state->continue_levels > 0) {
+            state->continue_levels--;
+            status = 0;
+            if (state->continue_levels > 0) {
+                break;
+            }
+            continue;
+        }
+    }
+    state->loop_depth--;
+
+    if (redir_applied) {
+        fd_backup_restore(&backups);
+    }
+    redir_vec_free(&redirs);
+    return status;
+}
+
+static int run_for_ast(struct shell_state *state, const struct ast_node *node) {
+    struct token_vec for_lexed;
+    struct word_vec for_raw_words;
+    struct redir_vec for_redirs;
+    struct token_vec for_expanded;
+    struct token_vec for_in;
+    struct redir_vec for_loop_redirs;
+    struct fd_backup_vec for_backups;
+    bool for_redir_applied;
+    size_t i;
+    int status;
+
+    if (node == NULL || node->data.for_cmd.body_node == NULL) {
+        return execute_command_atom(state, node != NULL ? node->source : "",
+                                    true);
+    }
+
+    for_lexed.items = NULL;
+    for_lexed.len = 0;
+    for_raw_words.items = NULL;
+    for_raw_words.len = 0;
+    for_redirs.items = NULL;
+    for_redirs.len = 0;
+    for_expanded.items = NULL;
+    for_expanded.len = 0;
+    for_loop_redirs.items = NULL;
+    for_loop_redirs.len = 0;
+    for_backups.items = NULL;
+    for_backups.len = 0;
+    for_redir_applied = false;
+    status = 0;
+
+    if (node->data.for_cmd.redir_suffix != NULL &&
+        node->data.for_cmd.redir_suffix[0] != '\0') {
+        if (parse_redirections_from_source(node->data.for_cmd.redir_suffix, state,
+                                           &for_loop_redirs) != 0) {
+            status = 2;
+            goto done;
+        }
+        if (apply_redirections(&for_loop_redirs, true, state->noclobber,
+                               &for_backups) != 0) {
+            fd_backup_restore(&for_backups);
+            status = 1;
+            goto done;
+        }
+        for_redir_applied = true;
+    }
+
+    if (node->data.for_cmd.implicit_words) {
+        for_expanded.items = arena_xmalloc(sizeof(*for_expanded.items) *
+                                           state->positional_count);
+        for_expanded.len = state->positional_count;
+        for (i = 0; i < state->positional_count; i++) {
+            for_expanded.items[i] = arena_xstrdup(state->positional_params[i]);
+        }
+    } else if (node->data.for_cmd.words[0] != '\0') {
+        if (lexer_split_words(node->data.for_cmd.words, &for_lexed) != 0) {
+            status = 2;
+            goto done;
+        }
+        if (collect_words_and_redirs(&for_lexed, &for_raw_words, &for_redirs) !=
+            0) {
+            status = 2;
+            goto done;
+        }
+        if (for_redirs.len != 0) {
+            posish_errorf("for: redirection in word list is not supported");
+            status = 2;
+            goto done;
+        }
+
+        for_in.items = for_raw_words.items;
+        for_in.len = for_raw_words.len;
+        if (expand_words(&for_in, &for_expanded, state, true) != 0) {
+            status = 2;
+            goto done;
+        }
+    }
+
+    state->loop_depth++;
+    for (i = 0; i < for_expanded.len && !state->should_exit; i++) {
+        if (vars_set_assignment(state, node->data.for_cmd.name,
+                                for_expanded.items[i], true) != 0) {
+            status = 1;
+            if (!state->interactive) {
+                state->should_exit = true;
+                state->exit_status = status;
+            }
+            break;
+        }
+
+        status = execute_ast_node(state, node->data.for_cmd.body_node, true);
+        if (state->should_exit || state->return_requested) {
+            break;
+        }
+        if (state->break_levels > 0) {
+            state->break_levels--;
+            status = 0;
+            break;
+        }
+        if (state->continue_levels > 0) {
+            state->continue_levels--;
+            status = 0;
+            if (state->continue_levels > 0) {
+                break;
+            }
+        }
+    }
+    state->loop_depth--;
+
+done:
+    if (for_redir_applied) {
+        fd_backup_restore(&for_backups);
+    }
+    redir_vec_free(&for_loop_redirs);
+    lexer_free_tokens(&for_lexed);
+    redir_vec_free(&for_redirs);
+    word_vec_free(&for_raw_words);
+    lexer_free_tokens(&for_expanded);
     return status;
 }
 
@@ -3825,11 +4237,17 @@ static int execute_ast_node(struct shell_state *state,
                                             &node->data.simple.redirs,
                                             allow_builtin);
     case AST_NODE_SUBSHELL:
+        return run_subshell_group_ast(state, node);
     case AST_NODE_BRACE_GROUP:
+        return run_brace_group_ast(state, node);
     case AST_NODE_IF:
+        return run_if_ast(state, node);
     case AST_NODE_WHILE:
+        return run_loop_ast(state, node, false);
     case AST_NODE_UNTIL:
+        return run_loop_ast(state, node, true);
     case AST_NODE_FOR:
+        return run_for_ast(state, node);
     case AST_NODE_CASE:
         return execute_command_atom(state, node->source, allow_builtin);
     case AST_NODE_LEGACY:

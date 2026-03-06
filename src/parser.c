@@ -36,6 +36,11 @@ static int parse_simple_parts(struct parser_ctx *ctx, const char *source,
                               struct redir_vec *redirs);
 static bool source_contains_heredoc_operator(const char *source);
 static bool looks_like_function_definition_text(const char *source);
+static size_t line_at_offset(const struct parser_ctx *ctx, size_t offset);
+static struct ast_node *parse_embedded_program_root(struct parser_ctx *ctx,
+                                                    const char *source,
+                                                    size_t offset_hint,
+                                                    int *err_out);
 
 static bool keyword_boundary(char ch) {
     return ch == '\0' || isspace((unsigned char)ch) || ch == ';' ||
@@ -366,6 +371,34 @@ static void span_from_offsets(struct parser_ctx *ctx, size_t start, size_t end,
     span->end_col = col;
 }
 
+static size_t line_at_offset(const struct parser_ctx *ctx, size_t offset) {
+    size_t i;
+    size_t line;
+
+    line = ctx->base_line == 0 ? 1 : ctx->base_line;
+    for (i = 0; i < ctx->len && i < offset; i++) {
+        if (ctx->source[i] == '\n') {
+            line++;
+        }
+    }
+    return line;
+}
+
+static struct ast_node *parse_embedded_program_root(struct parser_ctx *ctx,
+                                                    const char *source,
+                                                    size_t offset_hint,
+                                                    int *err_out) {
+    struct ast_program *program;
+
+    program = NULL;
+    if (parse_program_at(ctx->source_name, line_at_offset(ctx, offset_hint),
+                         source, &program) != 0) {
+        *err_out = -1;
+        return NULL;
+    }
+    return program->root;
+}
+
 static struct ast_node *ast_new_node(struct parser_ctx *ctx,
                                      enum ast_node_kind kind,
                                      size_t start,
@@ -530,8 +563,9 @@ static void report_unexpected_token(struct parser_ctx *ctx, size_t pos,
                         token);
 }
 
-static bool unwrap_subshell_group(const char *source, char **inner_out,
-                                  char **redir_suffix_out) {
+static bool unwrap_subshell_group(const char *source, size_t *inner_start_out,
+                                  size_t *inner_end_out,
+                                  size_t *redir_start_out) {
     size_t len;
     size_t i;
     int paren_depth;
@@ -588,13 +622,15 @@ static bool unwrap_subshell_group(const char *source, char **inner_out,
         return false;
     }
 
-    *inner_out = dup_trimmed_slice(source, 1, close_pos);
-    *redir_suffix_out = dup_trimmed_slice(source, close_pos + 1, len);
+    *inner_start_out = 1;
+    *inner_end_out = close_pos;
+    *redir_start_out = close_pos + 1;
     return true;
 }
 
-static bool unwrap_brace_group(const char *source, char **inner_out,
-                               char **redir_suffix_out) {
+static bool unwrap_brace_group(const char *source, size_t *inner_start_out,
+                               size_t *inner_end_out,
+                               size_t *redir_start_out) {
     size_t len;
     size_t i;
     int brace_depth;
@@ -652,8 +688,9 @@ static bool unwrap_brace_group(const char *source, char **inner_out,
         return false;
     }
 
-    *inner_out = dup_trimmed_slice(source, 1, close_pos);
-    *redir_suffix_out = dup_trimmed_slice(source, close_pos + 1, len);
+    *inner_start_out = 1;
+    *inner_end_out = close_pos;
+    *redir_start_out = close_pos + 1;
     return true;
 }
 
@@ -846,8 +883,23 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
     char *name;
     char *words;
     bool implicit_words;
-    char *inner;
     char *core;
+    size_t trim_start;
+    size_t trim_end;
+    size_t inner_rel_start;
+    size_t inner_rel_end;
+    size_t redir_rel_start;
+
+    trim_start = start;
+    trim_end = end;
+    while (trim_start < trim_end &&
+           isspace((unsigned char)ctx->source[trim_start])) {
+        trim_start++;
+    }
+    while (trim_end > trim_start &&
+           isspace((unsigned char)ctx->source[trim_end - 1])) {
+        trim_end--;
+    }
 
     trimmed = dup_trimmed_slice(ctx->source, start, end);
     if (trimmed[0] == '\0') {
@@ -863,23 +915,53 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
     body = NULL;
     name = NULL;
     words = NULL;
-    inner = NULL;
     core = NULL;
+    inner_rel_start = 0;
+    inner_rel_end = 0;
+    redir_rel_start = 0;
     implicit_words = false;
     is_until = false;
 
     if (parse_simple_if(trimmed, &cond, &then_part, &else_part, &redir_suffix)) {
         node = ast_new_node(ctx, AST_NODE_IF, start, end);
         node->data.if_cmd.cond = cond;
+        node->data.if_cmd.cond_node =
+            parse_embedded_program_root(ctx, cond, trim_start, err_out);
+        if (*err_out != 0) {
+            return NULL;
+        }
         node->data.if_cmd.then_part = then_part;
+        node->data.if_cmd.then_node =
+            parse_embedded_program_root(ctx, then_part, trim_start, err_out);
+        if (*err_out != 0) {
+            return NULL;
+        }
         node->data.if_cmd.else_part = else_part;
+        node->data.if_cmd.else_node = NULL;
+        if (else_part != NULL) {
+            node->data.if_cmd.else_node =
+                parse_embedded_program_root(ctx, else_part, trim_start, err_out);
+            if (*err_out != 0) {
+                return NULL;
+            }
+        }
         node->data.if_cmd.redir_suffix = redir_suffix;
     } else if (parse_simple_while(trimmed, &cond, &body, &is_until,
                                   &redir_suffix)) {
         node = ast_new_node(ctx, is_until ? AST_NODE_UNTIL : AST_NODE_WHILE,
                             start, end);
         node->data.loop.cond = cond;
+        node->data.loop.cond_node =
+            parse_embedded_program_root(ctx, cond, trim_start, err_out);
+        if (*err_out != 0) {
+            return NULL;
+        }
         node->data.loop.body = body;
+        node->data.loop.body_node =
+            parse_embedded_program_root(ctx, body, trim_start, err_out);
+        if (*err_out != 0) {
+            return NULL;
+        }
         node->data.loop.redir_suffix = redir_suffix;
     } else if (parse_simple_for(trimmed, &name, &words, &body,
                                 &implicit_words, &redir_suffix)) {
@@ -887,6 +969,11 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
         node->data.for_cmd.name = name;
         node->data.for_cmd.words = words;
         node->data.for_cmd.body = body;
+        node->data.for_cmd.body_node =
+            parse_embedded_program_root(ctx, body, trim_start, err_out);
+        if (*err_out != 0) {
+            return NULL;
+        }
         node->data.for_cmd.redir_suffix = redir_suffix;
         node->data.for_cmd.implicit_words = implicit_words;
     } else if (split_case_redirection_suffix(trimmed, &core, &redir_suffix)) {
@@ -898,14 +985,32 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
         node = ast_new_node(ctx, AST_NODE_CASE, start, end);
         node->data.case_cmd.core = arena_xstrdup(trimmed);
         node->data.case_cmd.redir_suffix = arena_xstrdup("");
-    } else if (unwrap_subshell_group(trimmed, &inner, &redir_suffix)) {
+    } else if (unwrap_subshell_group(trimmed, &inner_rel_start, &inner_rel_end,
+                                     &redir_rel_start)) {
         node = ast_new_node(ctx, AST_NODE_SUBSHELL, start, end);
-        node->data.group.body = inner;
-        node->data.group.redir_suffix = redir_suffix;
-    } else if (unwrap_brace_group(trimmed, &inner, &redir_suffix)) {
+        node->data.group.body = dup_trimmed_slice(trimmed, inner_rel_start,
+                                                  inner_rel_end);
+        node->data.group.redir_suffix =
+            dup_trimmed_slice(trimmed, redir_rel_start, strlen(trimmed));
+        node->data.group.body_node = parse_sequence(
+            ctx, trim_start + inner_rel_start, trim_start + inner_rel_end,
+            err_out);
+        if (*err_out != 0) {
+            return NULL;
+        }
+    } else if (unwrap_brace_group(trimmed, &inner_rel_start, &inner_rel_end,
+                                  &redir_rel_start)) {
         node = ast_new_node(ctx, AST_NODE_BRACE_GROUP, start, end);
-        node->data.group.body = inner;
-        node->data.group.redir_suffix = redir_suffix;
+        node->data.group.body = dup_trimmed_slice(trimmed, inner_rel_start,
+                                                  inner_rel_end);
+        node->data.group.redir_suffix =
+            dup_trimmed_slice(trimmed, redir_rel_start, strlen(trimmed));
+        node->data.group.body_node = parse_sequence(
+            ctx, trim_start + inner_rel_start, trim_start + inner_rel_end,
+            err_out);
+        if (*err_out != 0) {
+            return NULL;
+        }
     } else if (looks_like_function_definition_text(trimmed) ||
                source_contains_heredoc_operator(trimmed)) {
         node = ast_new_node(ctx, AST_NODE_LEGACY, start, end);

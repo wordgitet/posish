@@ -76,23 +76,30 @@ struct ast_node {
         } simple;
         struct {
             char *body;
+            struct ast_node *body_node;
             char *redir_suffix;
         } group;
         struct {
             char *cond;
+            struct ast_node *cond_node;
             char *then_part;
+            struct ast_node *then_node;
             char *else_part;
+            struct ast_node *else_node;
             char *redir_suffix;
         } if_cmd;
         struct {
             char *cond;
+            struct ast_node *cond_node;
             char *body;
+            struct ast_node *body_node;
             char *redir_suffix;
         } loop;
         struct {
             char *name;
             char *words;
             char *body;
+            struct ast_node *body_node;
             char *redir_suffix;
             bool implicit_words;
         } for_cmd;
