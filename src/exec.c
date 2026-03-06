@@ -2623,6 +2623,13 @@ static int run_subshell_command(struct shell_state *parent_state,
         }
 
         local_state = *parent_state;
+        arena_init(&local_state.arena_perm,
+                   parent_state->arena_perm.default_block_size);
+        arena_init(&local_state.arena_script,
+                   parent_state->arena_script.default_block_size);
+        arena_init(&local_state.arena_cmd,
+                   parent_state->arena_cmd.default_block_size);
+        arena_set_current(&local_state.arena_perm);
         local_state.should_exit = false;
         local_state.exit_status = 0;
         local_state.running_signal_trap = false;

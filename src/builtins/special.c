@@ -383,6 +383,20 @@ static int builtin_command_describe(struct shell_state *state, char *const argv[
             }
             fflush(stdout);
             continue;
+        } else if (builtin_is_substitutive_name(argv[i])) {
+            path = find_command_path(argv[i], use_standard_path);
+            if (path == NULL) {
+                status = 1;
+                continue;
+            }
+            if (verbose) {
+                printf("%s: a substitutive built-in for %s\n", argv[i], path);
+            } else {
+                printf("%s\n", path);
+            }
+            fflush(stdout);
+            arena_maybe_free(path);
+            continue;
         } else {
             path = find_command_path(argv[i], use_standard_path);
             if (path == NULL && is_regular_builtin_name(argv[i])) {

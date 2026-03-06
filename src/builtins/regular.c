@@ -14,7 +14,9 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -742,6 +744,482 @@ static int builtin_test(char *const argv[]) {
         argc++;
     }
     return posish_test_builtin((int)argc, argv);
+}
+
+static int builtin_write_bytes(const char *data, size_t len) {
+    if (len == 0) {
+        return 0;
+    }
+    if (fwrite(data, 1, len, stdout) != len) {
+        perror("fwrite");
+        return 1;
+    }
+    return 0;
+}
+
+static int builtin_finish_stdout(void) {
+    if (fflush(stdout) != 0) {
+        perror("fflush");
+        clearerr(stdout);
+        return 1;
+    }
+    return 0;
+}
+
+static int builtin_write_cstr(const char *text) {
+    return builtin_write_bytes(text, strlen(text));
+}
+
+static int builtin_write_char(int ch) {
+    char c;
+
+    c = (char)ch;
+    return builtin_write_bytes(&c, 1);
+}
+
+static int builtin_echo(char *const argv[]) {
+    size_t i;
+    int rc;
+
+    if (argv[1] == NULL) {
+        rc = builtin_write_bytes("\n", 1);
+        if (rc != 0) {
+            return rc;
+        }
+        return builtin_finish_stdout();
+    }
+
+    for (i = 1; argv[i] != NULL; i++) {
+        if (i > 1 && builtin_write_bytes(" ", 1) != 0) {
+            return 1;
+        }
+        if (builtin_write_cstr(argv[i]) != 0) {
+            return 1;
+        }
+    }
+    rc = builtin_write_bytes("\n", 1);
+    if (rc != 0) {
+        return rc;
+    }
+    return builtin_finish_stdout();
+}
+
+struct builtin_printf_state {
+    char *const *argv;
+    size_t argc;
+    size_t next_arg;
+    int status;
+};
+
+static const char *builtin_printf_arg_or_default(struct builtin_printf_state *st,
+                                                 const char *def) {
+    if (st->next_arg >= st->argc) {
+        return def;
+    }
+    return st->argv[st->next_arg++];
+}
+
+static int builtin_printf_parse_int(const char *text, int *out) {
+    char *end;
+    long value;
+
+    errno = 0;
+    value = strtol(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0') {
+        return -1;
+    }
+    *out = (int)value;
+    return 0;
+}
+
+static int builtin_printf_parse_signed(const char *text, intmax_t *out) {
+    char *end;
+    intmax_t value;
+
+    errno = 0;
+    value = strtoimax(text, &end, 0);
+    if (errno != 0 || end == text || *end != '\0') {
+        return -1;
+    }
+    *out = value;
+    return 0;
+}
+
+static int builtin_printf_parse_unsigned(const char *text, uintmax_t *out) {
+    char *end;
+    uintmax_t value;
+
+    errno = 0;
+    value = strtoumax(text, &end, 0);
+    if (errno != 0 || end == text || *end != '\0') {
+        return -1;
+    }
+    *out = value;
+    return 0;
+}
+
+static int builtin_printf_numeric_arg(struct builtin_printf_state *st, int *out) {
+    const char *arg;
+
+    arg = builtin_printf_arg_or_default(st, "0");
+    if (builtin_printf_parse_int(arg, out) == 0) {
+        return 0;
+    }
+    posish_errorf("printf: expected numeric value: %s", arg);
+    st->status = 1;
+    *out = 0;
+    return -1;
+}
+
+static int builtin_printf_write_formatted(const char *fmt, ...) {
+    va_list ap;
+    va_list ap_copy;
+    int needed;
+    char stack_buf[256];
+    char *heap_buf;
+
+    va_start(ap, fmt);
+    va_copy(ap_copy, ap);
+    needed = vsnprintf(stack_buf, sizeof(stack_buf), fmt, ap);
+    va_end(ap);
+    if (needed < 0) {
+        va_end(ap_copy);
+        perror("vsnprintf");
+        return 1;
+    }
+    if ((size_t)needed < sizeof(stack_buf)) {
+        va_end(ap_copy);
+        return builtin_write_bytes(stack_buf, (size_t)needed);
+    }
+
+    heap_buf = arena_alloc_in(NULL, (size_t)needed + 1);
+    if (heap_buf == NULL) {
+        va_end(ap_copy);
+        perror("malloc");
+        return 1;
+    }
+    if (vsnprintf(heap_buf, (size_t)needed + 1, fmt, ap_copy) != needed) {
+        arena_maybe_free(heap_buf);
+        va_end(ap_copy);
+        perror("vsnprintf");
+        return 1;
+    }
+    va_end(ap_copy);
+    needed = builtin_write_bytes(heap_buf, strlen(heap_buf));
+    arena_maybe_free(heap_buf);
+    return needed;
+}
+
+static int builtin_printf_emit_span(const char *start, size_t len) {
+    return builtin_write_bytes(start, len);
+}
+
+static int builtin_printf_emit_escape(const char *p, size_t *consumed,
+                                      bool *stop_output) {
+    unsigned value;
+    size_t i;
+
+    *consumed = 1;
+    *stop_output = false;
+    if (p[1] == '\0') {
+        return builtin_write_char('\\');
+    }
+
+    switch (p[1]) {
+    case 'a':
+        *consumed = 2;
+        return builtin_write_char('\a');
+    case 'b':
+        *consumed = 2;
+        return builtin_write_char('\b');
+    case 'c':
+        *consumed = 2;
+        *stop_output = true;
+        return 0;
+    case 'f':
+        *consumed = 2;
+        return builtin_write_char('\f');
+    case 'n':
+        *consumed = 2;
+        return builtin_write_char('\n');
+    case 'r':
+        *consumed = 2;
+        return builtin_write_char('\r');
+    case 't':
+        *consumed = 2;
+        return builtin_write_char('\t');
+    case 'v':
+        *consumed = 2;
+        return builtin_write_char('\v');
+    case '\\':
+        *consumed = 2;
+        return builtin_write_char('\\');
+    default:
+        if (p[1] == '0') {
+            value = 0;
+            i = 1;
+            while (i <= 3 && p[i] >= '0' && p[i] <= '7') {
+                value = (value << 3) + (unsigned)(p[i] - '0');
+                i++;
+            }
+            *consumed = i;
+            return builtin_write_char((int)(value & 0xffu));
+        }
+        *consumed = 2;
+        return builtin_write_char((unsigned char)p[1]);
+    }
+}
+
+static int builtin_printf_one_pass(struct builtin_printf_state *st,
+                                   const char *format,
+                                   bool *used_conversion) {
+    const char *p;
+
+    p = format;
+    while (*p != '\0') {
+        const char *lit;
+        size_t consumed;
+        bool stop_output;
+
+        lit = p;
+        while (*p != '\0' && *p != '%' && *p != '\\') {
+            p++;
+        }
+        if (p > lit && builtin_printf_emit_span(lit, (size_t)(p - lit)) != 0) {
+            return 1;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        if (*p == '\\') {
+            if (builtin_printf_emit_escape(p, &consumed, &stop_output) != 0) {
+                return 1;
+            }
+            p += consumed;
+            if (stop_output) {
+                st->next_arg = st->argc;
+                return 0;
+            }
+            continue;
+        }
+
+        p++;
+        if (*p == '%') {
+            if (builtin_write_bytes("%", 1) != 0) {
+                return 1;
+            }
+            p++;
+            continue;
+        }
+
+        {
+            char spec_buf[128];
+            size_t spec_len;
+            bool left;
+            bool plus;
+            bool space;
+            bool alt;
+            bool zero;
+            bool have_precision;
+            int width;
+            int precision;
+            char conv;
+
+            *used_conversion = true;
+            left = false;
+            plus = false;
+            space = false;
+            alt = false;
+            zero = false;
+            have_precision = false;
+            width = -1;
+            precision = 0;
+
+            while (*p == '-' || *p == '+' || *p == ' ' || *p == '#' ||
+                   *p == '0') {
+                if (*p == '-') left = true;
+                if (*p == '+') plus = true;
+                if (*p == ' ') space = true;
+                if (*p == '#') alt = true;
+                if (*p == '0') zero = true;
+                p++;
+            }
+
+            if (*p == '*') {
+                if (builtin_printf_numeric_arg(st, &width) != 0) {
+                    width = 0;
+                }
+                if (width < 0) {
+                    left = true;
+                    width = -width;
+                }
+                p++;
+            } else if (isdigit((unsigned char)*p)) {
+                width = 0;
+                while (isdigit((unsigned char)*p)) {
+                    width = width * 10 + (*p - '0');
+                    p++;
+                }
+            }
+
+            if (*p == '.') {
+                have_precision = true;
+                p++;
+                if (*p == '*') {
+                    if (builtin_printf_numeric_arg(st, &precision) != 0) {
+                        precision = 0;
+                    }
+                    if (precision < 0) {
+                        have_precision = false;
+                        precision = 0;
+                    }
+                    p++;
+                } else {
+                    precision = 0;
+                    while (isdigit((unsigned char)*p)) {
+                        precision = precision * 10 + (*p - '0');
+                        p++;
+                    }
+                }
+            }
+
+            while (*p == 'h' || *p == 'l' || *p == 'j' || *p == 'z' ||
+                   *p == 't' || *p == 'L') {
+                p++;
+            }
+
+            conv = *p;
+            if (conv == '\0') {
+                posish_errorf("printf: missing format character");
+                st->status = 1;
+                return 1;
+            }
+            p++;
+
+            spec_len = 0;
+            spec_buf[spec_len++] = '%';
+            if (left) spec_buf[spec_len++] = '-';
+            if (plus) spec_buf[spec_len++] = '+';
+            if (space) spec_buf[spec_len++] = ' ';
+            if (alt) spec_buf[spec_len++] = '#';
+            if (zero && !left) spec_buf[spec_len++] = '0';
+            if (width >= 0) {
+                spec_len += (size_t)snprintf(spec_buf + spec_len,
+                                             sizeof(spec_buf) - spec_len, "%d",
+                                             width);
+            }
+            if (have_precision) {
+                spec_buf[spec_len++] = '.';
+                spec_len += (size_t)snprintf(spec_buf + spec_len,
+                                             sizeof(spec_buf) - spec_len, "%d",
+                                             precision);
+            }
+
+            if (conv == 's') {
+                const char *arg;
+
+                arg = builtin_printf_arg_or_default(st, "");
+                spec_buf[spec_len++] = 's';
+                spec_buf[spec_len] = '\0';
+                if (builtin_printf_write_formatted(spec_buf, arg) != 0) {
+                    return 1;
+                }
+                continue;
+            }
+
+            if (conv == 'c') {
+                const char *arg;
+                int ch;
+
+                arg = builtin_printf_arg_or_default(st, "");
+                ch = arg[0] == '\0' ? '\0' : (unsigned char)arg[0];
+                spec_buf[spec_len++] = 'c';
+                spec_buf[spec_len] = '\0';
+                if (builtin_printf_write_formatted(spec_buf, ch) != 0) {
+                    return 1;
+                }
+                continue;
+            }
+
+            if (conv == 'd' || conv == 'i') {
+                intmax_t value;
+                const char *arg;
+
+                arg = builtin_printf_arg_or_default(st, "0");
+                if (builtin_printf_parse_signed(arg, &value) != 0) {
+                    posish_errorf("printf: expected numeric value: %s", arg);
+                    st->status = 1;
+                    value = 0;
+                }
+                spec_buf[spec_len++] = 'j';
+                spec_buf[spec_len++] = conv;
+                spec_buf[spec_len] = '\0';
+                if (builtin_printf_write_formatted(spec_buf, value) != 0) {
+                    return 1;
+                }
+                continue;
+            }
+
+            if (conv == 'u' || conv == 'o' || conv == 'x' || conv == 'X') {
+                uintmax_t value;
+                const char *arg;
+
+                arg = builtin_printf_arg_or_default(st, "0");
+                if (builtin_printf_parse_unsigned(arg, &value) != 0) {
+                    posish_errorf("printf: expected numeric value: %s", arg);
+                    st->status = 1;
+                    value = 0;
+                }
+                spec_buf[spec_len++] = 'j';
+                spec_buf[spec_len++] = conv;
+                spec_buf[spec_len] = '\0';
+                if (builtin_printf_write_formatted(spec_buf, value) != 0) {
+                    return 1;
+                }
+                continue;
+            }
+
+            posish_errorf("printf: unsupported conversion: %%%c", conv);
+            st->status = 1;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int builtin_printf(char *const argv[]) {
+    struct builtin_printf_state st;
+    const char *format;
+    bool used_conversion;
+    int flush_status;
+
+    if (argv[1] == NULL) {
+        posish_errorf("printf: missing format operand");
+        return 1;
+    }
+
+    st.argv = argv + 2;
+    st.argc = 0;
+    while (st.argv[st.argc] != NULL) {
+        st.argc++;
+    }
+    st.next_arg = 0;
+    st.status = 0;
+    format = argv[1];
+
+    do {
+        used_conversion = false;
+        if (builtin_printf_one_pass(&st, format, &used_conversion) != 0) {
+            return 1;
+        }
+    } while (used_conversion && st.next_arg < st.argc);
+
+    flush_status = builtin_finish_stdout();
+    if (flush_status != 0) {
+        return flush_status;
+    }
+    return st.status;
 }
 
 #if POSISH_TEST_HELPERS
@@ -1993,6 +2471,14 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
         *handled = true;
         return 1;
     }
+    if (strcmp(argv[0], "echo") == 0) {
+        *handled = true;
+        return builtin_echo(argv);
+    }
+    if (strcmp(argv[0], "printf") == 0) {
+        *handled = true;
+        return builtin_printf(argv);
+    }
     if (strcmp(argv[0], "test") == 0 || strcmp(argv[0], "[") == 0) {
         *handled = true;
         return builtin_test(argv);
@@ -2061,13 +2547,13 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
 }
 
 bool builtin_is_name(const char *name) {
-    static const char *const regular_names[] = {"cd",     "pwd",    "true",
-                                                "false",  "test",   "[",
-                                                "kill",   "wait",   "fg",
-                                                "bg",     "umask",  "alias",
-                                                "command","read",   "getopts",
-                                                "hash",   "jobs",   "type",
-                                                "unalias"};
+    static const char *const regular_names[] = {"cd",      "pwd",    "true",
+                                                "false",   "echo",   "printf",
+                                                "test",    "[",      "kill",
+                                                "wait",    "fg",     "bg",
+                                                "umask",   "alias",  "command",
+                                                "read",    "getopts","hash",
+                                                "jobs",    "type",   "unalias"};
     size_t i;
 
     if (name == NULL || name[0] == '\0') {
@@ -2093,5 +2579,7 @@ bool builtin_is_name(const char *name) {
 }
 
 bool builtin_is_substitutive_name(const char *name) {
-    return name != NULL && strcmp(name, "pwd") == 0;
+    return name != NULL &&
+           (strcmp(name, "pwd") == 0 || strcmp(name, "echo") == 0 ||
+            strcmp(name, "printf") == 0);
 }
