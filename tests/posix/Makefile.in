@@ -30,7 +30,29 @@ SMOKE_SUMMARY = summary-smoke.log
 STOP_TEST_SOURCES = sigstop3-p.tst sigstop7-p.tst sigtstp3-p.tst sigtstp4-p.tst sigtstp7-p.tst sigtstp8-p.tst sigttin3-p.tst sigttin4-p.tst sigttin7-p.tst sigttin8-p.tst sigttou3-p.tst sigttou4-p.tst sigttou7-p.tst sigttou8-p.tst
 SIGNAL_TEST_SOURCES = $(POSIX_SIGNAL_TEST_SOURCES)
 SIGNAL_SUMMARY = summary-signal.log
-REGRESSION_TEST_SOURCES = sigtstp4-p.tst sigttin4-p.tst sigttou4-p.tst command-p.tst jobspec-p.tst jobpipe-p.tst arithshift-p.tst pwd-p.tst trapcmdsub-p.tst prompt-posish.tst startup-posish.tst diag-posish.tst ast-posish.tst
+REGRESSION_TEST_SOURCES = \
+	sigtstp4-p.tst \
+	sigttin4-p.tst \
+	sigttou4-p.tst \
+	command-p.tst \
+	jobspec-p.tst \
+	jobpipe-p.tst \
+	arithshift-p.tst \
+	pwd-p.tst \
+	trapcmdsub-p.tst \
+	andor-p.tst \
+	pipeline-p.tst \
+	grouping-p.tst \
+	if-p.tst \
+	for-p.tst \
+	until-p.tst \
+	while-p.tst \
+	case-p.tst \
+	function-p.tst \
+	prompt-posish.tst \
+	startup-posish.tst \
+	diag-posish.tst \
+	ast-posish.tst
 FULLTRUTH_SUMMARY ?= summary-fulltruth.log
 FULLTRUTH_CLASSIFICATION_CSV ?= summary-fulltruth.csv
 TESTCASE_TIMEOUT ?= 0

@@ -2501,7 +2501,8 @@ static bool unwrap_subshell_group(const char *source, char **inner_out,
     return true;
 }
 
-static bool unwrap_brace_group(const char *source, char **inner_out, char **redir_suffix_out) {
+static bool unwrap_brace_group(const char *source, char **inner_out,
+                               char **redir_suffix_out) {
     size_t len;
     size_t i;
     int brace_depth;
@@ -2649,6 +2650,36 @@ static int run_subshell_command(struct shell_state *parent_state,
     return 1;
 }
 
+static int run_subshell_group_ast(struct shell_state *state,
+                                  const struct ast_node *node) {
+    struct redir_vec redirs;
+    struct fd_backup_vec backups;
+    int status;
+
+    if (node == NULL || node->data.group.body_node == NULL) {
+        return execute_command_atom(state, node != NULL ? node->source : "",
+                                    true);
+    }
+
+    if (parse_redirections_from_source(node->data.group.redir_suffix, state,
+                                       &redirs) != 0) {
+        return 2;
+    }
+
+    backups.items = NULL;
+    backups.len = 0;
+    if (apply_redirections(&redirs, true, state->noclobber, &backups) != 0) {
+        fd_backup_restore(&backups);
+        redir_vec_free(&redirs);
+        return 1;
+    }
+
+    status = run_subshell_command(state, node->data.group.body);
+    fd_backup_restore(&backups);
+    redir_vec_free(&redirs);
+    return status;
+}
+
 static int run_subshell_group_command(struct shell_state *state,
                                       const char *body,
                                       const char *redir_suffix) {
@@ -2672,108 +2703,6 @@ static int run_subshell_group_command(struct shell_state *state,
     fd_backup_restore(&backups);
     redir_vec_free(&redirs);
     return status;
-}
-
-static int run_subshell_group_ast(struct shell_state *state,
-                                  const struct ast_node *node) {
-    struct redir_vec redirs;
-    struct fd_backup_vec backups;
-    pid_t pid;
-    int status;
-
-    if (node == NULL || node->data.group.body_node == NULL) {
-        return execute_command_atom(state, node != NULL ? node->source : "",
-                                    true);
-    }
-
-    if (parse_redirections_from_source(node->data.group.redir_suffix, state,
-                                       &redirs) != 0) {
-        return 2;
-    }
-
-    backups.items = NULL;
-    backups.len = 0;
-    if (apply_redirections(&redirs, true, state->noclobber, &backups) != 0) {
-        fd_backup_restore(&backups);
-        redir_vec_free(&redirs);
-        return 1;
-    }
-
-    trace_log(POSISH_TRACE_SIGNALS, "spawn AST subshell");
-    pid = fork();
-    if (pid < 0) {
-        perror("fork");
-        fd_backup_restore(&backups);
-        redir_vec_free(&redirs);
-        return 1;
-    }
-
-    if (pid == 0) {
-        struct shell_state local_state;
-        int st;
-
-        if (state->monitor_mode) {
-            (void)setpgid(0, 0);
-        }
-
-        local_state = *state;
-        arena_init(&local_state.arena_perm,
-                   state->arena_perm.default_block_size);
-        arena_init(&local_state.arena_script,
-                   state->arena_script.default_block_size);
-        arena_init(&local_state.arena_cmd,
-                   state->arena_cmd.default_block_size);
-        arena_set_current(&local_state.arena_perm);
-        local_state.should_exit = false;
-        local_state.exit_status = 0;
-        local_state.running_signal_trap = false;
-        local_state.running_exit_trap = false;
-        local_state.main_context = false;
-        signals_reset_traps_for_child(&local_state);
-        signals_reset_exit_trap_for_child(&local_state);
-
-        st = execute_ast_node(&local_state, node->data.group.body_node, true);
-        shell_run_pending_traps(&local_state);
-        shell_run_exit_trap(&local_state);
-        if (local_state.should_exit) {
-            st = local_state.exit_status;
-        }
-        fflush(NULL);
-        exit_shell_child_status(st);
-    }
-
-    if (state->monitor_mode) {
-        (void)setpgid(pid, pid);
-    }
-
-    for (;;) {
-        if (waitpid(pid, &status, WUNTRACED) < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            perror("waitpid");
-            fd_backup_restore(&backups);
-            redir_vec_free(&redirs);
-            return 1;
-        }
-        break;
-    }
-
-    fd_backup_restore(&backups);
-    redir_vec_free(&redirs);
-
-    if (WIFEXITED(status)) {
-        return WEXITSTATUS(status);
-    }
-    if (WIFSTOPPED(status)) {
-        jobs_track_job(pid, &pid, 1, pid, node->source, true);
-        jobs_note_process_status(pid, status);
-        return shell_status_from_wait_status(status);
-    }
-    if (WIFSIGNALED(status)) {
-        return shell_status_from_wait_status(status);
-    }
-    return 1;
 }
 
 static int run_async_list(struct shell_state *state, const char *source) {
@@ -2866,30 +2795,6 @@ static int run_async_list(struct shell_state *state, const char *source) {
     return 0;
 }
 
-static int run_brace_group_command(struct shell_state *state, const char *body,
-                                   const char *redir_suffix) {
-    struct redir_vec redirs;
-    struct fd_backup_vec backups;
-    int status;
-
-    if (parse_redirections_from_source(redir_suffix, state, &redirs) != 0) {
-        return 2;
-    }
-
-    backups.items = NULL;
-    backups.len = 0;
-    if (apply_redirections(&redirs, true, state->noclobber, &backups) != 0) {
-        fd_backup_restore(&backups);
-        redir_vec_free(&redirs);
-        return 1;
-    }
-
-    status = execute_program_text(state, body);
-    fd_backup_restore(&backups);
-    redir_vec_free(&redirs);
-    return status;
-}
-
 static int run_brace_group_ast(struct shell_state *state,
                                const struct ast_node *node) {
     struct redir_vec redirs;
@@ -2914,7 +2819,31 @@ static int run_brace_group_ast(struct shell_state *state,
         return 1;
     }
 
-    status = execute_ast_node(state, node->data.group.body_node, true);
+    status = execute_program_text(state, node->data.group.body);
+    fd_backup_restore(&backups);
+    redir_vec_free(&redirs);
+    return status;
+}
+
+static int run_brace_group_command(struct shell_state *state, const char *body,
+                                   const char *redir_suffix) {
+    struct redir_vec redirs;
+    struct fd_backup_vec backups;
+    int status;
+
+    if (parse_redirections_from_source(redir_suffix, state, &redirs) != 0) {
+        return 2;
+    }
+
+    backups.items = NULL;
+    backups.len = 0;
+    if (apply_redirections(&redirs, true, state->noclobber, &backups) != 0) {
+        fd_backup_restore(&backups);
+        redir_vec_free(&redirs);
+        return 1;
+    }
+
+    status = execute_program_text(state, body);
     fd_backup_restore(&backups);
     redir_vec_free(&redirs);
     return status;
@@ -3358,296 +3287,14 @@ static bool split_case_redirection_suffix(const char *source, char **core_out,
     return true;
 }
 
-static bool run_legacy_control_command(struct shell_state *state, char *trimmed,
-                                       int *status_out) {
-    char *if_cond;
-    char *if_then;
-    char *if_else;
-    char *if_redirs;
-    char *while_cond;
-    char *while_body;
-    char *while_redirs;
-    char *for_name;
-    char *for_words;
-    char *for_body;
-    char *for_redir_suffix;
+static bool run_legacy_case_command(struct shell_state *state, char *trimmed,
+                                    int *status_out) {
     char *case_core;
     char *case_redir_suffix;
-    bool while_is_until;
-    bool for_implicit_words;
     int status;
 
-    if_cond = NULL;
-    if_then = NULL;
-    if_else = NULL;
-    if_redirs = NULL;
-    while_cond = NULL;
-    while_body = NULL;
-    while_redirs = NULL;
-    for_name = NULL;
-    for_words = NULL;
-    for_body = NULL;
-    for_redir_suffix = NULL;
     case_core = NULL;
     case_redir_suffix = NULL;
-    while_is_until = false;
-    for_implicit_words = false;
-
-    if (parse_simple_if(trimmed, &if_cond, &if_then, &if_else, &if_redirs)) {
-        struct redir_vec if_redir_vec;
-        struct fd_backup_vec if_backups;
-        bool if_redir_applied;
-        bool saved_errexit;
-
-        if_redir_vec.items = NULL;
-        if_redir_vec.len = 0;
-        if_backups.items = NULL;
-        if_backups.len = 0;
-        if_redir_applied = false;
-
-        if (if_redirs != NULL && if_redirs[0] != '\0') {
-            if (parse_redirections_from_source(if_redirs, state, &if_redir_vec) !=
-                0) {
-                status = 2;
-                goto if_done;
-            }
-            if (apply_redirections(&if_redir_vec, true, state->noclobber,
-                                   &if_backups) != 0) {
-                fd_backup_restore(&if_backups);
-                status = 1;
-                goto if_done;
-            }
-            if_redir_applied = true;
-        }
-
-        /* POSIX: -e does not trigger on commands used as if-conditions. */
-        saved_errexit = state->errexit;
-        state->errexit = false;
-        status = execute_program_text(state, if_cond);
-        state->errexit = saved_errexit;
-        if (!state->should_exit && !state->return_requested &&
-            !has_pending_flow_control(state)) {
-            if (status == 0) {
-                status = execute_program_text(state, if_then);
-            } else if (if_else != NULL) {
-                status = execute_program_text(state, if_else);
-            } else {
-                status = 0;
-            }
-        }
-if_done:
-        if (if_redir_applied) {
-            fd_backup_restore(&if_backups);
-        }
-        redir_vec_free(&if_redir_vec);
-        arena_maybe_free(if_redirs);
-        arena_maybe_free(if_cond);
-        arena_maybe_free(if_then);
-        arena_maybe_free(if_else);
-        arena_maybe_free(trimmed);
-        *status_out = status;
-        return true;
-    }
-
-    if (parse_simple_while(trimmed, &while_cond, &while_body, &while_is_until,
-                           &while_redirs)) {
-        struct redir_vec while_redir_vec;
-        struct fd_backup_vec while_backups;
-        bool while_redir_applied;
-
-        status = 0;
-        while_redir_vec.items = NULL;
-        while_redir_vec.len = 0;
-        while_backups.items = NULL;
-        while_backups.len = 0;
-        while_redir_applied = false;
-
-        if (while_redirs != NULL && while_redirs[0] != '\0') {
-            if (parse_redirections_from_source(while_redirs, state,
-                                               &while_redir_vec) != 0) {
-                status = 2;
-                goto while_done;
-            }
-            if (apply_redirections(&while_redir_vec, true, state->noclobber,
-                                   &while_backups) != 0) {
-                fd_backup_restore(&while_backups);
-                status = 1;
-                goto while_done;
-            }
-            while_redir_applied = true;
-        }
-
-        state->loop_depth++;
-        while (!state->should_exit) {
-            int cond_status;
-            bool saved_errexit;
-
-            /* POSIX: -e does not trigger on while/until condition commands. */
-            saved_errexit = state->errexit;
-            state->errexit = false;
-            cond_status = execute_program_text(state, while_cond);
-            state->errexit = saved_errexit;
-            if (state->should_exit || state->return_requested) {
-                break;
-            }
-            if ((!while_is_until && cond_status != 0) ||
-                (while_is_until && cond_status == 0)) {
-                break;
-            }
-            status = execute_program_text(state, while_body);
-            if (state->should_exit || state->return_requested) {
-                break;
-            }
-            if (state->break_levels > 0) {
-                state->break_levels--;
-                status = 0;
-                break;
-            }
-            if (state->continue_levels > 0) {
-                state->continue_levels--;
-                status = 0;
-                if (state->continue_levels > 0) {
-                    break;
-                }
-                continue;
-            }
-        }
-        state->loop_depth--;
-        if (while_redir_applied) {
-            fd_backup_restore(&while_backups);
-        }
-        redir_vec_free(&while_redir_vec);
-while_done:
-        arena_maybe_free(while_redirs);
-        arena_maybe_free(while_cond);
-        arena_maybe_free(while_body);
-        arena_maybe_free(trimmed);
-        *status_out = status;
-        return true;
-    }
-
-    if (parse_simple_for(trimmed, &for_name, &for_words, &for_body,
-                         &for_implicit_words, &for_redir_suffix)) {
-        struct token_vec for_lexed;
-        struct word_vec for_raw_words;
-        struct redir_vec for_redirs;
-        struct token_vec for_expanded;
-        struct token_vec for_in;
-        struct redir_vec for_loop_redirs;
-        struct fd_backup_vec for_backups;
-        bool for_redir_applied;
-        size_t i;
-
-        for_lexed.items = NULL;
-        for_lexed.len = 0;
-        for_raw_words.items = NULL;
-        for_raw_words.len = 0;
-        for_redirs.items = NULL;
-        for_redirs.len = 0;
-        for_expanded.items = NULL;
-        for_expanded.len = 0;
-        for_loop_redirs.items = NULL;
-        for_loop_redirs.len = 0;
-        for_backups.items = NULL;
-        for_backups.len = 0;
-        for_redir_applied = false;
-        status = 0;
-
-        if (for_redir_suffix != NULL && for_redir_suffix[0] != '\0') {
-            if (parse_redirections_from_source(for_redir_suffix, state,
-                                               &for_loop_redirs) != 0) {
-                status = 2;
-                goto for_done;
-            }
-            if (apply_redirections(&for_loop_redirs, true, state->noclobber,
-                                   &for_backups) != 0) {
-                fd_backup_restore(&for_backups);
-                status = 1;
-                goto for_done;
-            }
-            for_redir_applied = true;
-        }
-
-        if (for_implicit_words) {
-            for_expanded.items = arena_xmalloc(sizeof(*for_expanded.items) *
-                                               state->positional_count);
-            for_expanded.len = state->positional_count;
-            for (i = 0; i < state->positional_count; i++) {
-                for_expanded.items[i] = arena_xstrdup(state->positional_params[i]);
-            }
-        } else if (for_words[0] != '\0') {
-            if (lexer_split_words(for_words, &for_lexed) != 0) {
-                status = 2;
-                goto for_done;
-            }
-            if (collect_words_and_redirs(&for_lexed, &for_raw_words, &for_redirs) !=
-                0) {
-                status = 2;
-                goto for_done;
-            }
-            if (for_redirs.len != 0) {
-                posish_errorf("for: redirection in word list is not supported");
-                status = 2;
-                goto for_done;
-            }
-
-            for_in.items = for_raw_words.items;
-            for_in.len = for_raw_words.len;
-            if (expand_words(&for_in, &for_expanded, state, true) != 0) {
-                status = 2;
-                goto for_done;
-            }
-        }
-
-        state->loop_depth++;
-        for (i = 0; i < for_expanded.len && !state->should_exit; i++) {
-            if (vars_set_assignment(state, for_name, for_expanded.items[i], true) !=
-                0) {
-                status = 1;
-                if (!state->interactive) {
-                    state->should_exit = true;
-                    state->exit_status = status;
-                }
-                break;
-            }
-
-            status = execute_program_text(state, for_body);
-            if (state->should_exit || state->return_requested) {
-                break;
-            }
-            if (state->break_levels > 0) {
-                state->break_levels--;
-                status = 0;
-                break;
-            }
-            if (state->continue_levels > 0) {
-                state->continue_levels--;
-                status = 0;
-                if (state->continue_levels > 0) {
-                    break;
-                }
-            }
-        }
-        state->loop_depth--;
-        if (for_redir_applied) {
-            fd_backup_restore(&for_backups);
-        }
-
-for_done:
-        lexer_free_tokens(&for_lexed);
-        word_vec_free(&for_raw_words);
-        redir_vec_free(&for_redirs);
-        lexer_free_tokens(&for_expanded);
-        redir_vec_free(&for_loop_redirs);
-        arena_maybe_free(for_redir_suffix);
-        arena_maybe_free(for_name);
-        arena_maybe_free(for_words);
-        arena_maybe_free(for_body);
-        arena_maybe_free(trimmed);
-        *status_out = status;
-        return true;
-    }
-
     if (split_case_redirection_suffix(trimmed, &case_core, &case_redir_suffix)) {
         struct redir_vec case_redirs;
         struct fd_backup_vec case_backups;
@@ -3697,12 +3344,12 @@ case_done:
 
 static int run_legacy_atom_fallback(struct shell_state *state, char *trimmed,
                                     bool allow_builtin) {
+    char *fn_name;
+    char *fn_body;
     char *inner;
     char *subshell_redirs;
     char *brace_inner;
     char *brace_redirs;
-    char *fn_name;
-    char *fn_body;
     int status;
 
     fn_name = NULL;
@@ -3720,7 +3367,7 @@ static int run_legacy_atom_fallback(struct shell_state *state, char *trimmed,
         return status;
     }
 
-    if (run_legacy_control_command(state, trimmed, &status)) {
+    if (run_legacy_case_command(state, trimmed, &status)) {
         return status;
     }
 
