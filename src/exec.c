@@ -57,6 +57,7 @@ struct positional_backup {
 };
 
 typedef int (*group_body_runner)(struct shell_state *state, const char *body);
+typedef int (*child_body_runner)(struct shell_state *state, const void *payload);
 
 static int execute_program_text(struct shell_state *state, const char *source);
 static int execute_program_text_internal(struct shell_state *state,
@@ -110,6 +111,9 @@ static int run_group_with_redirections(struct shell_state *state,
                                        const char *body,
                                        const char *redir_suffix,
                                        group_body_runner run_body);
+static void exec_child_payload(struct shell_state *parent_state,
+                               child_body_runner run_body,
+                               const void *payload);
 
 static void exit_shell_child_status(int status) {
     int signo;
@@ -3361,7 +3365,23 @@ static int execute_command_atom(struct shell_state *state, const char *source,
     return run_legacy_atom_fallback(state, trimmed, allow_builtin);
 }
 
-static void exec_child_command(struct shell_state *parent_state, const char *source) {
+static int run_command_child_body(struct shell_state *state, const void *payload) {
+    const char *source;
+
+    source = payload;
+    return execute_command_atom(state, source, true);
+}
+
+static int run_ast_child_body(struct shell_state *state, const void *payload) {
+    const struct ast_node *node;
+
+    node = payload;
+    return execute_ast_node(state, node, true);
+}
+
+static void exec_child_payload(struct shell_state *parent_state,
+                               child_body_runner run_body,
+                               const void *payload) {
     struct shell_state local_state;
     struct arena_mark child_mark;
     int status;
@@ -3379,7 +3399,7 @@ static void exec_child_command(struct shell_state *parent_state, const char *sou
     local_state.running_exit_trap = false;
     local_state.main_context = false;
 
-    status = execute_command_atom(&local_state, source, true);
+    status = run_body(&local_state, payload);
     arena_mark_rewind(&local_state.arena_cmd, &child_mark);
     if (local_state.should_exit) {
         status = local_state.exit_status;
@@ -3388,32 +3408,13 @@ static void exec_child_command(struct shell_state *parent_state, const char *sou
     _exit(status);
 }
 
+static void exec_child_command(struct shell_state *parent_state, const char *source) {
+    exec_child_payload(parent_state, run_command_child_body, source);
+}
+
 static void exec_child_ast_node(struct shell_state *parent_state,
                                 const struct ast_node *node) {
-    struct shell_state local_state;
-    struct arena_mark child_mark;
-    int status;
-
-    local_state = *parent_state;
-    arena_init(&local_state.arena_perm, parent_state->arena_perm.default_block_size);
-    arena_init(&local_state.arena_script,
-               parent_state->arena_script.default_block_size);
-    arena_init(&local_state.arena_cmd, parent_state->arena_cmd.default_block_size);
-    arena_set_current(&local_state.arena_cmd);
-    arena_mark_take(&local_state.arena_cmd, &child_mark);
-    local_state.should_exit = false;
-    local_state.exit_status = 0;
-    local_state.running_signal_trap = false;
-    local_state.running_exit_trap = false;
-    local_state.main_context = false;
-
-    status = execute_ast_node(&local_state, node, true);
-    arena_mark_rewind(&local_state.arena_cmd, &child_mark);
-    if (local_state.should_exit) {
-        status = local_state.exit_status;
-    }
-    fflush(NULL);
-    _exit(status);
+    exec_child_payload(parent_state, run_ast_child_body, node);
 }
 
 static int run_async_ast_node(struct shell_state *state,
