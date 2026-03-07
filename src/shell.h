@@ -49,6 +49,7 @@ struct shell_state {
     bool in_async_context;
     bool main_context;
     bool in_command_builtin;
+    bool suppress_ast_aliases;
     pid_t last_async_pid;
     int break_levels;
     int continue_levels;

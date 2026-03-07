@@ -1563,6 +1563,7 @@ void shell_state_init(struct shell_state *state) {
     state->in_async_context = false;
     state->main_context = true;
     state->in_command_builtin = false;
+    state->suppress_ast_aliases = false;
     state->last_async_pid = -1;
     state->break_levels = 0;
     state->continue_levels = 0;

@@ -333,6 +333,10 @@ int lexer_split_words_at(const char *source_name, const char *line,
                 p++;
                 continue;
             }
+            if (ch == '\\' && quote != '\'' && p[1] == '\n') {
+                p += 2;
+                continue;
+            }
             if (ch == '\\' && quote != '\'') {
                 if (p[1] == '\0') {
                     report_lexer_error(source_name, line, base_line, p,
