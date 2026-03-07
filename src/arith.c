@@ -350,11 +350,17 @@ static struct arith_value make_value(long value) {
   return v;
 }
 
-static char *slice_dup(const char *src, size_t start, size_t len) {
+static const char *copy_identifier_name(const char *src, size_t start,
+                                        size_t len, char stack_buf[64]) {
   char *copy;
 
-  copy = arena_xmalloc(len + 1);
+  if (len + 1 <= 64) {
+    memcpy(stack_buf, src + start, len);
+    stack_buf[len] = '\0';
+    return stack_buf;
+  }
 
+  copy = arena_xmalloc(len + 1);
   memcpy(copy, src + start, len);
   copy[len] = '\0';
   return copy;
@@ -391,11 +397,12 @@ static bool follows_assignment_operator(const struct arith_parser *p,
 
 static long read_identifier_value(struct arith_parser *p, size_t start,
                                   size_t len, bool *ok) {
-  char *name;
+  char name_buf[64];
+  const char *name;
   const char *value;
   long result;
 
-  name = slice_dup(p->src, start, len);
+  name = copy_identifier_name(p->src, start, len, name_buf);
 
   value = getenv(name);
   if (value == NULL || value[0] == '\0') {
@@ -423,10 +430,11 @@ static long read_identifier_value(struct arith_parser *p, size_t start,
 
 static int assign_identifier_value(struct arith_parser *p, size_t start,
                                    size_t len, long value) {
-  char *name;
+  char name_buf[64];
+  const char *name;
   char text[64];
 
-  name = slice_dup(p->src, start, len);
+  name = copy_identifier_name(p->src, start, len, name_buf);
 
   snprintf(text, sizeof(text), "%ld", value);
   if (vars_set_assignment(p->state, name, text, true) != 0) {

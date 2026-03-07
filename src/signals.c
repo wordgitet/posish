@@ -11,10 +11,24 @@
 static bool g_inherited_ignored[NSIG];
 static bool g_policy_ignored[NSIG];
 static volatile sig_atomic_t g_pending[NSIG];
+static volatile sig_atomic_t g_any_pending;
+
+static void refresh_any_pending(void) {
+    int signo;
+
+    for (signo = 1; signo < NSIG; signo++) {
+        if (g_pending[signo] != 0) {
+            g_any_pending = 1;
+            return;
+        }
+    }
+    g_any_pending = 0;
+}
 
 static void trap_handler(int signo) {
     if (signo > 0 && signo < NSIG) {
         g_pending[signo] = 1;
+        g_any_pending = 1;
     }
 }
 
@@ -47,6 +61,7 @@ void signals_init(void) {
             g_inherited_ignored[signo] = true;
         }
     }
+    g_any_pending = 0;
 }
 
 void signals_apply_policy(bool interactive, bool monitor_mode) {
@@ -118,6 +133,7 @@ int signals_set_default(int signo) {
         return -1;
     }
     g_pending[signo] = 0;
+    refresh_any_pending();
     rc = set_signal_action(signo, SIG_DFL);
     trace_log(POSISH_TRACE_SIGNALS, "set default signal=%d rc=%d", signo, rc);
     return rc;
@@ -130,6 +146,7 @@ int signals_set_ignored(int signo) {
         return -1;
     }
     g_pending[signo] = 0;
+    refresh_any_pending();
     rc = set_signal_action(signo, SIG_IGN);
     trace_log(POSISH_TRACE_SIGNALS, "set ignore signal=%d rc=%d", signo, rc);
     return rc;
@@ -142,6 +159,7 @@ int signals_set_trap(int signo) {
         return -1;
     }
     g_pending[signo] = 0;
+    refresh_any_pending();
     rc = set_signal_action(signo, trap_handler);
     trace_log(POSISH_TRACE_SIGNALS, "set trap handler signal=%d rc=%d", signo,
               rc);
@@ -149,14 +167,7 @@ int signals_set_trap(int signo) {
 }
 
 bool signals_have_pending(void) {
-    int signo;
-
-    for (signo = 1; signo < NSIG; signo++) {
-        if (g_pending[signo] != 0) {
-            return true;
-        }
-    }
-    return false;
+    return g_any_pending != 0;
 }
 
 int signals_take_next_pending(void) {
@@ -165,6 +176,7 @@ int signals_take_next_pending(void) {
     for (signo = 1; signo < NSIG; signo++) {
         if (g_pending[signo] != 0) {
             g_pending[signo] = 0;
+            refresh_any_pending();
             trace_log(POSISH_TRACE_SIGNALS, "take pending signal=%d", signo);
             return signo;
         }
@@ -175,6 +187,7 @@ int signals_take_next_pending(void) {
 void signals_clear_pending(int signo) {
     if (signo > 0 && signo < NSIG) {
         g_pending[signo] = 0;
+        refresh_any_pending();
         trace_log(POSISH_TRACE_SIGNALS, "clear pending signal=%d", signo);
     }
 }
