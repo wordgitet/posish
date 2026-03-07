@@ -40,11 +40,10 @@ static int set_initial_positional_params(struct shell_state *state, int argc,
 
     count = argc - start_index;
     state->positional_params =
-        arena_alloc_in(&state->arena_perm,
-                       sizeof(*state->positional_params) * (size_t)count);
+        arena_alloc_in(NULL, sizeof(*state->positional_params) * (size_t)count);
     for (i = 0; i < count; i++) {
         state->positional_params[i] =
-            arena_strdup_in(&state->arena_perm, argv[start_index + i]);
+            arena_strdup_in(NULL, argv[start_index + i]);
     }
     state->positional_count = (size_t)count;
     return 0;

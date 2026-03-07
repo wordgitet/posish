@@ -602,10 +602,10 @@ static void set_positional_parameters(struct shell_state *state, char *const arg
     }
 
     state->positional_params =
-        arena_alloc_in(&state->arena_perm, sizeof(*state->positional_params) * count);
+        arena_alloc_in(NULL, sizeof(*state->positional_params) * count);
     for (i = 0; i < count; i++) {
         state->positional_params[i] =
-            arena_strdup_in(&state->arena_perm, argv[start_index + i]);
+            arena_strdup_in(NULL, argv[start_index + i]);
     }
     state->positional_count = count;
 }

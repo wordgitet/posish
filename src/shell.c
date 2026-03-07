@@ -48,6 +48,7 @@ static int expand_startup_path(struct shell_state *state, const char *text,
 static char *home_startup_path(const char *leaf);
 static int shell_run_stream_named(struct shell_state *state, FILE *stream,
                                   bool interactive, const char *source_name);
+static void free_shell_positionals(struct shell_state *state);
 
 static size_t skip_backtick_subst(const char *buf, size_t i, size_t len) {
     i++;
@@ -1648,6 +1649,17 @@ void shell_state_init(struct shell_state *state) {
     state->shell_name = NULL;
 }
 
+static void free_shell_positionals(struct shell_state *state) {
+    size_t i;
+
+    for (i = 0; i < state->positional_count; i++) {
+        arena_maybe_free(state->positional_params[i]);
+    }
+    arena_maybe_free(state->positional_params);
+    state->positional_params = NULL;
+    state->positional_count = 0;
+}
+
 void shell_state_destroy(struct shell_state *state) {
     int signo;
 
@@ -1662,8 +1674,7 @@ void shell_state_destroy(struct shell_state *state) {
     state->function_count = 0;
     state->unexported_names = NULL;
     state->unexported_count = 0;
-    state->positional_params = NULL;
-    state->positional_count = 0;
+    free_shell_positionals(state);
     state->login_shell = false;
     state->current_source_name = NULL;
     state->current_source_base_line = 1;

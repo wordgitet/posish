@@ -148,6 +148,17 @@ int signals_set_trap(int signo) {
     return rc;
 }
 
+bool signals_have_pending(void) {
+    int signo;
+
+    for (signo = 1; signo < NSIG; signo++) {
+        if (g_pending[signo] != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 int signals_take_next_pending(void) {
     int signo;
 

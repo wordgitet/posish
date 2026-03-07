@@ -5,6 +5,16 @@
 #include "ast_exec.h"
 
 #include "redir.h"
+#include "signals.h"
+
+static bool ast_exec_maybe_run_pending_traps(struct shell_state *state) {
+    if (!signals_have_pending()) {
+        return false;
+    }
+
+    shell_run_pending_traps(state);
+    return state->should_exit || state->return_requested;
+}
 
 int ast_exec_run_group_with_redirections(struct shell_state *state,
                                          const char *body,
@@ -130,10 +140,17 @@ int ast_exec_run_loop(struct shell_state *state, const struct ast_node *node,
         int cond_status;
         bool saved_errexit;
 
+        if (ast_exec_maybe_run_pending_traps(state)) {
+            break;
+        }
+
         saved_errexit = state->errexit;
         state->errexit = false;
         cond_status = run_node(state, node->data.loop.cond_node, true);
         state->errexit = saved_errexit;
+        if (ast_exec_maybe_run_pending_traps(state)) {
+            break;
+        }
         if (state->should_exit || state->return_requested) {
             break;
         }
@@ -142,7 +159,13 @@ int ast_exec_run_loop(struct shell_state *state, const struct ast_node *node,
         }
         status = run_node(state, node->data.loop.body_node, true);
         maybe_trigger_errexit(state, status);
+        if (ast_exec_maybe_run_pending_traps(state)) {
+            break;
+        }
         if (state->should_exit || state->return_requested) {
+            break;
+        }
+        if (ast_exec_maybe_run_pending_traps(state)) {
             break;
         }
         if (state->break_levels > 0) {

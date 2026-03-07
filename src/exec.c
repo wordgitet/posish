@@ -849,11 +849,11 @@ static void positional_push(struct shell_state *state, char *const argv[], size_
     }
 
     state->positional_params =
-        arena_alloc_in(&state->arena_script,
+        arena_alloc_in(NULL,
                        sizeof(*state->positional_params) * state->positional_count);
     for (i = 0; i < state->positional_count; i++) {
         state->positional_params[i] =
-            arena_strdup_in(&state->arena_script, argv[i + 1]);
+            arena_strdup_in(NULL, argv[i + 1]);
     }
 }
 

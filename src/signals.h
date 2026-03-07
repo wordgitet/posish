@@ -14,6 +14,7 @@ bool signals_policy_ignored(int signo);
 int signals_set_default(int signo);
 int signals_set_ignored(int signo);
 int signals_set_trap(int signo);
+bool signals_have_pending(void);
 int signals_take_next_pending(void);
 void signals_clear_pending(int signo);
 
