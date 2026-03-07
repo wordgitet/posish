@@ -10,6 +10,7 @@
 
 enum redir_kind {
     REDIR_OPEN_READ,
+    REDIR_HEREDOC,
     REDIR_OPEN_RDWR,
     REDIR_OPEN_WRITE,
     REDIR_OPEN_APPEND,
@@ -23,6 +24,10 @@ struct redir_spec {
     int target_fd;
     int source_fd;
     bool force_clobber;
+    bool strip_tabs;
+    bool expand_body;
+    char *delimiter;
+    char *body_raw;
     char *path;
 };
 
@@ -51,9 +56,14 @@ void fd_backup_restore(struct fd_backup_vec *backups);
 int parse_dup_operand(const char *text, struct redir_spec *spec);
 int parse_redir_token(const char *token, struct redir_spec *spec, bool *needs_word);
 
-int apply_one_redirection(const struct redir_spec *redir, bool noclobber);
-int apply_redirections(const struct redir_vec *redirs, bool save_restore,
-                       bool noclobber,
+struct shell_state;
+
+int apply_one_redirection(struct shell_state *state,
+                          const struct redir_spec *redir, bool noclobber,
+                          bool isolate_heredoc_side_effects);
+int apply_redirections(struct shell_state *state, const struct redir_vec *redirs,
+                       bool save_restore, bool noclobber,
+                       bool isolate_heredoc_side_effects,
                        struct fd_backup_vec *backups);
 
 #endif

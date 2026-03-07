@@ -6,6 +6,7 @@
 #define POSISH_SHELL_H
 
 #include "arena.h"
+#include "redir.h"
 
 #include <signal.h>
 #include <stdbool.h>
@@ -15,6 +16,7 @@
 struct shell_function {
     char *name;
     char *body;
+    struct redir_vec redirs;
 };
 
 struct shell_state {

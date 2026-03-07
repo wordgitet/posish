@@ -92,7 +92,7 @@ struct ast_node {
         struct {
             char *body;
             struct ast_node *body_node;
-            char *redir_suffix;
+            struct redir_vec redirs;
         } group;
         struct {
             char *cond;
@@ -101,33 +101,34 @@ struct ast_node {
             struct ast_node *then_node;
             char *else_part;
             struct ast_node *else_node;
-            char *redir_suffix;
+            struct redir_vec redirs;
         } if_cmd;
         struct {
             char *cond;
             struct ast_node *cond_node;
             char *body;
             struct ast_node *body_node;
-            char *redir_suffix;
+            struct redir_vec redirs;
         } loop;
         struct {
             char *name;
             char *words;
             char *body;
             struct ast_node *body_node;
-            char *redir_suffix;
+            struct redir_vec redirs;
             bool implicit_words;
         } for_cmd;
         struct {
             char *name;
             char *body;
             struct ast_node *body_node;
+            struct redir_vec redirs;
         } funcdef;
         struct {
             char *word_expr;
             struct ast_case_clause *clauses;
             size_t clause_count;
-            char *redir_suffix;
+            struct redir_vec redirs;
         } case_cmd;
     } data;
 };

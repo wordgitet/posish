@@ -21,6 +21,14 @@ struct parser_ctx {
     size_t base_line;
     const char *source;
     size_t len;
+    struct pending_heredoc_ref *pending_heredocs;
+    size_t pending_heredoc_count;
+    size_t heredoc_resume_pos;
+};
+
+struct pending_heredoc_ref {
+    struct redir_vec *owner;
+    size_t index;
 };
 
 static struct ast_node *parse_sequence(struct parser_ctx *ctx, size_t start,
@@ -34,7 +42,6 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
 static int parse_simple_parts(struct parser_ctx *ctx, const char *source,
                               struct ast_word_vec *raw_words,
                               struct redir_vec *redirs);
-static bool source_contains_heredoc_operator(const char *source);
 static bool parse_function_definition_text(const char *source, char **name_out,
                                            char **body_out);
 static size_t line_at_offset(const struct parser_ctx *ctx, size_t offset);
@@ -49,6 +56,15 @@ static bool parse_case_structure(struct parser_ctx *ctx, const char *source,
                                  struct ast_case_clause **clauses_out,
                                  size_t *clause_count_out, int *err_out);
 static char *dup_trimmed_slice(const char *src, size_t start, size_t end);
+static int parse_redirection_suffix_parts(struct parser_ctx *ctx,
+                                          const char *source,
+                                          struct redir_vec *redirs);
+static int pending_heredoc_push(struct parser_ctx *ctx,
+                                struct redir_vec *owner, size_t index);
+static int consume_pending_heredocs(struct parser_ctx *ctx, size_t start_pos,
+                                    size_t *new_pos_out);
+static bool line_tail_is_blank_or_comment(const char *source, size_t pos,
+                                          size_t end, size_t *newline_out);
 
 static bool keyword_boundary(char ch) {
     return ch == '\0' || isspace((unsigned char)ch) || ch == ';' ||
@@ -531,6 +547,115 @@ static void ast_word_vec_push(struct ast_word_vec *words, char *word) {
     words->items[words->len++] = word;
 }
 
+static int pending_heredoc_push(struct parser_ctx *ctx,
+                                struct redir_vec *owner, size_t index) {
+    ctx->pending_heredocs =
+        arena_xrealloc(ctx->pending_heredocs,
+                       sizeof(*ctx->pending_heredocs) *
+                           (ctx->pending_heredoc_count + 1));
+    ctx->pending_heredocs[ctx->pending_heredoc_count].owner = owner;
+    ctx->pending_heredocs[ctx->pending_heredoc_count].index = index;
+    ctx->pending_heredoc_count++;
+    return 0;
+}
+
+static void append_char(char **buf, size_t *len, size_t *cap, char ch) {
+    if (*len + 2 > *cap) {
+        size_t new_cap;
+
+        new_cap = *cap == 0 ? 32 : *cap;
+        while (*len + 2 > new_cap) {
+            new_cap *= 2;
+        }
+        *buf = arena_xrealloc(*buf, new_cap);
+        *cap = new_cap;
+    }
+
+    (*buf)[(*len)++] = ch;
+    (*buf)[*len] = '\0';
+}
+
+static int quote_remove_word(const char *word, char **out_word) {
+    size_t i;
+    char quote;
+    char *buf;
+    size_t len;
+    size_t cap;
+
+    i = 0;
+    quote = '\0';
+    buf = NULL;
+    len = 0;
+    cap = 0;
+
+    while (word[i] != '\0') {
+        char ch;
+
+        ch = word[i];
+        if (quote == '\0') {
+            if (ch == '\'') {
+                quote = '\'';
+                i++;
+                continue;
+            }
+            if (ch == '"') {
+                quote = '"';
+                i++;
+                continue;
+            }
+            if (ch == '\\' && word[i + 1] != '\0') {
+                i++;
+                ch = word[i];
+            }
+            append_char(&buf, &len, &cap, ch);
+            i++;
+            continue;
+        }
+
+        if (quote == '\'' && ch == '\'') {
+            quote = '\0';
+            i++;
+            continue;
+        }
+        if (quote == '"' && ch == '"') {
+            quote = '\0';
+            i++;
+            continue;
+        }
+        if (quote == '"' && ch == '\\' && word[i + 1] != '\0' &&
+            (word[i + 1] == '$' || word[i + 1] == '`' || word[i + 1] == '"' ||
+             word[i + 1] == '\\' || word[i + 1] == '\n')) {
+            i++;
+            ch = word[i];
+        }
+
+        append_char(&buf, &len, &cap, ch);
+        i++;
+    }
+
+    if (quote != '\0') {
+        posish_errorf("unterminated heredoc delimiter quote");
+        arena_maybe_free(buf);
+        return -1;
+    }
+
+    if (buf == NULL) {
+        buf = arena_xstrdup("");
+    }
+    *out_word = buf;
+    return 0;
+}
+
+static int init_heredoc_spec(struct redir_spec *spec, const char *raw_word) {
+    spec->expand_body = strpbrk(raw_word, "'\"\\") == NULL;
+    if (quote_remove_word(raw_word, &spec->delimiter) != 0) {
+        return -1;
+    }
+    spec->body_raw = NULL;
+    spec->path = NULL;
+    return 0;
+}
+
 static int find_redir_operator_pos(const char *token, size_t *pos_out) {
     size_t i;
     char quote;
@@ -580,7 +705,8 @@ static int find_redir_operator_pos(const char *token, size_t *pos_out) {
     return -1;
 }
 
-static int collect_words_and_redirs(const struct token_vec *lexed,
+static int collect_words_and_redirs(struct parser_ctx *ctx,
+                                    const struct token_vec *lexed,
                                     struct ast_word_vec *words,
                                     struct redir_vec *redirs) {
     size_t i;
@@ -636,7 +762,24 @@ static int collect_words_and_redirs(const struct token_vec *lexed,
             spec.path = arena_xstrdup(lexed->items[i]);
         }
 
+        if (spec.kind == REDIR_HEREDOC) {
+            if (spec.path == NULL || spec.path[0] == '\0') {
+                posish_errorf("missing heredoc delimiter");
+                return -1;
+            }
+            if (ctx == NULL) {
+                posish_errorf("internal error: heredoc outside parser context");
+                return -1;
+            }
+            if (init_heredoc_spec(&spec, spec.path) != 0) {
+                return -1;
+            }
+        }
+
         redir_vec_push(redirs, &spec);
+        if (spec.kind == REDIR_HEREDOC) {
+            pending_heredoc_push(ctx, redirs, redirs->len - 1);
+        }
     }
 
     return 0;
@@ -922,7 +1065,7 @@ static int parse_simple_parts(struct parser_ctx *ctx, const char *source,
     if (lexer_split_words_at(ctx->source_name, source, ctx->base_line, &lexed) != 0) {
         return -1;
     }
-    if (collect_words_and_redirs(&lexed, raw_words, redirs) != 0) {
+    if (collect_words_and_redirs(ctx, &lexed, raw_words, redirs) != 0) {
         lexer_free_tokens(&lexed);
         return -1;
     }
@@ -930,43 +1073,160 @@ static int parse_simple_parts(struct parser_ctx *ctx, const char *source,
     return 0;
 }
 
-static bool source_contains_heredoc_operator(const char *source) {
-    size_t i;
-    char quote;
+static int parse_redirection_suffix_parts(struct parser_ctx *ctx,
+                                          const char *source,
+                                          struct redir_vec *redirs) {
+    struct token_vec lexed;
+    struct ast_word_vec words;
 
-    quote = '\0';
-    for (i = 0; source[i] != '\0'; i++) {
-        char ch;
+    redirs->items = NULL;
+    redirs->len = 0;
+    if (source == NULL || source[0] == '\0') {
+        return 0;
+    }
 
-        ch = source[i];
-        if (quote == '\0') {
-            if (ch == '\\' && source[i + 1] != '\0') {
-                i++;
-                continue;
+    lexed.items = NULL;
+    lexed.len = 0;
+    words.items = NULL;
+    words.len = 0;
+    if (lexer_split_words_at(ctx->source_name, source, ctx->base_line, &lexed) !=
+        0) {
+        return -1;
+    }
+    if (collect_words_and_redirs(ctx, &lexed, &words, redirs) != 0) {
+        lexer_free_tokens(&lexed);
+        return -1;
+    }
+    lexer_free_tokens(&lexed);
+    if (words.len != 0) {
+        posish_error_idf(POSERR_UNSUPPORTED_TOKENS_AFTER_GROUP);
+        return -1;
+    }
+    return 0;
+}
+
+static int append_slice(char **buf, size_t *len, size_t *cap, const char *src,
+                        size_t start, size_t end) {
+    size_t n;
+
+    n = end - start;
+    if (*len + n + 1 > *cap) {
+        size_t new_cap;
+
+        new_cap = *cap == 0 ? 64 : *cap;
+        while (*len + n + 1 > new_cap) {
+            new_cap *= 2;
+        }
+        *buf = arena_xrealloc(*buf, new_cap);
+        *cap = new_cap;
+    }
+
+    memcpy(*buf + *len, src + start, n);
+    *len += n;
+    (*buf)[*len] = '\0';
+    return 0;
+}
+
+static int consume_pending_heredocs(struct parser_ctx *ctx, size_t start_pos,
+                                    size_t *new_pos_out) {
+    size_t pos;
+    size_t idx;
+
+    pos = start_pos;
+    for (idx = 0; idx < ctx->pending_heredoc_count; idx++) {
+        struct pending_heredoc_ref *ref;
+        struct redir_spec *spec;
+        char *body;
+        size_t body_len;
+        size_t body_cap;
+
+        ref = &ctx->pending_heredocs[idx];
+        spec = &ref->owner->items[ref->index];
+        body = NULL;
+        body_len = 0;
+        body_cap = 0;
+
+        for (;;) {
+            size_t line_start;
+            size_t line_end;
+            size_t cmp_start;
+            size_t delim_len;
+
+            if (ctx->source[pos] == '\0') {
+                posish_errorf("unterminated here-document");
+                return -1;
             }
-            if (ch == '\'' || ch == '"') {
-                quote = ch;
-                continue;
+
+            line_start = pos;
+            while (ctx->source[pos] != '\0' && ctx->source[pos] != '\n') {
+                pos++;
             }
-            if (ch == '<' && source[i + 1] == '<') {
-                return true;
+            line_end = pos;
+
+            cmp_start = line_start;
+            if (spec->strip_tabs) {
+                while (cmp_start < line_end && ctx->source[cmp_start] == '\t') {
+                    cmp_start++;
+                }
+            }
+
+            delim_len = strlen(spec->delimiter);
+            if (line_end - cmp_start == delim_len &&
+                memcmp(ctx->source + cmp_start, spec->delimiter, delim_len) == 0) {
+                if (ctx->source[pos] == '\n') {
+                    pos++;
+                }
+                break;
+            }
+
+            if (spec->strip_tabs) {
+                while (line_start < line_end && ctx->source[line_start] == '\t') {
+                    line_start++;
+                }
+            }
+            append_slice(&body, &body_len, &body_cap, ctx->source, line_start,
+                         line_end);
+            if (ctx->source[pos] == '\n') {
+                append_slice(&body, &body_len, &body_cap, "\n", 0, 1);
+                pos++;
+            } else {
+                posish_errorf("unterminated here-document");
+                arena_maybe_free(body);
+                return -1;
+            }
+        }
+
+        if (body == NULL) {
+            body = arena_xstrdup("");
+        }
+        spec->body_raw = body;
+    }
+
+    ctx->pending_heredoc_count = 0;
+    *new_pos_out = pos;
+    return 0;
+}
+
+static bool line_tail_is_blank_or_comment(const char *source, size_t pos,
+                                          size_t end, size_t *newline_out) {
+    while (pos < end) {
+        if (source[pos] == '\n') {
+            *newline_out = pos;
+            return true;
+        }
+        if (source[pos] == '#') {
+            while (pos < end && source[pos] != '\n') {
+                pos++;
             }
             continue;
         }
-
-        if (quote == '\'' && ch == '\'') {
-            quote = '\0';
-        } else if (quote == '"') {
-            if (ch == '\\' && source[i + 1] != '\0') {
-                i++;
-                continue;
-            }
-            if (ch == '"') {
-                quote = '\0';
-            }
+        if (source[pos] == ' ' || source[pos] == '\t' || source[pos] == '\r' ||
+            source[pos] == '\f' || source[pos] == '\v') {
+            pos++;
+            continue;
         }
+        return false;
     }
-
     return false;
 }
 
@@ -1344,6 +1604,7 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
     char *trimmed;
     char *comment_stripped;
     char *syntax_source;
+    char *body_core;
     char *cond;
     char *then_part;
     char *else_part;
@@ -1384,6 +1645,7 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
         return node;
     }
 
+    body_core = NULL;
     cond = NULL;
     then_part = NULL;
     else_part = NULL;
@@ -1401,10 +1663,25 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
 
     if (parse_function_definition_text(syntax_source, &name, &fn_body)) {
         node = ast_new_node(ctx, AST_NODE_FUNCTION_DEF, start, end);
+        body_core = fn_body;
         node->data.funcdef.name = name;
-        node->data.funcdef.body = fn_body;
+        node->data.funcdef.redirs.items = NULL;
+        node->data.funcdef.redirs.len = 0;
+        if (unwrap_subshell_group(fn_body, &inner_rel_start, &inner_rel_end,
+                                  &redir_rel_start) ||
+            unwrap_brace_group(fn_body, &inner_rel_start, &inner_rel_end,
+                               &redir_rel_start)) {
+            body_core = dup_trimmed_slice(fn_body, 0, redir_rel_start);
+            if (parse_redirection_suffix_parts(ctx, fn_body + redir_rel_start,
+                                               &node->data.funcdef.redirs) !=
+                0) {
+                *err_out = -1;
+                return NULL;
+            }
+        }
+        node->data.funcdef.body = body_core;
         node->data.funcdef.body_node =
-            parse_embedded_program_root(ctx, fn_body, trim_start, err_out);
+            parse_embedded_program_root(ctx, body_core, trim_start, err_out);
         if (*err_out != 0) {
             return NULL;
         }
@@ -1432,7 +1709,11 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
                 return NULL;
             }
         }
-        node->data.if_cmd.redir_suffix = redir_suffix;
+        if (parse_redirection_suffix_parts(ctx, redir_suffix,
+                                           &node->data.if_cmd.redirs) != 0) {
+            *err_out = -1;
+            return NULL;
+        }
     } else if (parse_simple_while(syntax_source, &cond, &body, &is_until,
                                   &redir_suffix)) {
         node = ast_new_node(ctx, is_until ? AST_NODE_UNTIL : AST_NODE_WHILE,
@@ -1449,7 +1730,11 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
         if (*err_out != 0) {
             return NULL;
         }
-        node->data.loop.redir_suffix = redir_suffix;
+        if (parse_redirection_suffix_parts(ctx, redir_suffix,
+                                           &node->data.loop.redirs) != 0) {
+            *err_out = -1;
+            return NULL;
+        }
     } else if (parse_simple_for(syntax_source, &name, &words, &body,
                                 &implicit_words, &redir_suffix)) {
         node = ast_new_node(ctx, AST_NODE_FOR, start, end);
@@ -1461,11 +1746,19 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
         if (*err_out != 0) {
             return NULL;
         }
-        node->data.for_cmd.redir_suffix = redir_suffix;
+        if (parse_redirection_suffix_parts(ctx, redir_suffix,
+                                           &node->data.for_cmd.redirs) != 0) {
+            *err_out = -1;
+            return NULL;
+        }
         node->data.for_cmd.implicit_words = implicit_words;
     } else if (split_case_redirection_suffix(syntax_source, &core, &redir_suffix)) {
         node = ast_new_node(ctx, AST_NODE_CASE, start, end);
-        node->data.case_cmd.redir_suffix = redir_suffix;
+        if (parse_redirection_suffix_parts(ctx, redir_suffix,
+                                           &node->data.case_cmd.redirs) != 0) {
+            *err_out = -1;
+            return NULL;
+        }
         if (!parse_case_structure(ctx, core, trim_start,
                                   &node->data.case_cmd.word_expr,
                                   &node->data.case_cmd.clauses,
@@ -1480,7 +1773,8 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
     } else if (syntax_source[0] != '\0' && strncmp(syntax_source, "case", 4) == 0 &&
                keyword_boundary(syntax_source[4])) {
         node = ast_new_node(ctx, AST_NODE_CASE, start, end);
-        node->data.case_cmd.redir_suffix = arena_xstrdup("");
+        node->data.case_cmd.redirs.items = NULL;
+        node->data.case_cmd.redirs.len = 0;
         if (!parse_case_structure(ctx, syntax_source, trim_start,
                                   &node->data.case_cmd.word_expr,
                                   &node->data.case_cmd.clauses,
@@ -1496,12 +1790,16 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
         node = ast_new_node(ctx, AST_NODE_SUBSHELL, start, end);
         node->data.group.body = dup_trimmed_slice(syntax_source, inner_rel_start,
                                                   inner_rel_end);
-        node->data.group.redir_suffix =
-            dup_trimmed_slice(syntax_source, redir_rel_start, strlen(syntax_source));
         node->data.group.body_node = parse_sequence(
             ctx, trim_start + inner_rel_start, trim_start + inner_rel_end,
             err_out);
         if (*err_out != 0) {
+            return NULL;
+        }
+        if (parse_redirection_suffix_parts(
+                ctx, syntax_source + redir_rel_start, &node->data.group.redirs) !=
+            0) {
+            *err_out = -1;
             return NULL;
         }
     } else if (unwrap_brace_group(syntax_source, &inner_rel_start, &inner_rel_end,
@@ -1509,16 +1807,18 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
         node = ast_new_node(ctx, AST_NODE_BRACE_GROUP, start, end);
         node->data.group.body = dup_trimmed_slice(syntax_source, inner_rel_start,
                                                   inner_rel_end);
-        node->data.group.redir_suffix =
-            dup_trimmed_slice(syntax_source, redir_rel_start, strlen(syntax_source));
         node->data.group.body_node = parse_sequence(
             ctx, trim_start + inner_rel_start, trim_start + inner_rel_end,
             err_out);
         if (*err_out != 0) {
             return NULL;
         }
-    } else if (source_contains_heredoc_operator(syntax_source)) {
-        node = ast_new_node(ctx, AST_NODE_LEGACY, start, end);
+        if (parse_redirection_suffix_parts(
+                ctx, syntax_source + redir_rel_start, &node->data.group.redirs) !=
+            0) {
+            *err_out = -1;
+            return NULL;
+        }
     } else {
         node = ast_new_node(ctx, AST_NODE_SIMPLE_COMMAND, start, end);
         if (parse_simple_parts(ctx, syntax_source, &node->data.simple.raw_words,
@@ -1719,6 +2019,22 @@ static struct ast_node *parse_pipeline(struct parser_ctx *ctx, size_t start,
                 return NULL;
             }
             ast_node_vec_push(&items, &items_len, part);
+            if (i < end && ctx->pending_heredoc_count > 0 &&
+                ctx->source[i] == '|' && ctx->source[i + 1] != '|' &&
+                line_tail_is_blank_or_comment(ctx->source, i + 1, end, &part_end)) {
+                size_t new_pos;
+
+                if (consume_pending_heredocs(ctx, part_end + 1, &new_pos) != 0) {
+                    *err_out = -1;
+                    return NULL;
+                }
+                if (new_pos > ctx->heredoc_resume_pos) {
+                    ctx->heredoc_resume_pos = new_pos;
+                }
+                i = new_pos - 1;
+                part_start = new_pos;
+                continue;
+            }
             part_start = i + 1;
         }
     }
@@ -1918,10 +2234,29 @@ static struct ast_node *parse_andor(struct parser_ctx *ctx, size_t start,
             }
             ast_node_vec_push(&items, &items_len, part);
             if (i < end) {
+                size_t newline_pos;
+
                 ast_andor_op_push(&ops, &ops_len,
                                   ctx->source[i] == '&' ? AST_ANDOR_AND
                                                         : AST_ANDOR_OR);
                 i++;
+                if (ctx->pending_heredoc_count > 0 &&
+                    line_tail_is_blank_or_comment(ctx->source, i + 1, end,
+                                                  &newline_pos)) {
+                    size_t new_pos;
+
+                    if (consume_pending_heredocs(ctx, newline_pos + 1, &new_pos) !=
+                        0) {
+                        *err_out = -1;
+                        return NULL;
+                    }
+                    if (new_pos > ctx->heredoc_resume_pos) {
+                        ctx->heredoc_resume_pos = new_pos;
+                    }
+                    i = new_pos - 1;
+                    part_start = new_pos;
+                    continue;
+                }
             }
             part_start = i + 1;
         }
@@ -2085,12 +2420,17 @@ static struct ast_node *parse_sequence(struct parser_ctx *ctx, size_t start,
                 delim = true;
             } else if (paren_depth == 0 && brace_depth == 0 &&
                        if_depth == 0 && case_depth == 0 && loop_depth == 0 &&
-                       ch == '\n' &&
-                       !newline_continues_command(ctx->source, ctx->len, i)) {
+                       ch == '\n') {
                 char *head;
 
-                head = dup_slice(ctx->source, part_start, i);
-                delim = !looks_like_function_header_only(head);
+                head = dup_slice(ctx->source, part_start, i + 1);
+                /*
+                 * The parser owns heredoc collection via pending_heredocs.
+                 * Newline splitting here should only care about structural
+                 * incompleteness, not whether heredoc bodies are still pending.
+                 */
+                delim = shell_needs_more_input_text_mode(head, strlen(head), false) ==
+                        0;
                 arena_maybe_free(head);
             } else if (paren_depth == 0 && brace_depth == 0 &&
                        if_depth == 0 && case_depth == 0 && loop_depth == 0 &&
@@ -2113,6 +2453,7 @@ static struct ast_node *parse_sequence(struct parser_ctx *ctx, size_t start,
         if (delim) {
             struct ast_node *part;
             size_t part_end;
+            bool consume_heredocs_here;
 
             part_end = i;
             while (part_start < part_end &&
@@ -2136,12 +2477,36 @@ static struct ast_node *parse_sequence(struct parser_ctx *ctx, size_t start,
                     part = async_node;
                 }
                 ast_node_vec_push(&items, &items_len, part);
+                if (ctx->heredoc_resume_pos > i + 1) {
+                    part_start = ctx->heredoc_resume_pos;
+                    i = ctx->heredoc_resume_pos - 1;
+                    ctx->heredoc_resume_pos = 0;
+                    continue;
+                }
             } else if (async_delim) {
                 report_unexpected_token(ctx, i, "&");
                 *err_out = -1;
                 return NULL;
             }
-            part_start = i + 1;
+            consume_heredocs_here = (i == end) ||
+                                    (i < end && ctx->source[i] == '\n' &&
+                                     !newline_continues_command(ctx->source,
+                                                                ctx->len, i));
+            if (consume_heredocs_here && ctx->pending_heredoc_count > 0) {
+                size_t new_pos;
+
+                if (consume_pending_heredocs(ctx, i < end ? i + 1 : i,
+                                             &new_pos) != 0) {
+                    *err_out = -1;
+                    return NULL;
+                }
+                if (new_pos > i) {
+                    i = new_pos - 1;
+                }
+                part_start = new_pos;
+            } else {
+                part_start = i + 1;
+            }
         }
     }
 
@@ -2178,11 +2543,11 @@ int parse_program_at(const char *source_name, size_t base_line,
     ctx.len = strlen(program->source);
 
     err = 0;
-    if (source_contains_heredoc_operator(program->source)) {
-        program->root = ast_new_node(&ctx, AST_NODE_LEGACY, 0, ctx.len);
-    } else {
-        program->root = parse_sequence(&ctx, 0, ctx.len, &err);
-    }
+    ctx.pending_heredocs = NULL;
+    ctx.pending_heredoc_count = 0;
+    ctx.heredoc_resume_pos = 0;
+
+    program->root = parse_sequence(&ctx, 0, ctx.len, &err);
     if (err != 0) {
         return -1;
     }

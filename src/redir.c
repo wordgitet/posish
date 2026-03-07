@@ -6,6 +6,8 @@
 
 #include "arena.h"
 #include "error.h"
+#include "expand.h"
+#include "shell.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -14,7 +16,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <sys/syscall.h>
 #include <unistd.h>
+
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
 
 void redir_vec_free(struct redir_vec *redirs) {
     /*
@@ -85,6 +93,177 @@ void fd_backup_restore(struct fd_backup_vec *backups) {
     backups->len = 0;
 }
 
+static int write_all(int fd, const char *buf, size_t len) {
+    while (len > 0) {
+        ssize_t nwritten;
+
+        nwritten = write(fd, buf, len);
+        if (nwritten < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if (nwritten == 0) {
+            errno = EIO;
+            return -1;
+        }
+        buf += (size_t)nwritten;
+        len -= (size_t)nwritten;
+    }
+    return 0;
+}
+
+static int expand_heredoc_text_isolated(const char *input,
+                                        struct shell_state *state,
+                                        char **out) {
+    int pipefd[2];
+    pid_t pid;
+    char *buf;
+    size_t len;
+    size_t cap;
+    int status;
+
+    if (pipe(pipefd) != 0) {
+        perror("pipe");
+        return -1;
+    }
+
+    pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+
+    if (pid == 0) {
+        struct shell_state local_state;
+        char *expanded;
+
+        close(pipefd[0]);
+        local_state = *state;
+        arena_init(&local_state.arena_perm, state->arena_perm.default_block_size);
+        arena_init(&local_state.arena_script,
+                   state->arena_script.default_block_size);
+        arena_init(&local_state.arena_cmd, state->arena_cmd.default_block_size);
+        arena_set_current(&local_state.arena_perm);
+        if (expand_heredoc_text(input, &local_state, &expanded) != 0) {
+            _exit(1);
+        }
+        if (write_all(pipefd[1], expanded, strlen(expanded)) != 0) {
+            _exit(1);
+        }
+        close(pipefd[1]);
+        _exit(0);
+    }
+
+    close(pipefd[1]);
+    buf = arena_xmalloc(64);
+    len = 0;
+    cap = 64;
+    for (;;) {
+        ssize_t nread;
+
+        if (len + 64 > cap) {
+            cap *= 2;
+            buf = arena_xrealloc(buf, cap);
+        }
+
+        nread = read(pipefd[0], buf + len, cap - len - 1);
+        if (nread < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("read");
+            close(pipefd[0]);
+            return -1;
+        }
+        if (nread == 0) {
+            break;
+        }
+        len += (size_t)nread;
+    }
+    close(pipefd[0]);
+    buf[len] = '\0';
+
+    for (;;) {
+        if (waitpid(pid, &status, 0) < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("waitpid");
+            return -1;
+        }
+        break;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        return -1;
+    }
+
+    *out = buf;
+    return 0;
+}
+
+static int create_heredoc_fd(void) {
+#ifdef SYS_memfd_create
+    int fd;
+
+    fd = (int)syscall(SYS_memfd_create, "posish-heredoc", MFD_CLOEXEC);
+    if (fd >= 0) {
+        return fd;
+    }
+    if (errno != ENOSYS) {
+        return -1;
+    }
+#endif
+    {
+        char template_path[] = "/tmp/posish-heredoc-XXXXXX";
+        int fd;
+
+        fd = mkstemp(template_path);
+        if (fd < 0) {
+            return -1;
+        }
+        unlink(template_path);
+        (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+        return fd;
+    }
+}
+
+static int materialize_heredoc_fd(struct shell_state *state,
+                                  const struct redir_spec *redir,
+                                  bool isolate_heredoc_side_effects,
+                                  int *fd_out) {
+    char *expanded;
+    const char *text;
+    int fd;
+
+    expanded = NULL;
+    text = redir->body_raw != NULL ? redir->body_raw : "";
+    if (redir->expand_body) {
+        if ((isolate_heredoc_side_effects
+                 ? expand_heredoc_text_isolated(text, state, &expanded)
+                 : expand_heredoc_text(text, state, &expanded)) != 0) {
+            return -1;
+        }
+        text = expanded;
+    }
+    fd = create_heredoc_fd();
+    if (fd < 0) {
+        perror("heredoc fd");
+        return -1;
+    }
+    if (write_all(fd, text, strlen(text)) != 0 || lseek(fd, 0, SEEK_SET) < 0) {
+        perror("heredoc");
+        close(fd);
+        return -1;
+    }
+
+    *fd_out = fd;
+    return 0;
+}
+
 static int parse_fd_text(const char *text, int *fd_out) {
     size_t i;
     int value;
@@ -132,6 +311,10 @@ int parse_redir_token(const char *token, struct redir_spec *spec, bool *needs_wo
     spec->target_fd = 0;
     spec->source_fd = -1;
     spec->force_clobber = false;
+    spec->strip_tabs = false;
+    spec->expand_body = false;
+    spec->delimiter = NULL;
+    spec->body_raw = NULL;
     spec->path = NULL;
     *needs_word = false;
 
@@ -149,7 +332,14 @@ int parse_redir_token(const char *token, struct redir_spec *spec, bool *needs_wo
     }
 
     if (token[pos] == '<') {
-        if (token[pos + 1] == '>') {
+        if (token[pos + 1] == '<') {
+            spec->kind = REDIR_HEREDOC;
+            pos += 2;
+            if (token[pos] == '-') {
+                spec->strip_tabs = true;
+                pos += 1;
+            }
+        } else if (token[pos + 1] == '>') {
             spec->kind = REDIR_OPEN_RDWR;
             pos += 2;
         } else if (token[pos + 1] == '&') {
@@ -179,7 +369,7 @@ int parse_redir_token(const char *token, struct redir_spec *spec, bool *needs_wo
     if (have_fd) {
         spec->target_fd = fd;
     } else if (spec->kind == REDIR_OPEN_READ || spec->kind == REDIR_OPEN_RDWR ||
-               spec->kind == REDIR_DUP_IN) {
+               spec->kind == REDIR_DUP_IN || spec->kind == REDIR_HEREDOC) {
         spec->target_fd = STDIN_FILENO;
     } else {
         spec->target_fd = STDOUT_FILENO;
@@ -204,11 +394,18 @@ int parse_redir_token(const char *token, struct redir_spec *spec, bool *needs_wo
     return 1;
 }
 
-int apply_one_redirection(const struct redir_spec *redir, bool noclobber) {
+int apply_one_redirection(struct shell_state *state,
+                          const struct redir_spec *redir, bool noclobber,
+                          bool isolate_heredoc_side_effects) {
     int opened_fd;
 
     opened_fd = -1;
-    if (redir->kind == REDIR_OPEN_READ) {
+    if (redir->kind == REDIR_HEREDOC) {
+        if (materialize_heredoc_fd(state, redir, isolate_heredoc_side_effects,
+                                   &opened_fd) != 0) {
+            return 1;
+        }
+    } else if (redir->kind == REDIR_OPEN_READ) {
         opened_fd = open(redir->path, O_RDONLY);
     } else if (redir->kind == REDIR_OPEN_RDWR) {
         opened_fd = open(redir->path, O_RDWR | O_CREAT, 0666);
@@ -247,6 +444,11 @@ int apply_one_redirection(const struct redir_spec *redir, bool noclobber) {
         return 1;
     }
 
+    if (redir->kind == REDIR_HEREDOC) {
+        perror("heredoc");
+        return 1;
+    }
+
     if (redir->kind == REDIR_DUP_IN || redir->kind == REDIR_DUP_OUT) {
         int flags;
 
@@ -279,8 +481,9 @@ int apply_one_redirection(const struct redir_spec *redir, bool noclobber) {
     return 0;
 }
 
-int apply_redirections(const struct redir_vec *redirs, bool save_restore,
-                       bool noclobber,
+int apply_redirections(struct shell_state *state, const struct redir_vec *redirs,
+                       bool save_restore, bool noclobber,
+                       bool isolate_heredoc_side_effects,
                        struct fd_backup_vec *backups) {
     size_t i;
 
@@ -291,7 +494,8 @@ int apply_redirections(const struct redir_vec *redirs, bool save_restore,
             }
         }
 
-        if (apply_one_redirection(&redirs->items[i], noclobber) != 0) {
+        if (apply_one_redirection(state, &redirs->items[i], noclobber,
+                                  isolate_heredoc_side_effects) != 0) {
             return 1;
         }
     }
