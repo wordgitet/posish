@@ -20,6 +20,8 @@ tests/posix/resetsig
 tests/posix/tmp.*
 tests/posix/tmp.queue/
 tmp/metrics/
+tests/posix/loginexec
+tests/posix/ptyfeed
 
 # C/build byproducts
 *.o

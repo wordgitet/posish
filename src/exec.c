@@ -6,6 +6,7 @@
 
 #include "alias.h"
 #include "arena.h"
+#include "ast_exec.h"
 #include "builtins/builtin.h"
 #include "case_command.h"
 #include "compound_parse.h"
@@ -55,7 +56,6 @@ struct positional_backup {
     size_t count;
 };
 
-typedef int (*group_body_runner)(struct shell_state *state, const char *body);
 typedef int (*child_body_runner)(struct shell_state *state, const void *payload);
 
 static int execute_program_text(struct shell_state *state, const char *source);
@@ -68,13 +68,6 @@ static int execute_ast_node(struct shell_state *state,
                             bool allow_builtin);
 static int execute_ast_pipeline(struct shell_state *state,
                                 const struct ast_node *node);
-static int run_subshell_group_ast(struct shell_state *state,
-                                  const struct ast_node *node);
-static int run_brace_group_ast(struct shell_state *state,
-                               const struct ast_node *node);
-static int run_if_ast(struct shell_state *state, const struct ast_node *node);
-static int run_loop_ast(struct shell_state *state, const struct ast_node *node,
-                        bool is_until);
 static int run_for_ast(struct shell_state *state, const struct ast_node *node);
 static int run_function_def_ast(struct shell_state *state,
                                 const struct ast_node *node);
@@ -107,10 +100,6 @@ static bool try_run_ast_compound_command(struct shell_state *state,
                                          const char *source,
                                          bool allow_builtin,
                                          int *status_out);
-static int run_group_with_redirections(struct shell_state *state,
-                                       const char *body,
-                                       const struct redir_vec *redirs,
-                                       group_body_runner run_body);
 static void exec_child_payload(struct shell_state *parent_state,
                                child_body_runner run_body,
                                const void *payload);
@@ -916,31 +905,6 @@ static void clone_redirs_into_perm(struct shell_state *state,
     }
 }
 
-static void clone_redirs(struct redir_vec *dst, const struct redir_vec *src) {
-    size_t i;
-
-    dst->items = NULL;
-    dst->len = 0;
-    if (src == NULL || src->len == 0) {
-        return;
-    }
-
-    dst->items = arena_xrealloc(dst->items, sizeof(*dst->items) * src->len);
-    dst->len = src->len;
-    for (i = 0; i < src->len; i++) {
-        dst->items[i] = src->items[i];
-        if (src->items[i].path != NULL) {
-            dst->items[i].path = arena_xstrdup(src->items[i].path);
-        }
-        if (src->items[i].delimiter != NULL) {
-            dst->items[i].delimiter = arena_xstrdup(src->items[i].delimiter);
-        }
-        if (src->items[i].body_raw != NULL) {
-            dst->items[i].body_raw = arena_xstrdup(src->items[i].body_raw);
-        }
-    }
-}
-
 static int shell_set_function(struct shell_state *state, const char *name,
                               const char *body,
                               const struct redir_vec *redirs) {
@@ -1611,88 +1575,6 @@ static int collect_words_and_redirs(const struct token_vec *expanded, struct wor
     return 0;
 }
 
-static int expand_redirection_operands(struct shell_state *state,
-                                       struct redir_vec *redirs,
-                                       bool *saw_cmdsub_out,
-                                       int *last_cmdsub_status_out) {
-    size_t i;
-    bool saw_cmdsub;
-    int last_cmdsub_status;
-    struct token_vec in_vec;
-    struct token_vec out_vec;
-
-    saw_cmdsub = false;
-    last_cmdsub_status = 0;
-
-    for (i = 0; i < redirs->len; i++) {
-        char *one_word;
-
-        if (redirs->items[i].path == NULL) {
-            continue;
-        }
-
-        one_word = redirs->items[i].path;
-        in_vec.items = &one_word;
-        in_vec.len = 1;
-        out_vec.items = NULL;
-        out_vec.len = 0;
-
-        if (expand_words(&in_vec, &out_vec, state, false) != 0) {
-            return 2;
-        }
-        if (state->cmdsub_performed) {
-            saw_cmdsub = true;
-            last_cmdsub_status = state->last_cmdsub_status;
-        }
-        if (out_vec.len != 1) {
-            size_t j;
-            for (j = 0; j < out_vec.len; j++) {
-                arena_maybe_free(out_vec.items[j]);
-            }
-            arena_maybe_free(out_vec.items);
-            posish_error_idf(POSERR_AMBIGUOUS_REDIRECTION);
-            return 1;
-        }
-
-        arena_maybe_free(redirs->items[i].path);
-        redirs->items[i].path = out_vec.items[0];
-        arena_maybe_free(out_vec.items);
-
-        if (redirs->items[i].kind == REDIR_DUP_IN ||
-            redirs->items[i].kind == REDIR_DUP_OUT) {
-            if (parse_dup_operand(redirs->items[i].path, &redirs->items[i]) !=
-                0) {
-                posish_error_idf(POSERR_INVALID_FD_REDIRECTION,
-                                 redirs->items[i].path);
-                return 1;
-            }
-            arena_maybe_free(redirs->items[i].path);
-            redirs->items[i].path = NULL;
-        }
-    }
-
-    if (saw_cmdsub_out != NULL) {
-        *saw_cmdsub_out = saw_cmdsub;
-    }
-    if (last_cmdsub_status_out != NULL) {
-        *last_cmdsub_status_out = last_cmdsub_status;
-    }
-    return 0;
-}
-
-static int prepare_runtime_redirections(struct shell_state *state,
-                                        const struct redir_vec *src,
-                                        struct redir_vec *dst) {
-    dst->items = NULL;
-    dst->len = 0;
-    clone_redirs(dst, src);
-    if (expand_redirection_operands(state, dst, NULL, NULL) != 0) {
-        redir_vec_free(dst);
-        return 1;
-    }
-    return 0;
-}
-
 static int apply_persistent_assignments(struct shell_state *state,
                                         char *const words[], size_t count) {
     size_t i;
@@ -2018,7 +1900,7 @@ static int parse_redirections_from_source(const char *source, struct shell_state
         lexer_free_tokens(&expanded);
         return -1;
     }
-    if (expand_redirection_operands(state, redirs, NULL, NULL) != 0) {
+    if (redir_expand_operands(state, redirs, NULL, NULL) != 0) {
         word_vec_free(&words);
         redir_vec_free(redirs);
         lexer_free_tokens(&expanded);
@@ -2092,7 +1974,7 @@ static int execute_simple_command_parts(struct shell_state *state,
     redirs_only_command = false;
     assignment_special = false;
 
-    clone_redirs(&redirs, ast_redirs);
+    redir_vec_clone(&redirs, ast_redirs);
 
     redirs_only_command = raw_words.len == 0;
 
@@ -2170,8 +2052,8 @@ static int execute_simple_command_parts(struct shell_state *state,
 
         redir_saw_cmdsub = false;
         redir_last_cmdsub_status = 0;
-        status = expand_redirection_operands(state, &redirs, &redir_saw_cmdsub,
-                                             &redir_last_cmdsub_status);
+        status = redir_expand_operands(state, &redirs, &redir_saw_cmdsub,
+                                       &redir_last_cmdsub_status);
         if (redir_saw_cmdsub) {
             saw_cmdsub = true;
             last_cmdsub_status = redir_last_cmdsub_status;
@@ -2277,9 +2159,9 @@ static int execute_simple_command_parts(struct shell_state *state,
                 redir_saw_cmdsub = false;
                 redir_last_cmdsub_status = 0;
 
-                st = expand_redirection_operands(&local_state, &redirs,
-                                                 &redir_saw_cmdsub,
-                                                 &redir_last_cmdsub_status);
+                st = redir_expand_operands(&local_state, &redirs,
+                                           &redir_saw_cmdsub,
+                                           &redir_last_cmdsub_status);
                 if (st != 0) {
                     _exit(st);
                 }
@@ -2797,38 +2679,10 @@ static int run_subshell_command(struct shell_state *parent_state,
     return 1;
 }
 
-static int run_group_with_redirections(struct shell_state *state,
-                                       const char *body,
-                                       const struct redir_vec *redirs,
-                                       group_body_runner run_body) {
-    struct fd_backup_vec backups;
-    struct redir_vec runtime_redirs;
-    int status;
-
-    backups.items = NULL;
-    backups.len = 0;
-    runtime_redirs.items = NULL;
-    runtime_redirs.len = 0;
-    if (prepare_runtime_redirections(state, redirs, &runtime_redirs) != 0) {
-        return 1;
-    }
-    if (apply_redirections(state, &runtime_redirs, true, state->noclobber, false,
-                           &backups) != 0) {
-        fd_backup_restore(&backups);
-        redir_vec_free(&runtime_redirs);
-        return 1;
-    }
-
-    status = run_body(state, body);
-    fd_backup_restore(&backups);
-    redir_vec_free(&runtime_redirs);
-    return status;
-}
-
 static int run_group_with_redirection_source(struct shell_state *state,
                                              const char *body,
                                              const char *redir_source,
-                                             group_body_runner run_body) {
+                                             ast_exec_body_runner run_body) {
     struct redir_vec redirs;
     int status;
 
@@ -2843,16 +2697,9 @@ static int run_group_with_redirection_source(struct shell_state *state,
         return 2;
     }
 
-    status = run_group_with_redirections(state, body, &redirs, run_body);
+    status = ast_exec_run_group_with_redirections(state, body, &redirs, run_body);
     redir_vec_free(&redirs);
     return status;
-}
-
-static int run_subshell_group_ast(struct shell_state *state,
-                                  const struct ast_node *node) {
-    return run_group_with_redirections(state, node->data.group.body,
-                                       &node->data.group.redirs,
-                                       run_subshell_command);
 }
 
 static int run_async_list(struct shell_state *state, const char *source) {
@@ -2945,126 +2792,6 @@ static int run_async_list(struct shell_state *state, const char *source) {
     return 0;
 }
 
-static int run_brace_group_ast(struct shell_state *state,
-                               const struct ast_node *node) {
-    return run_group_with_redirections(state, node->data.group.body,
-                                       &node->data.group.redirs,
-                                       execute_program_text);
-}
-
-static int run_if_ast(struct shell_state *state, const struct ast_node *node) {
-    struct fd_backup_vec backups;
-    struct redir_vec runtime_redirs;
-    bool redir_applied;
-    bool saved_errexit;
-    int status;
-
-    backups.items = NULL;
-    backups.len = 0;
-    runtime_redirs.items = NULL;
-    runtime_redirs.len = 0;
-    redir_applied = node->data.if_cmd.redirs.len != 0;
-
-    if (redir_applied &&
-        (prepare_runtime_redirections(state, &node->data.if_cmd.redirs,
-                                      &runtime_redirs) != 0 ||
-         apply_redirections(state, &runtime_redirs, true,
-                            state->noclobber, false, &backups) != 0)) {
-        fd_backup_restore(&backups);
-        redir_vec_free(&runtime_redirs);
-        return 1;
-    }
-
-    saved_errexit = state->errexit;
-    state->errexit = false;
-    status = execute_ast_node(state, node->data.if_cmd.cond_node, true);
-    state->errexit = saved_errexit;
-    if (!state->should_exit && !state->return_requested &&
-        !has_pending_flow_control(state)) {
-        if (status == 0) {
-            status = execute_ast_node(state, node->data.if_cmd.then_node, true);
-            maybe_trigger_errexit(state, status);
-        } else if (node->data.if_cmd.else_node != NULL) {
-            status = execute_ast_node(state, node->data.if_cmd.else_node, true);
-            maybe_trigger_errexit(state, status);
-        } else {
-            status = 0;
-        }
-    }
-
-    if (redir_applied) {
-        fd_backup_restore(&backups);
-        redir_vec_free(&runtime_redirs);
-    }
-    return status;
-}
-
-static int run_loop_ast(struct shell_state *state, const struct ast_node *node,
-                        bool is_until) {
-    struct fd_backup_vec backups;
-    struct redir_vec runtime_redirs;
-    bool redir_applied;
-    int status;
-
-    status = 0;
-    backups.items = NULL;
-    backups.len = 0;
-    runtime_redirs.items = NULL;
-    runtime_redirs.len = 0;
-    redir_applied = node->data.loop.redirs.len != 0;
-
-    if (redir_applied &&
-        (prepare_runtime_redirections(state, &node->data.loop.redirs,
-                                      &runtime_redirs) != 0 ||
-         apply_redirections(state, &runtime_redirs, true, state->noclobber,
-                            false, &backups) != 0)) {
-        fd_backup_restore(&backups);
-        redir_vec_free(&runtime_redirs);
-        return 1;
-    }
-
-    state->loop_depth++;
-    while (!state->should_exit) {
-        int cond_status;
-        bool saved_errexit;
-
-        saved_errexit = state->errexit;
-        state->errexit = false;
-        cond_status = execute_ast_node(state, node->data.loop.cond_node, true);
-        state->errexit = saved_errexit;
-        if (state->should_exit || state->return_requested) {
-            break;
-        }
-        if ((!is_until && cond_status != 0) || (is_until && cond_status == 0)) {
-            break;
-        }
-        status = execute_ast_node(state, node->data.loop.body_node, true);
-        maybe_trigger_errexit(state, status);
-        if (state->should_exit || state->return_requested) {
-            break;
-        }
-        if (state->break_levels > 0) {
-            state->break_levels--;
-            status = 0;
-            break;
-        }
-        if (state->continue_levels > 0) {
-            state->continue_levels--;
-            status = 0;
-            if (state->continue_levels > 0) {
-                break;
-            }
-            continue;
-        }
-    }
-    state->loop_depth--;
-
-    if (redir_applied) {
-        fd_backup_restore(&backups);
-        redir_vec_free(&runtime_redirs);
-    }
-    return status;
-}
 
 static int run_for_ast(struct shell_state *state, const struct ast_node *node) {
     struct token_vec for_lexed;
@@ -3485,7 +3212,7 @@ static int execute_command_atom(struct shell_state *state, const char *source,
      * `set +n` (or `set +o noexec`) is allowed to run while in noexec mode so
      * scripts can turn execution back on. Everything else is parse-only.
      */
-    if (state->noexec && !noexec_allows_set_toggle(trimmed)) {
+    if (state->noexec && !exec_noexec_allows_set_toggle(trimmed)) {
         arena_maybe_free(trimmed);
         return 0;
     }
@@ -3896,19 +3623,23 @@ static int execute_ast_node(struct shell_state *state,
         status = run_simple_ast(state, node, allow_builtin);
         break;
     case AST_NODE_SUBSHELL:
-        status = run_subshell_group_ast(state, node);
+        status = ast_exec_run_subshell_group(state, node, run_subshell_command);
         break;
     case AST_NODE_BRACE_GROUP:
-        status = run_brace_group_ast(state, node);
+        status = ast_exec_run_brace_group(state, node, execute_program_text);
         break;
     case AST_NODE_IF:
-        status = run_if_ast(state, node);
+        status = ast_exec_run_if(state, node, execute_ast_node,
+                                 maybe_trigger_errexit,
+                                 has_pending_flow_control);
         break;
     case AST_NODE_WHILE:
-        status = run_loop_ast(state, node, false);
+        status = ast_exec_run_loop(state, node, false, execute_ast_node,
+                                   maybe_trigger_errexit);
         break;
     case AST_NODE_UNTIL:
-        status = run_loop_ast(state, node, true);
+        status = ast_exec_run_loop(state, node, true, execute_ast_node,
+                                   maybe_trigger_errexit);
         break;
     case AST_NODE_FOR:
         status = run_for_ast(state, node);

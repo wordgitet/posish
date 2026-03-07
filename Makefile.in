@@ -23,6 +23,7 @@ SRC = \
 	src/lexer.c \
 	src/parser.c \
 	src/arith.c \
+	src/ast_exec.c \
 	src/case_command.c \
 	src/compound_parse.c \
 	src/heredoc_command.c \
@@ -53,6 +54,7 @@ OBJ = \
 	src/lexer.o \
 	src/parser.o \
 	src/arith.o \
+	src/ast_exec.o \
 	src/case_command.o \
 	src/compound_parse.o \
 	src/heredoc_command.o \

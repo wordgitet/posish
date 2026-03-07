@@ -49,6 +49,7 @@ struct fd_backup_vec {
 
 void redir_vec_free(struct redir_vec *redirs);
 int redir_vec_push(struct redir_vec *redirs, const struct redir_spec *spec);
+void redir_vec_clone(struct redir_vec *dst, const struct redir_vec *src);
 
 int fd_backup_save(struct fd_backup_vec *backups, int fd);
 void fd_backup_restore(struct fd_backup_vec *backups);
@@ -65,5 +66,11 @@ int apply_redirections(struct shell_state *state, const struct redir_vec *redirs
                        bool save_restore, bool noclobber,
                        bool isolate_heredoc_side_effects,
                        struct fd_backup_vec *backups);
+int redir_expand_operands(struct shell_state *state, struct redir_vec *redirs,
+                          bool *saw_cmdsub_out,
+                          int *last_cmdsub_status_out);
+int prepare_runtime_redirections(struct shell_state *state,
+                                 const struct redir_vec *src,
+                                 struct redir_vec *dst);
 
 #endif

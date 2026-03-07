@@ -7,6 +7,7 @@
 #include "arena.h"
 #include "error.h"
 #include "expand.h"
+#include "lexer.h"
 #include "shell.h"
 
 #include <ctype.h>
@@ -38,6 +39,31 @@ int redir_vec_push(struct redir_vec *redirs, const struct redir_spec *spec) {
                                    sizeof(*redirs->items) * (redirs->len + 1));
     redirs->items[redirs->len++] = *spec;
     return 0;
+}
+
+void redir_vec_clone(struct redir_vec *dst, const struct redir_vec *src) {
+    size_t i;
+
+    dst->items = NULL;
+    dst->len = 0;
+    if (src == NULL || src->len == 0) {
+        return;
+    }
+
+    dst->items = arena_xrealloc(dst->items, sizeof(*dst->items) * src->len);
+    dst->len = src->len;
+    for (i = 0; i < src->len; i++) {
+        dst->items[i] = src->items[i];
+        if (src->items[i].path != NULL) {
+            dst->items[i].path = arena_xstrdup(src->items[i].path);
+        }
+        if (src->items[i].delimiter != NULL) {
+            dst->items[i].delimiter = arena_xstrdup(src->items[i].delimiter);
+        }
+        if (src->items[i].body_raw != NULL) {
+            dst->items[i].body_raw = arena_xstrdup(src->items[i].body_raw);
+        }
+    }
 }
 
 int fd_backup_save(struct fd_backup_vec *backups, int fd) {
@@ -500,5 +526,87 @@ int apply_redirections(struct shell_state *state, const struct redir_vec *redirs
         }
     }
 
+    return 0;
+}
+
+int redir_expand_operands(struct shell_state *state, struct redir_vec *redirs,
+                          bool *saw_cmdsub_out,
+                          int *last_cmdsub_status_out) {
+    size_t i;
+    bool saw_cmdsub;
+    int last_cmdsub_status;
+    struct token_vec in_vec;
+    struct token_vec out_vec;
+
+    saw_cmdsub = false;
+    last_cmdsub_status = 0;
+
+    for (i = 0; i < redirs->len; i++) {
+        char *one_word;
+
+        if (redirs->items[i].path == NULL) {
+            continue;
+        }
+
+        one_word = redirs->items[i].path;
+        in_vec.items = &one_word;
+        in_vec.len = 1;
+        out_vec.items = NULL;
+        out_vec.len = 0;
+
+        if (expand_words(&in_vec, &out_vec, state, false) != 0) {
+            return 2;
+        }
+        if (state->cmdsub_performed) {
+            saw_cmdsub = true;
+            last_cmdsub_status = state->last_cmdsub_status;
+        }
+        if (out_vec.len != 1) {
+            size_t j;
+
+            for (j = 0; j < out_vec.len; j++) {
+                arena_maybe_free(out_vec.items[j]);
+            }
+            arena_maybe_free(out_vec.items);
+            posish_error_idf(POSERR_AMBIGUOUS_REDIRECTION);
+            return 1;
+        }
+
+        arena_maybe_free(redirs->items[i].path);
+        redirs->items[i].path = out_vec.items[0];
+        arena_maybe_free(out_vec.items);
+
+        if (redirs->items[i].kind == REDIR_DUP_IN ||
+            redirs->items[i].kind == REDIR_DUP_OUT) {
+            if (parse_dup_operand(redirs->items[i].path, &redirs->items[i]) !=
+                0) {
+                posish_error_idf(POSERR_INVALID_FD_REDIRECTION,
+                                 redirs->items[i].path);
+                return 1;
+            }
+            arena_maybe_free(redirs->items[i].path);
+            redirs->items[i].path = NULL;
+        }
+    }
+
+    if (saw_cmdsub_out != NULL) {
+        *saw_cmdsub_out = saw_cmdsub;
+    }
+    if (last_cmdsub_status_out != NULL) {
+        *last_cmdsub_status_out = last_cmdsub_status;
+    }
+    return 0;
+}
+
+int prepare_runtime_redirections(struct shell_state *state,
+                                 const struct redir_vec *src,
+                                 struct redir_vec *dst) {
+    dst->items = NULL;
+    dst->len = 0;
+    redir_vec_clone(dst, src);
+    if (redir_expand_operands(state, dst, NULL, NULL) != 0) {
+        redir_vec_free(dst);
+        return 1;
+    }
     return 0;
 }
