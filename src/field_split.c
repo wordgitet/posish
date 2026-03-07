@@ -6,6 +6,7 @@
 
 #include "arena.h"
 #include "expand_markers.h"
+#include "vars.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -71,14 +72,15 @@ void field_split_restore_quoted_markers(char *s) {
   s[j] = '\0';
 }
 
-int field_split_split(const char *expanded, struct token_vec *out) {
+int field_split_split(const char *expanded, struct token_vec *out,
+                      const struct shell_state *state) {
   const char *ifs_env;
   const char *ifs;
   size_t pos;
   int appended;
   bool has_delimiter;
 
-  ifs_env = getenv("IFS");
+  ifs_env = vars_get(state, "IFS");
   if (ifs_env == NULL) {
     ifs = " \t\n";
   } else {
@@ -167,12 +169,13 @@ int field_split_split(const char *expanded, struct token_vec *out) {
   return appended;
 }
 
-bool field_split_has_delimiter(const char *expanded) {
+bool field_split_has_delimiter(const char *expanded,
+                               const struct shell_state *state) {
   const char *ifs_env;
   const char *ifs;
   size_t pos;
 
-  ifs_env = getenv("IFS");
+  ifs_env = vars_get(state, "IFS");
   if (ifs_env == NULL) {
     ifs = " \t\n";
   } else {
@@ -206,13 +209,14 @@ bool field_split_has_at_marker(const char *expanded) {
 }
 
 int field_split_append_piece(char *piece, struct token_vec *out,
-                             bool split_fields) {
+                             bool split_fields,
+                             const struct shell_state *state) {
   if (split_fields) {
     int count;
     bool had_delim;
 
-    had_delim = field_split_has_delimiter(piece);
-    count = field_split_split(piece, out);
+    had_delim = field_split_has_delimiter(piece, state);
+    count = field_split_split(piece, out, state);
     if (count > 0) {
       arena_maybe_free(piece);
       return count;
@@ -230,7 +234,8 @@ int field_split_append_piece(char *piece, struct token_vec *out,
 }
 
 int field_split_append_at_expansion(const char *expanded, struct token_vec *out,
-                                    bool split_fields) {
+                                    bool split_fields,
+                                    const struct shell_state *state) {
   size_t start;
   size_t i;
   int added_total;
@@ -250,7 +255,7 @@ int field_split_append_at_expansion(const char *expanded, struct token_vec *out,
       piece = arena_xmalloc(plen + 1);
       memcpy(piece, expanded + start, plen);
       piece[plen] = '\0';
-      added_total += field_split_append_piece(piece, out, split_fields);
+      added_total += field_split_append_piece(piece, out, split_fields, state);
     }
 
     if (expanded[i] == '\0') {

@@ -15,6 +15,7 @@
 #include "jobs.h"
 #include "lexer.h"
 #include "parser.h"
+#include "path.h"
 #include "redir.h"
 #include "signals.h"
 #include "trace.h"
@@ -43,7 +44,7 @@ struct env_restore {
     char *name;
     char *old_value;
     bool existed;
-    bool was_unexported;
+    bool was_exported;
 };
 
 struct env_restore_vec {
@@ -223,7 +224,8 @@ static size_t source_line_at_offset(const char *source, size_t offset) {
     return line;
 }
 
-static void set_lineno_for_command(const char *source, size_t start) {
+static void set_lineno_for_command(struct shell_state *state, const char *source,
+                                   size_t start) {
     const char *base_text;
     char *end;
     unsigned long base;
@@ -242,10 +244,11 @@ static void set_lineno_for_command(const char *source, size_t start) {
 
     line = source_line_at_offset(source, start) + (size_t)base;
     snprintf(line_buf, sizeof(line_buf), "%zu", line);
-    (void)setenv("LINENO", line_buf, 1);
+    (void)vars_set_with_mode(state, "LINENO", line_buf, false, false);
 }
 
-static void set_lineno_for_ast_node(const struct ast_node *node) {
+static void set_lineno_for_ast_node(struct shell_state *state,
+                                    const struct ast_node *node) {
     char line_buf[32];
 
     if (node == NULL || node->span.start_line == 0) {
@@ -253,7 +256,7 @@ static void set_lineno_for_ast_node(const struct ast_node *node) {
     }
 
     snprintf(line_buf, sizeof(line_buf), "%zu", node->span.start_line);
-    (void)setenv("LINENO", line_buf, 1);
+    (void)vars_set_with_mode(state, "LINENO", line_buf, false, false);
 }
 
 static void free_string_vec(char **vec, size_t len) {
@@ -326,7 +329,7 @@ static void trace_simple_words(struct shell_state *state, char *const words[],
         return;
     }
 
-    raw_ps4 = getenv("PS4");
+    raw_ps4 = vars_get(state, "PS4");
     if (raw_ps4 == NULL) {
         raw_ps4 = "+ ";
     }
@@ -1272,7 +1275,7 @@ static bool try_execute_alt_parameter_command(struct shell_state *state,
         return false;
     }
 
-    value = getenv(name);
+    value = vars_get(state, name);
     if (value != NULL && value[0] != '\0' && word[0] != '\0') {
         *status_out = execute_program_text(state, word);
     } else {
@@ -1610,16 +1613,12 @@ static void restore_temporary_assignments(struct shell_state *state,
 
         r = &restore->items[i - 1];
         if (r->existed) {
-            if (r->was_unexported) {
-                if (vars_set_with_mode(state, r->name, r->old_value, false, false) !=
-                    0) {
-                    perror("setenv");
-                }
-            } else if (setenv(r->name, r->old_value, 1) != 0) {
+            if (vars_set_with_mode(state, r->name, r->old_value, false,
+                                   r->was_exported) != 0) {
                 perror("setenv");
             }
         } else {
-            if (unsetenv(r->name) != 0) {
+            if (vars_unset(state, r->name) != 0) {
                 perror("unsetenv");
             }
         }
@@ -1647,13 +1646,13 @@ static int apply_temporary_assignments(struct shell_state *state,
         r.name = name;
         r.old_value = NULL;
         r.existed = false;
-        r.was_unexported = false;
+        r.was_exported = false;
 
-        old = getenv(name);
-        if (old != NULL) {
+        old = vars_get(state, name);
+        if (vars_is_set(state, name)) {
             r.old_value = arena_xstrdup(old);
             r.existed = true;
-            r.was_unexported = vars_is_unexported(state, name);
+            r.was_exported = vars_is_exported(state, name);
         }
 
         if (vars_set(state, name, value, true) != 0) {
@@ -1746,13 +1745,26 @@ static bool is_command_exec_without_command(char *const argv[]) {
 
 static int run_external_argv(struct shell_state *state, char *const argv[],
                              const struct redir_vec *redirs) {
+    char *path;
     int status;
     pid_t pid;
 
     trace_log(POSISH_TRACE_SIGNALS, "spawn external argv0=%s", argv[0]);
+    path = path_resolve_command(state, argv[0], false);
+    if (path == NULL) {
+        int saved_errno;
+
+        if (errno == 0) {
+            errno = ENOENT;
+        }
+        saved_errno = errno;
+        perror(argv[0]);
+        return saved_errno == ENOENT ? 127 : 126;
+    }
     pid = fork();
     if (pid < 0) {
         perror("fork");
+        arena_maybe_free(path);
         return 1;
     }
 
@@ -1765,19 +1777,16 @@ static int run_external_argv(struct shell_state *state, char *const argv[],
             (void)setpgid(0, 0);
         }
 
-        (void)setenv("POSISH_PARENT_INTERACTIVE", state->interactive ? "1" : "0",
-                     1);
         exec_prepare_signals_for_exec_child(state);
         if (apply_redirections(state, redirs, false, state->noclobber, false,
                                NULL) != 0) {
             _exit(1);
         }
-        vars_apply_unexported_in_child(state);
-
-        execvp(argv[0], argv);
+        status = exec_replace_with_utility(state, path, argv);
         perror(argv[0]);
-        _exit(127);
+        _exit(status);
     }
+    arena_maybe_free(path);
 
     if (state->monitor_mode) {
         (void)setpgid(pid, pid);
@@ -1817,59 +1826,48 @@ static int run_external_argv(struct shell_state *state, char *const argv[],
     return 1;
 }
 
-static bool path_resolves_command(const char *name) {
-    const char *path;
-    const char *p;
+int exec_replace_with_utility(struct shell_state *state, const char *path,
+                              char *const argv[]) {
+    char **envp;
+    int saved_errno;
 
-    if (name == NULL || name[0] == '\0') {
-        return false;
-    }
-    if (strchr(name, '/') != NULL) {
-        return access(name, X_OK) == 0;
-    }
+    envp = vars_build_exec_envp(state);
+    execve(path, argv, envp);
+    saved_errno = errno;
 
-    path = getenv("PATH");
-    if (path == NULL || path[0] == '\0') {
-        return false;
-    }
+    if (saved_errno == ENOEXEC) {
+        char *sh_path;
+        char **sh_argv;
+        size_t argc;
+        size_t i;
 
-    p = path;
-    while (1) {
-        const char *end;
-        size_t dlen;
-        const char *dir;
-        char *candidate;
-        bool found;
-
-        end = strchr(p, ':');
-        if (end == NULL) {
-            end = p + strlen(p);
+        argc = 0;
+        while (argv[argc] != NULL) {
+            argc++;
         }
-        dlen = (size_t)(end - p);
-        dir = dlen == 0 ? "." : p;
 
-        candidate = arena_xmalloc((dlen == 0 ? 1 : dlen) + 1 + strlen(name) + 1);
-        if (dlen == 0) {
-            strcpy(candidate, ".");
-        } else {
-            memcpy(candidate, dir, dlen);
-            candidate[dlen] = '\0';
+        sh_argv = arena_alloc_in(NULL, sizeof(*sh_argv) * (argc + 2));
+        sh_argv[0] = (char *)"sh";
+        sh_argv[1] = (char *)path;
+        for (i = 1; i < argc; i++) {
+            sh_argv[i + 1] = argv[i];
         }
-        strcat(candidate, "/");
-        strcat(candidate, name);
+        sh_argv[argc + 1] = NULL;
 
-        found = access(candidate, X_OK) == 0;
-        arena_maybe_free(candidate);
-        if (found) {
-            return true;
+        sh_path = path_resolve_command(state, "sh", true);
+        if (sh_path == NULL) {
+            sh_path = arena_xstrdup("/bin/sh");
         }
-        if (*end == '\0') {
-            break;
-        }
-        p = end + 1;
+
+        execve(sh_path, sh_argv, envp);
+        saved_errno = errno;
+        arena_maybe_free(sh_path);
+        arena_maybe_free(sh_argv);
     }
 
-    return false;
+    vars_free_envp(envp);
+    errno = saved_errno;
+    return saved_errno == ENOENT ? 127 : 126;
 }
 
 static int parse_redirections_from_source(const char *source, struct shell_state *state,
@@ -2099,6 +2097,23 @@ static int execute_simple_command_parts(struct shell_state *state,
     state->cmdsub_performed = saw_cmdsub;
     state->last_cmdsub_status = saw_cmdsub ? last_cmdsub_status : 0;
 
+    if (redirs.len == 0 && raw_words.len == 1 && assign_count == 1 &&
+        cmd_expanded.len == 0 && assign_expanded.len == 1 &&
+        is_assignment_word(assign_expanded.items[0])) {
+        char *assign_words[1];
+
+        assign_words[0] = assign_expanded.items[0];
+        status = apply_persistent_assignments(state, assign_words, 1);
+        word_vec_free(&raw_words);
+        lexer_free_tokens(&assign_expanded);
+        lexer_free_tokens(&cmd_expanded);
+        redir_vec_free(&redirs);
+        if (status == 0 && state->cmdsub_performed) {
+            return state->last_cmdsub_status;
+        }
+        return status;
+    }
+
     expanded.len = assign_expanded.len + cmd_expanded.len;
     if (expanded.len > 0) {
         expanded.items = arena_xmalloc(sizeof(*expanded.items) * expanded.len);
@@ -2319,7 +2334,7 @@ static int execute_simple_command_parts(struct shell_state *state,
 
         builtin_available = builtin_is_name(argv[0]) &&
                             (!builtin_is_substitutive_name(argv[0]) ||
-                             path_resolves_command(argv[0]));
+                             path_resolves_command(state, argv[0], false));
         run_in_shell = function_def != NULL || builtin_available;
         if (persist_builtin_redirs) {
             if (apply_redirections(state, &redirs, false, state->noclobber,
@@ -3572,7 +3587,7 @@ static int execute_ast_node(struct shell_state *state,
 
     if (node->kind != AST_NODE_EMPTY && node->kind != AST_NODE_SEQUENCE &&
         node->kind != AST_NODE_AND_OR) {
-        set_lineno_for_ast_node(node);
+        set_lineno_for_ast_node(state, node);
     }
 
     switch (node->kind) {
@@ -4735,7 +4750,7 @@ static int execute_program_text_internal(struct shell_state *state,
                 }
 
                 /* Keep $LINENO aligned to each top-level command start. */
-                set_lineno_for_command(source, command_start);
+                set_lineno_for_command(state, source, command_start);
                 state->errexit_ignored = false;
                 {
                     if (ch == '&') {

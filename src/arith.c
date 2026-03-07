@@ -106,6 +106,51 @@ static void skip_spaces(struct arith_parser *p) {
   }
 }
 
+static const char *skip_spaces_text(const char *s) {
+  while (*s != '\0' && isspace((unsigned char)*s)) {
+    s++;
+  }
+  return s;
+}
+
+static bool parse_identifier_text(const char **text, const char **start_out,
+                                  size_t *len_out) {
+  const char *s;
+  size_t len;
+
+  s = skip_spaces_text(*text);
+  if (!is_name_start(*s)) {
+    return false;
+  }
+
+  len = 1;
+  while (is_name_char(s[len])) {
+    len++;
+  }
+
+  *start_out = s;
+  *len_out = len;
+  *text = s + len;
+  return true;
+}
+
+static bool parse_number_text(const char **text, long *value_out) {
+  const char *s;
+  char *end;
+  long value;
+
+  s = skip_spaces_text(*text);
+  errno = 0;
+  value = strtol(s, &end, 0);
+  if (end == s || errno == ERANGE) {
+    return false;
+  }
+
+  *value_out = value;
+  *text = end;
+  return true;
+}
+
 static bool starts_with(const char *s, const char *op) {
   size_t i;
 
@@ -350,36 +395,6 @@ static struct arith_value make_value(long value) {
   return v;
 }
 
-static const char *copy_identifier_name(const char *src, size_t start,
-                                        size_t len, char stack_buf[64]) {
-  char *copy;
-
-  if (len + 1 <= 64) {
-    memcpy(stack_buf, src + start, len);
-    stack_buf[len] = '\0';
-    return stack_buf;
-  }
-
-  copy = arena_xmalloc(len + 1);
-  memcpy(copy, src + start, len);
-  copy[len] = '\0';
-  return copy;
-}
-
-static bool parse_long_text(const char *text, long *out_value) {
-  char *end;
-  long value;
-
-  errno = 0;
-  value = strtol(text, &end, 0);
-  if (end == text || *end != '\0' || errno == ERANGE) {
-    return false;
-  }
-
-  *out_value = value;
-  return true;
-}
-
 static bool follows_assignment_operator(const struct arith_parser *p,
                                         size_t start, size_t len) {
   const char *s;
@@ -395,19 +410,14 @@ static bool follows_assignment_operator(const struct arith_parser *p,
          starts_with(s, "&=") || starts_with(s, "^=") || starts_with(s, "|=");
 }
 
-static long read_identifier_value(struct arith_parser *p, size_t start,
-                                  size_t len, bool *ok) {
-  char name_buf[64];
-  const char *name;
-  const char *value;
+static long read_identifier_value_n(struct arith_parser *p, const char *name,
+                                    size_t len, bool *ok) {
   long result;
 
-  name = copy_identifier_name(p->src, start, len, name_buf);
-
-  value = getenv(name);
-  if (value == NULL || value[0] == '\0') {
-    if (p->state->nounset && !follows_assignment_operator(p, start, len)) {
-      posish_errorf("%s: parameter not set", name);
+  if (!vars_get_long_n(p->state, name, len, &result)) {
+    if (p->state->nounset &&
+        !follows_assignment_operator(p, (size_t)(name - p->src), len)) {
+      posish_errorf("%.*s: parameter not set", (int)len, name);
       if (!p->state->interactive) {
         p->state->should_exit = true;
         p->state->exit_status = 1;
@@ -419,25 +429,18 @@ static long read_identifier_value(struct arith_parser *p, size_t start,
     return 0;
   }
 
-  if (!parse_long_text(value, &result)) {
-    /* Keep M1 behavior simple: non-numeric values are treated as zero. */
-    result = 0;
-  }
-
   *ok = true;
   return result;
 }
 
-static int assign_identifier_value(struct arith_parser *p, size_t start,
-                                   size_t len, long value) {
-  char name_buf[64];
-  const char *name;
-  char text[64];
+static long read_identifier_value(struct arith_parser *p, size_t start,
+                                  size_t len, bool *ok) {
+  return read_identifier_value_n(p, p->src + start, len, ok);
+}
 
-  name = copy_identifier_name(p->src, start, len, name_buf);
-
-  snprintf(text, sizeof(text), "%ld", value);
-  if (vars_set_assignment(p->state, name, text, true) != 0) {
+static int assign_identifier_value_n(struct arith_parser *p, const char *name,
+                                     size_t len, long value) {
+  if (vars_set_assignment_long_n(p->state, name, len, value, true) != 0) {
     if (!p->state->interactive) {
       p->state->should_exit = true;
       p->state->exit_status = 1;
@@ -447,6 +450,91 @@ static int assign_identifier_value(struct arith_parser *p, size_t start,
   }
 
   return 0;
+}
+
+static int assign_identifier_value(struct arith_parser *p, size_t start,
+                                   size_t len, long value) {
+  return assign_identifier_value_n(p, p->src + start, len, value);
+}
+
+static bool try_fast_eval(struct arith_parser *p, long *out_value) {
+  const char *text;
+  const char *ident_start;
+  size_t ident_len;
+  long lhs;
+  long rhs;
+  bool ok;
+  char op;
+
+  text = skip_spaces_text(p->src);
+  if (*text == '\0') {
+    return false;
+  }
+
+  ident_start = NULL;
+  ident_len = 0;
+  if (parse_identifier_text(&text, &ident_start, &ident_len)) {
+    text = skip_spaces_text(text);
+    if (*text == '\0') {
+      lhs = read_identifier_value_n(p, ident_start, ident_len, &ok);
+      if (!ok) {
+        *out_value = 0;
+        return true;
+      }
+      *out_value = lhs;
+      return true;
+    }
+
+    if (*text != '+' && *text != '-') {
+      return false;
+    }
+    op = *text++;
+    if (!parse_number_text(&text, &rhs)) {
+      return false;
+    }
+    text = skip_spaces_text(text);
+    if (*text != '\0') {
+      return false;
+    }
+
+    lhs = read_identifier_value_n(p, ident_start, ident_len, &ok);
+    if (!ok) {
+      *out_value = 0;
+      return true;
+    }
+    *out_value = op == '+' ? lhs + rhs : lhs - rhs;
+    return true;
+  }
+
+  if (parse_number_text(&text, &lhs)) {
+    text = skip_spaces_text(text);
+    if (*text == '\0') {
+      *out_value = lhs;
+      return true;
+    }
+
+    if (*text != '+' && *text != '-') {
+      return false;
+    }
+    op = *text++;
+    if (!parse_identifier_text(&text, &ident_start, &ident_len)) {
+      return false;
+    }
+    text = skip_spaces_text(text);
+    if (*text != '\0') {
+      return false;
+    }
+
+    rhs = read_identifier_value_n(p, ident_start, ident_len, &ok);
+    if (!ok) {
+      *out_value = 0;
+      return true;
+    }
+    *out_value = op == '+' ? lhs + rhs : lhs - rhs;
+    return true;
+  }
+
+  return false;
 }
 
 static struct arith_value parse_primary(struct arith_parser *p, bool eval) {
@@ -910,6 +998,7 @@ static struct arith_value parse_assignment(struct arith_parser *p, bool eval) {
 int arith_eval(const char *expr, struct shell_state *state, long *out_value) {
   struct arith_parser parser;
   struct arith_value result;
+  long fast_value;
 
   parser.src = expr;
   parser.pos = 0;
@@ -919,6 +1008,14 @@ int arith_eval(const char *expr, struct shell_state *state, long *out_value) {
   parser.tok.number = 0;
   parser.tok.start = 0;
   parser.tok.len = 0;
+
+  if (try_fast_eval(&parser, &fast_value)) {
+    if (parser.failed) {
+      return -1;
+    }
+    *out_value = fast_value;
+    return 0;
+  }
 
   next_token(&parser);
   result = parse_assignment(&parser, true);

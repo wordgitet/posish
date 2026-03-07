@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
 
     shell_state_init(&state);
     options_init();
-    vars_init();
+    vars_init(&state);
     jobs_init();
     signals_init();
 
@@ -74,7 +74,7 @@ int main(int argc, char **argv) {
 
         /* Keep PPID coherent for child shells used by the POSIX signal tests. */
         snprintf(ppid_buf, sizeof(ppid_buf), "%ld", (long)getppid());
-        (void)setenv("PPID", ppid_buf, 1);
+        (void)vars_set_with_mode(&state, "PPID", ppid_buf, false, false);
     }
 
     if (argc > 1 && strcmp(argv[1], "--version") == 0) {
@@ -212,7 +212,7 @@ int main(int argc, char **argv) {
     } else if (!read_stdin_script && i < argc) {
         special_0 = argv[i];
     }
-    (void)setenv("0", special_0, 1);
+    (void)vars_set_with_mode(&state, "0", special_0, false, false);
 
     if (command != NULL) {
         (void)set_initial_positional_params(&state, argc, argv, i + 1);

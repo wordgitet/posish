@@ -7,6 +7,7 @@
 
 #include "arena.h"
 #include "error.h"
+#include "exec.h"
 #include "jobs.h"
 #include "path.h"
 #include "vars.h"
@@ -227,13 +228,13 @@ static int builtin_cd(struct shell_state *state, char *const argv[]) {
     operand = argv[i];
     print_path = false;
     if (operand == NULL) {
-        target = getenv("HOME");
+        target = vars_get(state, "HOME");
         if (target == NULL || target[0] == '\0') {
             posish_error_idf(POSERR_CD_HOME_NOT_SET);
             return 1;
         }
     } else if (strcmp(operand, "-") == 0) {
-        target = getenv("OLDPWD");
+        target = vars_get(state, "OLDPWD");
         if (target == NULL || target[0] == '\0') {
             posish_error_idf(POSERR_CD_OLDPWD_NOT_SET);
             return 1;
@@ -243,8 +244,8 @@ static int builtin_cd(struct shell_state *state, char *const argv[]) {
         target = operand;
     }
 
-    old_pwd = getenv("PWD") != NULL ? arena_xstrdup(getenv("PWD"))
-                                     : path_getcwd_alloc();
+    old_pwd = vars_get(state, "PWD") != NULL ? arena_xstrdup(vars_get(state, "PWD"))
+                                             : path_getcwd_alloc();
     if (old_pwd == NULL) {
         old_pwd = arena_xstrdup("/");
     }
@@ -254,7 +255,7 @@ static int builtin_cd(struct shell_state *state, char *const argv[]) {
     if (!cd_operand_ignores_cdpath(target)) {
         const char *cdpath;
 
-        cdpath = getenv("CDPATH");
+        cdpath = vars_get(state, "CDPATH");
         if (cdpath != NULL) {
             const char *p;
             bool found_path;
@@ -387,7 +388,7 @@ static int builtin_cd(struct shell_state *state, char *const argv[]) {
     return 0;
 }
 
-static int builtin_pwd(char *const argv[]) {
+static int builtin_pwd(struct shell_state *state, char *const argv[]) {
     size_t i;
     bool physical;
     char *cwd;
@@ -427,7 +428,7 @@ static int builtin_pwd(char *const argv[]) {
         return 1;
     }
 
-    pwd = getenv("PWD");
+    pwd = vars_get(state, "PWD");
     if (!physical && pwd != NULL && pwd[0] == '/') {
         puts(pwd);
         return 0;
@@ -706,21 +707,36 @@ static int builtin_umask(char *const argv[]) {
     return 0;
 }
 
-static int run_utility(char *const argv[]) {
+static int run_utility(struct shell_state *state, char *const argv[]) {
+    char *path;
     int status;
     pid_t pid;
 
+    path = path_resolve_command(state, argv[0], false);
+    if (path == NULL) {
+        int saved_errno;
+
+        if (errno == 0) {
+            errno = ENOENT;
+        }
+        saved_errno = errno;
+        perror(argv[0]);
+        return saved_errno == ENOENT ? 127 : 126;
+    }
     pid = fork();
     if (pid < 0) {
         perror("fork");
+        arena_maybe_free(path);
         return 1;
     }
 
     if (pid == 0) {
-        execvp(argv[0], argv);
+        exec_prepare_signals_for_exec_child(state);
+        status = exec_replace_with_utility(state, path, argv);
         perror(argv[0]);
-        _exit(127);
+        _exit(status);
     }
+    arena_maybe_free(path);
 
     for (;;) {
         if (waitpid(pid, &status, 0) < 0) {
@@ -1285,7 +1301,7 @@ static size_t kill_operand_start(char *const argv[]) {
     return i;
 }
 
-static int builtin_kill(char *const argv[]) {
+static int builtin_kill(struct shell_state *state, char *const argv[]) {
     size_t argc;
     size_t i;
     char **converted;
@@ -1398,7 +1414,7 @@ static int builtin_kill(char *const argv[]) {
         final_argv[argc + 1] = NULL;
     }
 
-    status = run_utility(final_argv != NULL ? final_argv : converted);
+    status = run_utility(state, final_argv != NULL ? final_argv : converted);
 
 done:
     for (i = 0; i < argc; i++) {
@@ -1713,12 +1729,12 @@ static int getopts_set_char_var(struct shell_state *state, const char *name,
     return getopts_set_var(state, name, value);
 }
 
-static unsigned long getopts_read_optind(void) {
+static unsigned long getopts_read_optind(const struct shell_state *state) {
     const char *value;
     char *end;
     unsigned long parsed;
 
-    value = getenv("OPTIND");
+    value = vars_get(state, "OPTIND");
     if (value == NULL || value[0] == '\0') {
         return 1;
     }
@@ -1769,7 +1785,7 @@ static int builtin_getopts(struct shell_state *state, char *const argv[]) {
         arg_count = state->positional_count;
     }
 
-    optind = getopts_read_optind();
+    optind = getopts_read_optind(state);
     if (getopts_last_optstring == NULL ||
         strcmp(getopts_last_optstring, optstring) != 0 ||
         optind != getopts_last_optind) {
@@ -2406,7 +2422,7 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
     }
     if (strcmp(argv[0], "pwd") == 0) {
         *handled = true;
-        return builtin_pwd(argv);
+        return builtin_pwd(state, argv);
     }
     if (strcmp(argv[0], "true") == 0) {
         *handled = true;
@@ -2430,7 +2446,7 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
     }
     if (strcmp(argv[0], "kill") == 0) {
         *handled = true;
-        return builtin_kill(argv);
+        return builtin_kill(state, argv);
     }
     if (strcmp(argv[0], "wait") == 0) {
         *handled = true;

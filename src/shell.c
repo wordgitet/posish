@@ -12,9 +12,11 @@
 #include "exec.h"
 #include "lexer.h"
 #include "parser.h"
+#include "path.h"
 #include "prompt.h"
 #include "signals.h"
 #include "trace.h"
+#include "vars.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -45,7 +47,7 @@ static int run_startup_path(struct shell_state *state, const char *path,
                             bool interactive);
 static int expand_startup_path(struct shell_state *state, const char *text,
                                char **out);
-static char *home_startup_path(const char *leaf);
+static char *home_startup_path(struct shell_state *state, const char *leaf);
 static int shell_run_stream_named(struct shell_state *state, FILE *stream,
                                   bool interactive, const char *source_name);
 static void free_shell_positionals(struct shell_state *state);
@@ -1638,12 +1640,14 @@ void shell_state_init(struct shell_state *state) {
         state->signal_traps[signo] = NULL;
         state->signal_cleared[signo] = false;
     }
-    state->readonly_names = NULL;
-    state->readonly_count = 0;
+    state->vars = NULL;
+    state->var_count = 0;
+    state->var_mru_valid = false;
+    state->var_mru_index = 0;
     state->functions = NULL;
     state->function_count = 0;
-    state->unexported_names = NULL;
-    state->unexported_count = 0;
+    state->path_cache = NULL;
+    state->path_cache_count = 0;
     state->positional_params = NULL;
     state->positional_count = 0;
     state->shell_name = NULL;
@@ -1668,12 +1672,10 @@ void shell_state_destroy(struct shell_state *state) {
         state->signal_cleared[signo] = false;
     }
 
-    state->readonly_names = NULL;
-    state->readonly_count = 0;
+    vars_destroy(state);
     state->functions = NULL;
     state->function_count = 0;
-    state->unexported_names = NULL;
-    state->unexported_count = 0;
+    path_cache_destroy(state);
     free_shell_positionals(state);
     state->login_shell = false;
     state->current_source_name = NULL;
@@ -1686,6 +1688,8 @@ void shell_state_destroy(struct shell_state *state) {
     state->last_async_pid = -1;
     state->break_levels = 0;
     state->continue_levels = 0;
+    state->var_mru_valid = false;
+    state->var_mru_index = 0;
     state->loop_depth = 0;
     state->return_requested = false;
     state->return_status = 0;
@@ -1790,14 +1794,14 @@ void shell_init_startup_env(struct shell_state *state, const char *argv0) {
     prompt_init_defaults(state, argv0);
 }
 
-static char *home_startup_path(const char *leaf) {
+static char *home_startup_path(struct shell_state *state, const char *leaf) {
     const char *home;
     size_t home_len;
     size_t leaf_len;
     bool need_slash;
     char *path;
 
-    home = getenv("HOME");
+    home = vars_get(state, "HOME");
     if (home == NULL || home[0] == '\0') {
         return NULL;
     }
@@ -1897,10 +1901,10 @@ int shell_run_startup_files(struct shell_state *state) {
     const char *home;
 
     status = 0;
-    home = getenv("HOME");
+    home = vars_get(state, "HOME");
 
     if (state->login_shell) {
-        path = home_startup_path(".posish_profile");
+        path = home_startup_path(state, ".posish_profile");
         if (path == NULL) {
             if (home == NULL || home[0] == '\0') {
                 goto maybe_env;
@@ -1918,7 +1922,7 @@ int shell_run_startup_files(struct shell_state *state) {
 
 maybe_env:
     if (state->interactive) {
-        env_value = getenv("ENV");
+        env_value = vars_get(state, "ENV");
         if (env_value != NULL && env_value[0] != '\0') {
             path = NULL;
             if (expand_startup_path(state, env_value, &path) != 0) {
@@ -1939,9 +1943,9 @@ maybe_env:
             }
         }
 
-        path = home_startup_path(".posishrc");
+        path = home_startup_path(state, ".posishrc");
         if (path == NULL) {
-            home = getenv("HOME");
+            home = vars_get(state, "HOME");
             if (home == NULL || home[0] == '\0') {
                 return status;
             }

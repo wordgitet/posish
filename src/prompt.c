@@ -104,7 +104,7 @@ static int append_special_param(char **buf, size_t *len, size_t *cap,
     case '0': {
         const char *value;
 
-        value = getenv("0");
+        value = vars_get(state, "0");
         return append_cstr(buf, len, cap, value == NULL ? "" : value);
     }
     default:
@@ -168,7 +168,7 @@ static int prompt_expand_simple_params(const char *in, struct shell_state *state
             }
             memcpy(name, in + i + 1, j - (i + 1));
             name[j - (i + 1)] = '\0';
-            value = getenv(name);
+            value = vars_get(state, name);
             arena_maybe_free(name);
             if (append_cstr(&buf, &len, &cap, value == NULL ? "" : value) != 0) {
                 arena_maybe_free(buf);
@@ -206,7 +206,7 @@ static int prompt_expand_simple_params(const char *in, struct shell_state *state
                     }
                     memcpy(name, in + i + 2, j - (i + 2));
                     name[j - (i + 2)] = '\0';
-                    value = getenv(name);
+                    value = vars_get(state, name);
                     arena_maybe_free(name);
                     if (append_cstr(&buf, &len, &cap,
                                     value == NULL ? "" : value) != 0) {
@@ -242,14 +242,15 @@ static int prompt_expand_simple_params(const char *in, struct shell_state *state
     return 0;
 }
 
-static int append_username(char **buf, size_t *len, size_t *cap) {
+static int append_username(struct shell_state *state, char **buf, size_t *len,
+                           size_t *cap) {
     const char *name;
     struct passwd *pw;
     char num[64];
 
-    name = getenv("LOGNAME");
+    name = vars_get(state, "LOGNAME");
     if (name == NULL || name[0] == '\0') {
-        name = getenv("USER");
+        name = vars_get(state, "USER");
     }
     if (name != NULL && name[0] != '\0') {
         return append_cstr(buf, len, cap, name);
@@ -283,13 +284,13 @@ static int append_hostname(char **buf, size_t *len, size_t *cap, bool short_name
     return append_cstr(buf, len, cap, text);
 }
 
-static char *prompt_shorten_home(const char *cwd) {
+static char *prompt_shorten_home(struct shell_state *state, const char *cwd) {
     const char *home;
     size_t cwd_len;
     size_t home_len;
     char *shortened;
 
-    home = getenv("HOME");
+    home = vars_get(state, "HOME");
     if (cwd == NULL) {
         return arena_xstrdup("");
     }
@@ -315,14 +316,15 @@ static char *prompt_shorten_home(const char *cwd) {
     return arena_xstrdup(cwd);
 }
 
-static int append_cwd(char **buf, size_t *len, size_t *cap, bool basename_only) {
+static int append_cwd(struct shell_state *state, char **buf, size_t *len,
+                      size_t *cap, bool basename_only) {
     const char *pwd;
     char *cwd;
     char *display;
     const char *base;
     int rc;
 
-    pwd = getenv("PWD");
+    pwd = vars_get(state, "PWD");
     cwd = NULL;
     display = NULL;
     rc = 0;
@@ -331,7 +333,7 @@ static int append_cwd(char **buf, size_t *len, size_t *cap, bool basename_only) 
         pwd = cwd;
     }
 
-    display = prompt_shorten_home(pwd == NULL ? "" : pwd);
+    display = prompt_shorten_home(state, pwd == NULL ? "" : pwd);
     if (display == NULL) {
         arena_maybe_free(cwd);
         return 1;
@@ -430,7 +432,7 @@ static int prompt_expand_backslash_escapes(const char *in,
             }
             break;
         case 'u':
-            if (append_username(&buf, &len, &cap) != 0) {
+            if (append_username(state, &buf, &len, &cap) != 0) {
                 arena_maybe_free(buf);
                 return 1;
             }
@@ -456,13 +458,13 @@ static int prompt_expand_backslash_escapes(const char *in,
             }
             break;
         case 'w':
-            if (append_cwd(&buf, &len, &cap, false) != 0) {
+            if (append_cwd(state, &buf, &len, &cap, false) != 0) {
                 arena_maybe_free(buf);
                 return 1;
             }
             break;
         case 'W':
-            if (append_cwd(&buf, &len, &cap, true) != 0) {
+            if (append_cwd(state, &buf, &len, &cap, true) != 0) {
                 arena_maybe_free(buf);
                 return 1;
             }
@@ -537,7 +539,7 @@ int prompt_render(struct shell_state *state, const char *var_name, char **out) {
         return 1;
     }
 
-    raw = getenv(var_name);
+    raw = vars_get(state, var_name);
     if (raw == NULL) {
         *out = arena_xstrdup("");
         return 0;
@@ -567,10 +569,10 @@ void prompt_init_defaults(struct shell_state *state, const char *argv0) {
         return;
     }
 
-    if (getenv("PS1") == NULL) {
+    if (!vars_is_set(state, "PS1")) {
         (void)vars_set_with_mode(state, "PS1", "\\w \\$ ", false, false);
     }
-    if (getenv("PS2") == NULL) {
+    if (!vars_is_set(state, "PS2")) {
         (void)vars_set_with_mode(state, "PS2", "> ", false, false);
     }
 }

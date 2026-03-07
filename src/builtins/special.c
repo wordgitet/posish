@@ -24,8 +24,6 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-extern char **environ;
-
 static bool inherited_ignore_locked(const struct shell_state *state, int signo) {
     return !state->interactive && signals_inherited_ignored(signo) &&
            !state->parent_was_interactive;
@@ -38,6 +36,7 @@ static void builtin_exec_prepare_signals(const struct shell_state *state) {
 
 static int builtin_exec(struct shell_state *state, char *const argv[]) {
     size_t i;
+    char *path;
     int status;
     int saved_errno;
 
@@ -54,12 +53,22 @@ static int builtin_exec(struct shell_state *state, char *const argv[]) {
      * handlers are reset like any other external command spawn path.
      */
     trace_log(POSISH_TRACE_SIGNALS, "special builtin exec argv0=%s", argv[i]);
-    (void)setenv("POSISH_PARENT_INTERACTIVE", state->interactive ? "1" : "0", 1);
+    path = path_resolve_command(state, argv[i], false);
+    if (path == NULL) {
+        saved_errno = errno == 0 ? ENOENT : errno;
+        status = saved_errno == ENOENT ? 127 : 126;
+        errno = saved_errno;
+        perror(argv[i]);
+        if (!state->interactive) {
+            state->should_exit = true;
+            state->exit_status = status;
+        }
+        return status;
+    }
     builtin_exec_prepare_signals(state);
-    vars_apply_unexported_in_child(state);
-    execvp(argv[i], &argv[i]);
+    status = exec_replace_with_utility(state, path, &argv[i]);
     saved_errno = errno;
-    status = saved_errno == ENOENT ? 127 : 126;
+    arena_maybe_free(path);
     perror(argv[i]);
     if (!state->interactive) {
         state->should_exit = true;
@@ -170,144 +179,6 @@ static char *xstrdup_local(const char *s) {
     return arena_xstrdup(s);
 }
 
-static char *find_command_path(const char *name, bool use_standard_path) {
-    const char *path;
-    const char *p;
-
-    if (strchr(name, '/') != NULL) {
-        if (access(name, X_OK) == 0) {
-            char *cwd;
-            char *absolute;
-            size_t clen;
-            size_t nlen;
-
-            if (name[0] == '/') {
-                return xstrdup_local(name);
-            }
-            cwd = path_getcwd_alloc();
-            if (cwd == NULL) {
-                return xstrdup_local(name);
-            }
-            clen = strlen(cwd);
-            nlen = strlen(name);
-            absolute = arena_xmalloc(clen + 1 + nlen + 1);
-            memcpy(absolute, cwd, clen);
-            absolute[clen] = '/';
-            memcpy(absolute + clen + 1, name, nlen + 1);
-            arena_maybe_free(cwd);
-            return absolute;
-        }
-        return NULL;
-    }
-
-    path = use_standard_path ? "/bin:/usr/bin" : getenv("PATH");
-    if (path == NULL || path[0] == '\0') {
-        return NULL;
-    }
-
-    p = path;
-    while (1) {
-        const char *end;
-        size_t dlen;
-        const char *dir;
-        char *candidate;
-
-        end = strchr(p, ':');
-        if (end == NULL) {
-            end = p + strlen(p);
-        }
-        dlen = (size_t)(end - p);
-        dir = dlen == 0 ? "." : p;
-
-        candidate = arena_xmalloc((dlen == 0 ? 1 : dlen) + 1 + strlen(name) + 1);
-        if (dlen == 0) {
-            strcpy(candidate, ".");
-        } else {
-            memcpy(candidate, dir, dlen);
-            candidate[dlen] = '\0';
-        }
-        strcat(candidate, "/");
-        strcat(candidate, name);
-
-        if (access(candidate, X_OK) == 0) {
-            return candidate;
-        }
-        arena_maybe_free(candidate);
-
-        if (*end == '\0') {
-            break;
-        }
-        p = end + 1;
-    }
-
-    return NULL;
-}
-
-static bool path_resolves_command(const char *name, bool use_standard_path) {
-    char *path;
-    bool found;
-
-    path = find_command_path(name, use_standard_path);
-    if (path == NULL) {
-        return false;
-    }
-    found = true;
-    arena_maybe_free(path);
-    return found;
-}
-
-static char *find_dot_script_path(const char *name) {
-    const char *path;
-    const char *p;
-
-    if (strchr(name, '/') != NULL) {
-        if (access(name, R_OK) == 0) {
-            return xstrdup_local(name);
-        }
-        return NULL;
-    }
-
-    path = getenv("PATH");
-    if (path == NULL || path[0] == '\0') {
-        path = ".";
-    }
-    p = path;
-
-    while (1) {
-        const char *colon;
-        size_t dir_len;
-        const char *dir;
-        size_t name_len;
-        char *candidate;
-
-        colon = strchr(p, ':');
-        dir_len = colon == NULL ? strlen(p) : (size_t)(colon - p);
-        dir = p;
-        if (dir_len == 0) {
-            dir = ".";
-            dir_len = 1;
-        }
-
-        name_len = strlen(name);
-        candidate = arena_xmalloc(dir_len + 1 + name_len + 1);
-        memcpy(candidate, dir, dir_len);
-        candidate[dir_len] = '/';
-        memcpy(candidate + dir_len + 1, name, name_len + 1);
-
-        if (access(candidate, R_OK) == 0) {
-            return candidate;
-        }
-        arena_maybe_free(candidate);
-
-        if (colon == NULL) {
-            break;
-        }
-        p = colon + 1;
-    }
-
-    return NULL;
-}
-
 static char *command_alias_value_dup(const char *name) {
     static const char prefix[] = "POSISH_ALIAS_";
     size_t plen;
@@ -359,7 +230,7 @@ static int builtin_command_describe(struct shell_state *state, char *const argv[
             continue;
         } else if (strcmp(argv[i], "test") == 0 || strcmp(argv[i], "[") == 0) {
             if (prefer_external) {
-                path = find_command_path(argv[i], use_standard_path);
+                path = path_resolve_command(state, argv[i], use_standard_path);
                 if (path == NULL) {
                     status = 1;
                     continue;
@@ -383,7 +254,7 @@ static int builtin_command_describe(struct shell_state *state, char *const argv[
             fflush(stdout);
             continue;
         } else if (builtin_is_substitutive_name(argv[i])) {
-            path = find_command_path(argv[i], use_standard_path);
+            path = path_resolve_command(state, argv[i], use_standard_path);
             if (path == NULL) {
                 status = 1;
                 continue;
@@ -397,7 +268,7 @@ static int builtin_command_describe(struct shell_state *state, char *const argv[
             arena_maybe_free(path);
             continue;
         } else {
-            path = find_command_path(argv[i], use_standard_path);
+            path = path_resolve_command(state, argv[i], use_standard_path);
             if (path == NULL && is_regular_builtin_name(argv[i])) {
                 path = xstrdup_local(argv[i]);
             }
@@ -441,9 +312,6 @@ static int builtin_command(struct shell_state *state, char *const argv[]) {
     bool opt_p;
     bool handled;
     int status;
-    bool restore_path;
-    const char *saved_path;
-    char *saved_path_copy;
 
     i = 1;
     opt_b = false;
@@ -452,9 +320,6 @@ static int builtin_command(struct shell_state *state, char *const argv[]) {
     opt_p = false;
     handled = false;
     status = 0;
-    restore_path = false;
-    saved_path = NULL;
-    saved_path_copy = NULL;
     while (argv[i] != NULL) {
         size_t j;
 
@@ -500,19 +365,6 @@ static int builtin_command(struct shell_state *state, char *const argv[]) {
         return 0;
     }
 
-    if (opt_p) {
-        saved_path = getenv("PATH");
-        if (saved_path != NULL) {
-            saved_path_copy = xstrdup_local(saved_path);
-        }
-        if (setenv("PATH", "/bin:/usr/bin", 1) != 0) {
-            perror("setenv");
-            arena_maybe_free(saved_path_copy);
-            return 1;
-        }
-        restore_path = true;
-    }
-
     {
         bool saved_in_command_builtin;
 
@@ -521,7 +373,7 @@ static int builtin_command(struct shell_state *state, char *const argv[]) {
         if (opt_b && builtin_is_substitutive_name(argv[i])) {
             handled = false;
         } else if (builtin_is_substitutive_name(argv[i]) &&
-                   !path_resolves_command(argv[i], opt_p)) {
+                   !path_resolves_command(state, argv[i], opt_p)) {
             handled = false;
         } else {
             status = builtin_dispatch(state, &argv[i], &handled);
@@ -540,12 +392,24 @@ static int builtin_command(struct shell_state *state, char *const argv[]) {
         }
 
         if (pid == 0) {
+            char *path;
             int saved_errno;
+            int exec_status;
 
-            execvp(argv[i], &argv[i]);
+            path = path_resolve_command(state, argv[i], opt_p);
+            if (path == NULL) {
+                saved_errno = errno == 0 ? ENOENT : errno;
+                errno = saved_errno;
+                perror(argv[i]);
+                _exit(saved_errno == ENOENT ? 127 : 126);
+            }
+            exec_prepare_signals_for_exec_child(state);
+            exec_status = exec_replace_with_utility(state, path, &argv[i]);
             saved_errno = errno;
+            arena_maybe_free(path);
+            errno = saved_errno;
             perror(argv[i]);
-            _exit(saved_errno == ENOENT ? 127 : 126);
+            _exit(exec_status);
         }
 
         for (;;) {
@@ -563,18 +427,6 @@ static int builtin_command(struct shell_state *state, char *const argv[]) {
     }
 
 done:
-    if (restore_path) {
-        if (saved_path_copy != NULL) {
-            if (setenv("PATH", saved_path_copy, 1) != 0) {
-                perror("setenv");
-            }
-        } else {
-            if (unsetenv("PATH") != 0) {
-                perror("unsetenv");
-            }
-        }
-    }
-    arena_maybe_free(saved_path_copy);
     return status;
 }
 
@@ -857,7 +709,7 @@ static int builtin_dot(struct shell_state *state, char *const argv[]) {
         return 2;
     }
 
-    path = find_dot_script_path(argv[i]);
+    path = path_resolve_dot_script(state, argv[i]);
     if (path == NULL) {
         posish_error_idf(POSERR_DOT_FILE_NOT_FOUND, argv[i]);
         if (!state->interactive && !state->in_command_builtin) {
@@ -924,7 +776,8 @@ static void append_mem(char **buf, size_t *len, size_t *cap, const char *data,
     (*buf)[*len] = '\0';
 }
 
-static char *expand_decl_assignment_tilde(const char *value) {
+static char *expand_decl_assignment_tilde(struct shell_state *state,
+                                          const char *value) {
     const char *home;
     size_t i;
     size_t start;
@@ -932,7 +785,7 @@ static char *expand_decl_assignment_tilde(const char *value) {
     size_t out_len;
     size_t out_cap;
 
-    home = getenv("HOME");
+    home = vars_get(state, "HOME");
     if (home == NULL || value == NULL || value[0] == '\0') {
         return arena_xstrdup(value == NULL ? "" : value);
     }
@@ -1018,39 +871,22 @@ static char *double_quote_for_eval(const char *value) {
     return out;
 }
 
-static int print_exported_variables(void) {
+static int print_exported_variables(const struct shell_state *state) {
     size_t i;
 
-    for (i = 0; environ != NULL && environ[i] != NULL; i++) {
-        const char *entry;
-        const char *eq;
-        size_t nlen;
-        char *name;
+    for (i = 0; i < state->var_count; i++) {
         char *quoted;
 
-        entry = environ[i];
-        eq = strchr(entry, '=');
-        if (eq == NULL) {
+        if (!state->vars[i].exported || !vars_is_name_valid(state->vars[i].name)) {
             continue;
         }
 
-        nlen = (size_t)(eq - entry);
-        name = arena_xmalloc(nlen + 1);
-        memcpy(name, entry, nlen);
-        name[nlen] = '\0';
-        if (!vars_is_name_valid(name)) {
-            arena_maybe_free(name);
-            continue;
-        }
-
-        quoted = double_quote_for_eval(eq + 1);
+        quoted = double_quote_for_eval(state->vars[i].value);
         if (quoted == NULL) {
-            arena_maybe_free(name);
             return 1;
         }
-        printf("export %s=%s\n", name, quoted);
+        printf("export %s=%s\n", state->vars[i].name, quoted);
         arena_maybe_free(quoted);
-        arena_maybe_free(name);
     }
     fflush(stdout);
 
@@ -1060,22 +896,18 @@ static int print_exported_variables(void) {
 static int print_readonly_variables(const struct shell_state *state) {
     size_t i;
 
-    for (i = 0; i < state->readonly_count; i++) {
-        const char *name;
-        const char *value;
+    for (i = 0; i < state->var_count; i++) {
         char *quoted;
 
-        name = state->readonly_names[i];
-        value = getenv(name);
-        if (value == NULL) {
-            value = "";
+        if (!state->vars[i].readonly) {
+            continue;
         }
 
-        quoted = double_quote_for_eval(value);
+        quoted = double_quote_for_eval(state->vars[i].value);
         if (quoted == NULL) {
             return 1;
         }
-        printf("readonly %s=%s\n", name, quoted);
+        printf("readonly %s=%s\n", state->vars[i].name, quoted);
         arena_maybe_free(quoted);
     }
     fflush(stdout);
@@ -1180,7 +1012,7 @@ static int builtin_export(struct shell_state *state, char *const argv[]) {
         /*
          * POSIX allows `export` with no operands to print export declarations.
          */
-        return print_exported_variables();
+        return print_exported_variables(state);
     }
 
     status = 0;
@@ -1194,7 +1026,7 @@ static int builtin_export(struct shell_state *state, char *const argv[]) {
         if (split_assignment(argv[i], &name, &value) == 0) {
             char *tilde_value;
 
-            tilde_value = expand_decl_assignment_tilde(value);
+            tilde_value = expand_decl_assignment_tilde(state, value);
             if (vars_set_with_mode(state, name, tilde_value, true, true) != 0) {
                 status = 1;
             }
@@ -1215,7 +1047,7 @@ static int builtin_export(struct shell_state *state, char *const argv[]) {
     }
 
     if (status == 0 && print_only) {
-        status = print_exported_variables();
+        status = print_exported_variables(state);
     }
     if (status != 0 && !state->interactive) {
         state->should_exit = true;
@@ -1581,7 +1413,7 @@ static int builtin_read(struct shell_state *state, char *const argv[]) {
         read_status = 1;
     }
 
-    ifs_env = getenv("IFS");
+    ifs_env = vars_get(state, "IFS");
     if (ifs_env == NULL) {
         ifs = " \t\n";
     } else {
@@ -1722,7 +1554,7 @@ static int builtin_readonly(struct shell_state *state, char *const argv[]) {
         if (split_assignment(argv[i], &name, &value) == 0) {
             char *tilde_value;
 
-            tilde_value = expand_decl_assignment_tilde(value);
+            tilde_value = expand_decl_assignment_tilde(state, value);
             if (vars_mark_readonly(state, name, tilde_value, true) != 0) {
                 status = 1;
             }

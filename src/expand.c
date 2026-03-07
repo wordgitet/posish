@@ -309,8 +309,10 @@ static void append_tilde_literal(char **buf, size_t *len, size_t *cap,
   }
 }
 
-static bool try_tilde_expansion(const char *in, size_t *i, bool assignment_context,
-                                char **buf, size_t *len, size_t *cap) {
+static bool try_tilde_expansion(const char *in, size_t *i,
+                                bool assignment_context,
+                                struct shell_state *state, char **buf,
+                                size_t *len, size_t *cap) {
   size_t name_start;
   size_t name_end;
   char delim;
@@ -334,7 +336,7 @@ static bool try_tilde_expansion(const char *in, size_t *i, bool assignment_conte
   }
 
   if (name_end == name_start) {
-    home = getenv("HOME");
+    home = vars_get(state, "HOME");
     if (home == NULL) {
       return false;
     }
@@ -642,7 +644,7 @@ static int append_parameter(const char *name, size_t nlen,
         char sep;
         bool use_sep;
 
-        val = getenv("IFS");
+        val = vars_get(state, "IFS");
         if (!quoted_context && val != NULL && val[0] == '\0') {
             for (i = 0; i < state->positional_count; i++) {
                 if (i > 0) {
@@ -700,7 +702,7 @@ static int append_parameter(const char *name, size_t nlen,
     }
 
     if (strcmp(tmp, "0") == 0) {
-        val = getenv("0");
+        val = vars_get(state, "0");
         if (val != NULL) {
             if (quoted_context) {
               append_tilde_literal(buf, len, cap, val);
@@ -728,7 +730,7 @@ static int append_parameter(const char *name, size_t nlen,
         return 0;
     }
 
-    val = getenv(tmp);
+    val = vars_get(state, tmp);
     if (val != NULL) {
         if (quoted_context) {
           append_tilde_literal(buf, len, cap, val);
@@ -766,7 +768,9 @@ static bool should_tilde_expand(const char *s, bool in_double_quotes) {
   return !in_double_quotes && s[0] == '~' && (s[1] == '\0' || s[1] == '/');
 }
 
-static char *maybe_tilde_expand_fragment(char *expanded, bool in_double_quotes) {
+static char *maybe_tilde_expand_fragment(char *expanded,
+                                         struct shell_state *state,
+                                         bool in_double_quotes) {
   const char *home;
   size_t hlen;
   size_t slen;
@@ -776,7 +780,7 @@ static char *maybe_tilde_expand_fragment(char *expanded, bool in_double_quotes) 
     return expanded;
   }
 
-  home = getenv("HOME");
+  home = vars_get(state, "HOME");
   if (home == NULL) {
     return expanded;
   }
@@ -810,7 +814,8 @@ static int append_expanded_fragment(const char *expr, size_t start, size_t elen,
     return -1;
   }
 
-  expanded_word = maybe_tilde_expand_fragment(expanded_word, in_double_quotes);
+  expanded_word =
+      maybe_tilde_expand_fragment(expanded_word, state, in_double_quotes);
   /*
    * `expand_token` already applies quote-context protection. Re-encoding here
    * would leak marker bytes for nested braced expansions.
@@ -840,7 +845,7 @@ static int expand_fragment_to_string(const char *expr, size_t start, size_t elen
     return rc;
   }
 
-  expanded = maybe_tilde_expand_fragment(expanded, in_double_quotes);
+  expanded = maybe_tilde_expand_fragment(expanded, state, in_double_quotes);
   *out = expanded;
   return rc;
 }
@@ -1230,7 +1235,7 @@ static int append_braced_parameter(const char *expr, size_t elen,
     }
 
     if (strcmp(name, "0") == 0) {
-        value = getenv("0");
+        value = vars_get(state, "0");
         is_set = value != NULL;
         is_nonempty = value != NULL && value[0] != '\0';
     } else if (is_numeric_parameter_name(name)) {
@@ -1264,7 +1269,7 @@ static int append_braced_parameter(const char *expr, size_t elen,
         }
         value = NULL;
     } else {
-        value = getenv(name);
+        value = vars_get(state, name);
         is_set = value != NULL;
         is_nonempty = value != NULL && value[0] != '\0';
     }
@@ -1404,7 +1409,7 @@ static int append_braced_parameter(const char *expr, size_t elen,
                 arena_maybe_free(name);
                 return -1;
             }
-            value = getenv(name);
+            value = vars_get(state, name);
             is_set = value != NULL;
         }
         if (is_set) {
@@ -1615,7 +1620,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
 
   while (in[i] != '\0') {
     if (quote == '\0' && tilde_allowed && in[i] == '~') {
-      if (try_tilde_expansion(in, &i, assign_mode, &buf, &len, &cap)) {
+      if (try_tilde_expansion(in, &i, assign_mode, state, &buf, &len, &cap)) {
         tilde_allowed = false;
         continue;
       }
@@ -2309,7 +2314,7 @@ int expand_words(const struct token_vec *in, struct token_vec *out,
     }
 
     if (field_split_has_at_marker(expanded)) {
-      (void)field_split_append_at_expansion(expanded, out, split_fields);
+      (void)field_split_append_at_expansion(expanded, out, split_fields, state);
       arena_maybe_free(expanded);
       continue;
     }
@@ -2326,8 +2331,8 @@ int expand_words(const struct token_vec *in, struct token_vec *out,
         arena_maybe_free(expanded);
         continue;
       }
-      had_delim = field_split_has_delimiter(expanded);
-      count = field_split_split(expanded, out);
+      had_delim = field_split_has_delimiter(expanded, state);
+      count = field_split_split(expanded, out, state);
       if (count > 0) {
         arena_maybe_free(expanded);
         continue;

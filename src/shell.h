@@ -19,6 +19,23 @@ struct shell_function {
     struct redir_vec redirs;
 };
 
+struct shell_var {
+    char *name;
+    char *value;
+    size_t value_len;
+    bool long_cache_valid;
+    long long_cache;
+    bool exported;
+    bool readonly;
+};
+
+struct command_path_cache_entry {
+    char *name;
+    char *path_value;
+    char *resolved_path;
+    bool use_standard_path;
+};
+
 struct shell_state {
     int last_status;
     int last_cmdsub_status;
@@ -67,12 +84,14 @@ struct shell_state {
     int trap_entry_status;
     char *signal_traps[NSIG];
     bool signal_cleared[NSIG];
-    char **readonly_names;
-    size_t readonly_count;
+    struct shell_var *vars;
+    size_t var_count;
+    bool var_mru_valid;
+    size_t var_mru_index;
     struct shell_function *functions;
     size_t function_count;
-    char **unexported_names;
-    size_t unexported_count;
+    struct command_path_cache_entry *path_cache;
+    size_t path_cache_count;
     char **positional_params;
     size_t positional_count;
     char *shell_name;
