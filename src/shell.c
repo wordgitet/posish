@@ -1466,6 +1466,31 @@ out:
     return result;
 }
 
+static int shell_run_stream_command(struct shell_state *state,
+                                    const char *command_text) {
+    char *alias_preview;
+    bool saved_suppress_aliases;
+    int status;
+
+    alias_preview = NULL;
+    saved_suppress_aliases = state->suppress_ast_aliases;
+    if (!state->suppress_ast_aliases) {
+        alias_preview = exec_alias_expand_preview(state, command_text);
+    }
+
+    if (alias_preview != NULL) {
+        state->suppress_ast_aliases = true;
+        status = shell_run_command(state, alias_preview);
+        state->suppress_ast_aliases = saved_suppress_aliases;
+        arena_maybe_free(alias_preview);
+        return status;
+    }
+
+    status = shell_run_command(state, command_text);
+    state->suppress_ast_aliases = saved_suppress_aliases;
+    return status;
+}
+
 static bool inherited_ignore_locked(const struct shell_state *state, int signo) {
     return !state->interactive && signals_inherited_ignored(signo) &&
            !state->parent_was_interactive;
@@ -1996,10 +2021,13 @@ int shell_run_command(struct shell_state *state, const char *command) {
     const char *p;
     const char *command_text;
     char *command_copy;
+    char *alias_preview;
     int status;
     struct arena *saved_arena;
     struct arena *active_arena;
     bool top_level_command;
+    bool alias_changed;
+    bool saved_suppress_aliases;
     struct arena_mark cmd_mark;
     struct arena_mark nested_mark;
 
@@ -2034,9 +2062,30 @@ int shell_run_command(struct shell_state *state, const char *command) {
         arena_set_current(active_arena);
     }
 
+    alias_preview = NULL;
+    alias_changed = false;
+    saved_suppress_aliases = state->suppress_ast_aliases;
+    if (!state->suppress_ast_aliases) {
+        alias_preview = exec_alias_expand_preview(state, command_text);
+        if (alias_preview != NULL) {
+            char *rewritten_copy;
+
+            rewritten_copy = arena_alloc_in(NULL, strlen(alias_preview) + 1);
+            memcpy(rewritten_copy, alias_preview, strlen(alias_preview) + 1);
+            arena_maybe_free(command_copy);
+            command_copy = rewritten_copy;
+            command_text = command_copy;
+            alias_changed = true;
+        }
+    }
+    if (alias_changed) {
+        state->suppress_ast_aliases = true;
+    }
+
     if (parse_program_at(state->current_source_name,
                          state->current_source_base_line,
                          command_text, &program) != 0) {
+        state->suppress_ast_aliases = saved_suppress_aliases;
         if (!top_level_command) {
             arena_mark_rewind(active_arena, &nested_mark);
         }
@@ -2049,7 +2098,6 @@ int shell_run_command(struct shell_state *state, const char *command) {
         }
         return state->last_status;
     }
-
     if (top_level_command) {
         arena_mark_take(&state->arena_cmd, &cmd_mark);
         arena_set_current(&state->arena_cmd);
@@ -2057,6 +2105,7 @@ int shell_run_command(struct shell_state *state, const char *command) {
         arena_set_current(active_arena);
     }
     status = exec_run_program(state, program);
+    state->suppress_ast_aliases = saved_suppress_aliases;
     ast_program_free(program);
     if (top_level_command) {
         arena_mark_rewind(&state->arena_cmd, &cmd_mark);
@@ -2178,7 +2227,7 @@ static int shell_run_stream_named(struct shell_state *state, FILE *stream,
             snprintf(base_buf, sizeof(base_buf), "%zu", command_start_line - 1);
             (void)setenv("POSISH_LINENO_BASE", base_buf, 1);
             state->current_source_base_line = command_start_line;
-            shell_run_command(state, command);
+            shell_run_stream_command(state, command);
             pending_heredoc_clear(&pending_heredoc);
             command_len = 0;
             if (command != NULL) {
@@ -2218,7 +2267,7 @@ static int shell_run_stream_named(struct shell_state *state, FILE *stream,
                 snprintf(base_buf, sizeof(base_buf), "%zu", command_start_line - 1);
                 (void)setenv("POSISH_LINENO_BASE", base_buf, 1);
                 state->current_source_base_line = command_start_line;
-                shell_run_command(state, command);
+                shell_run_stream_command(state, command);
                 pending_heredoc_clear(&pending_heredoc);
                 ran_command = true;
             }
@@ -2307,7 +2356,7 @@ static int shell_run_stream_named(struct shell_state *state, FILE *stream,
             (void)setenv("POSISH_LINENO_BASE", base_buf, 1);
         }
         state->current_source_base_line = command_start_line;
-        shell_run_command(state, command);
+        shell_run_stream_command(state, command);
         state->prompt_command_index++;
         pending_heredoc_clear(&pending_heredoc);
         command_len = 0;
