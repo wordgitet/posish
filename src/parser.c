@@ -50,7 +50,7 @@ static struct ast_node *parse_embedded_program_root(struct parser_ctx *ctx,
                                                     size_t offset_hint,
                                                     int *err_out);
 static char *strip_parser_comments(const char *source);
-static bool looks_like_function_header_only(const char *source);
+static char *normalize_parser_syntax_source(const char *source);
 static bool parse_case_structure(struct parser_ctx *ctx, const char *source,
                                  size_t source_offset, char **word_expr_out,
                                  struct ast_case_clause **clauses_out,
@@ -65,6 +65,11 @@ static int consume_pending_heredocs(struct parser_ctx *ctx, size_t start_pos,
                                     size_t *new_pos_out);
 static bool line_tail_is_blank_or_comment(const char *source, size_t pos,
                                           size_t end, size_t *newline_out);
+static size_t skip_logical_leading_space(const char *source, size_t pos,
+                                         size_t end);
+static bool next_logical_char_is(const char *source, size_t pos, size_t end,
+                                 char expected, size_t *match_pos_out);
+static bool looks_like_redirection_suffix_parser(const char *source, size_t pos);
 
 static bool keyword_boundary(char ch) {
     return ch == '\0' || isspace((unsigned char)ch) || ch == ';' ||
@@ -180,6 +185,64 @@ static size_t skip_continuations_forward(const char *source, size_t pos) {
         pos += 2;
     }
     return pos;
+}
+
+static size_t skip_logical_leading_space(const char *source, size_t pos,
+                                         size_t end) {
+    while (pos < end) {
+        size_t next;
+
+        next = skip_continuations_forward(source, pos);
+        if (next != pos) {
+            pos = next;
+            continue;
+        }
+        if (!isspace((unsigned char)source[pos])) {
+            break;
+        }
+        pos++;
+    }
+    return pos;
+}
+
+static bool next_logical_char_is(const char *source, size_t pos, size_t end,
+                                 char expected, size_t *match_pos_out) {
+    size_t next;
+
+    next = skip_continuations_forward(source, pos);
+    if (next >= end || source[next] != expected) {
+        return false;
+    }
+    if (match_pos_out != NULL) {
+        *match_pos_out = next;
+    }
+    return true;
+}
+
+static bool looks_like_redirection_suffix_parser(const char *source, size_t pos) {
+    size_t i;
+
+    while (isspace((unsigned char)source[pos])) {
+        pos++;
+    }
+    if (source[pos] == '\0') {
+        return true;
+    }
+
+    i = pos;
+    while (isdigit((unsigned char)source[i])) {
+        i++;
+    }
+    if (source[i] != '<' && source[i] != '>') {
+        return false;
+    }
+
+    for (; source[i] != '\0'; i++) {
+        if (source[i] == '|' || source[i] == ';') {
+            return false;
+        }
+    }
+    return true;
 }
 
 static long previous_logical_index(const char *source, size_t pos) {
@@ -461,47 +524,65 @@ static char *strip_parser_comments(const char *source) {
     return out;
 }
 
-static bool looks_like_function_header_only(const char *source) {
+static char *normalize_parser_syntax_source(const char *source) {
     size_t i;
-    char *cleaned;
-    bool result;
+    size_t j;
+    size_t len;
+    char quote;
+    char *collapsed;
+    char *comment_stripped;
+    char *out;
 
-    cleaned = strip_parser_comments(source);
-    i = 0;
-    while (cleaned[i] != '\0' && isspace((unsigned char)cleaned[i])) {
-        i++;
-    }
-    if (!is_name_start_char(cleaned[i])) {
-        arena_maybe_free(cleaned);
-        return false;
-    }
-    i++;
-    while (is_name_char(cleaned[i])) {
-        i++;
-    }
-    while (isspace((unsigned char)cleaned[i])) {
-        i++;
-    }
-    if (cleaned[i] != '(') {
-        arena_maybe_free(cleaned);
-        return false;
-    }
-    i++;
-    while (isspace((unsigned char)cleaned[i])) {
-        i++;
-    }
-    if (cleaned[i] != ')') {
-        arena_maybe_free(cleaned);
-        return false;
-    }
-    i++;
-    while (isspace((unsigned char)cleaned[i])) {
-        i++;
+    len = strlen(source);
+    collapsed = arena_xmalloc(len + 1);
+    quote = '\0';
+    j = 0;
+
+    for (i = 0; source[i] != '\0'; i++) {
+        char ch;
+
+        ch = source[i];
+        if (quote == '\'') {
+            collapsed[j++] = ch;
+            if (ch == '\'') {
+                quote = '\0';
+            }
+            continue;
+        }
+
+        if (ch == '\\' && source[i + 1] == '\n') {
+            i++;
+            continue;
+        }
+
+        if (quote == '"') {
+            collapsed[j++] = ch;
+            if (ch == '\\' && source[i + 1] != '\0' && source[i + 1] != '\n') {
+                collapsed[j++] = source[++i];
+                continue;
+            }
+            if (ch == '"') {
+                quote = '\0';
+            }
+            continue;
+        }
+
+        collapsed[j++] = ch;
+        if (ch == '\\' && source[i + 1] != '\0') {
+            collapsed[j++] = source[++i];
+            continue;
+        }
+        if (ch == '\'' || ch == '"') {
+            quote = ch;
+        }
     }
 
-    result = cleaned[i] == '\0';
-    arena_maybe_free(cleaned);
-    return result;
+    collapsed[j] = '\0';
+    comment_stripped = strip_parser_comments(collapsed);
+    arena_maybe_free(collapsed);
+    out = dup_trimmed_slice(comment_stripped, 0, strlen(comment_stripped));
+    arena_maybe_free(comment_stripped);
+    return out;
 }
 
 static char *dup_slice(const char *src, size_t start, size_t end) {
@@ -937,6 +1018,9 @@ static bool unwrap_subshell_group(const char *source, size_t *inner_start_out,
     if (quote != '\0' || paren_depth != 0 || close_pos == (size_t)-1) {
         return false;
     }
+    if (!looks_like_redirection_suffix_parser(source, close_pos + 1)) {
+        return false;
+    }
 
     *inner_start_out = 1;
     *inner_end_out = close_pos;
@@ -1001,6 +1085,9 @@ static bool unwrap_brace_group(const char *source, size_t *inner_start_out,
     }
 
     if (quote != '\0' || brace_depth != 0 || close_pos == (size_t)-1) {
+        return false;
+    }
+    if (!looks_like_redirection_suffix_parser(source, close_pos + 1)) {
         return false;
     }
 
@@ -1675,7 +1762,6 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
                                            size_t end, int *err_out) {
     struct ast_node *node;
     char *trimmed;
-    char *comment_stripped;
     char *syntax_source;
     char *body_core;
     char *cond;
@@ -1706,13 +1792,11 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
         trim_end--;
     }
 
-    trimmed = dup_trimmed_slice(ctx->source, start, end);
-    comment_stripped = strip_parser_comments(trimmed);
-    syntax_source = dup_trimmed_slice(comment_stripped, 0, strlen(comment_stripped));
+    trimmed = dup_slice(ctx->source, start, end);
+    syntax_source = normalize_parser_syntax_source(trimmed);
 
     if (syntax_source[0] == '\0') {
         arena_maybe_free(syntax_source);
-        arena_maybe_free(comment_stripped);
         arena_maybe_free(trimmed);
         node = ast_new_node(ctx, AST_NODE_EMPTY, start, end);
         return node;
@@ -1902,7 +1986,6 @@ static struct ast_node *parse_command_atom(struct parser_ctx *ctx, size_t start,
     }
 
     arena_maybe_free(syntax_source);
-    arena_maybe_free(comment_stripped);
     arena_maybe_free(trimmed);
     return node;
 }
@@ -1932,16 +2015,11 @@ static struct ast_node *parse_pipeline(struct parser_ctx *ctx, size_t start,
     loop_depth = 0;
     negate = false;
 
-    while (part_start < end && isspace((unsigned char)ctx->source[part_start])) {
-        part_start++;
-    }
+    part_start = skip_logical_leading_space(ctx->source, part_start, end);
     while (part_start < end && ctx->source[part_start] == '!') {
         size_t next;
 
-        next = part_start + 1;
-        while (next < end && isspace((unsigned char)ctx->source[next])) {
-            next++;
-        }
+        next = skip_logical_leading_space(ctx->source, part_start + 1, end);
         negate = !negate;
         part_start = next;
     }
@@ -2052,10 +2130,17 @@ static struct ast_node *parse_pipeline(struct parser_ctx *ctx, size_t start,
                 brace_depth--;
             } else if (paren_depth == 0 && brace_depth == 0 &&
                        if_depth == 0 && case_depth == 0 && loop_depth == 0 &&
-                       ch == '|' && i + 1 < end && ctx->source[i + 1] != '|' &&
-                       !(i > start && ctx->source[i - 1] == '|') &&
-                       !(i > start && ctx->source[i - 1] == '>')) {
-                delim = true;
+                       ch == '|') {
+                size_t next;
+                long prev;
+
+                next = skip_continuations_forward(ctx->source, i + 1);
+                prev = previous_logical_index(ctx->source, i);
+                if (next < end && ctx->source[next] != '|' &&
+                    !(prev >= 0 && ctx->source[prev] == '|') &&
+                    !(prev >= 0 && ctx->source[prev] == '>')) {
+                    delim = true;
+                }
             }
         } else if (quote == '\'' && ch == '\'') {
             quote = '\0';
@@ -2077,10 +2162,6 @@ static struct ast_node *parse_pipeline(struct parser_ctx *ctx, size_t start,
             while (part_start < part_end &&
                    isspace((unsigned char)ctx->source[part_start])) {
                 part_start++;
-            }
-            while (part_end > part_start &&
-                   isspace((unsigned char)ctx->source[part_end - 1])) {
-                part_end--;
             }
             if (part_end <= part_start) {
                 report_unexpected_token(ctx, i < end ? i : end, "|");
@@ -2161,9 +2242,11 @@ static struct ast_node *parse_andor(struct parser_ctx *ctx, size_t start,
     for (i = start; i <= end; i++) {
         char ch;
         bool delim;
+        size_t delim_end;
 
         ch = i < end ? ctx->source[i] : '\0';
         delim = false;
+        delim_end = i;
 
         if (i == end) {
             delim = true;
@@ -2262,12 +2345,22 @@ static struct ast_node *parse_andor(struct parser_ctx *ctx, size_t start,
                 brace_depth--;
             } else if (paren_depth == 0 && brace_depth == 0 &&
                        if_depth == 0 && case_depth == 0 && loop_depth == 0 &&
-                       ch == '&' && i + 1 < end && ctx->source[i + 1] == '&') {
-                delim = true;
+                       ch == '&') {
+                size_t next;
+
+                if (next_logical_char_is(ctx->source, i + 1, end, '&', &next)) {
+                    delim = true;
+                    delim_end = next;
+                }
             } else if (paren_depth == 0 && brace_depth == 0 &&
                        if_depth == 0 && case_depth == 0 && loop_depth == 0 &&
-                       ch == '|' && i + 1 < end && ctx->source[i + 1] == '|') {
-                delim = true;
+                       ch == '|') {
+                size_t next;
+
+                if (next_logical_char_is(ctx->source, i + 1, end, '|', &next)) {
+                    delim = true;
+                    delim_end = next;
+                }
             }
         } else if (quote == '\'' && ch == '\'') {
             quote = '\0';
@@ -2290,10 +2383,6 @@ static struct ast_node *parse_andor(struct parser_ctx *ctx, size_t start,
                    isspace((unsigned char)ctx->source[part_start])) {
                 part_start++;
             }
-            while (part_end > part_start &&
-                   isspace((unsigned char)ctx->source[part_end - 1])) {
-                part_end--;
-            }
             if (part_end <= part_start) {
                 report_unexpected_token(ctx, i < end ? i : end,
                                         i < end && ctx->source[i] == '&' ? "&&"
@@ -2312,7 +2401,7 @@ static struct ast_node *parse_andor(struct parser_ctx *ctx, size_t start,
                 ast_andor_op_push(&ops, &ops_len,
                                   ctx->source[i] == '&' ? AST_ANDOR_AND
                                                         : AST_ANDOR_OR);
-                i++;
+                i = delim_end;
                 if (ctx->pending_heredoc_count > 0 &&
                     line_tail_is_blank_or_comment(ctx->source, i + 1, end,
                                                   &newline_pos)) {
@@ -2532,10 +2621,6 @@ static struct ast_node *parse_sequence(struct parser_ctx *ctx, size_t start,
             while (part_start < part_end &&
                    isspace((unsigned char)ctx->source[part_start])) {
                 part_start++;
-            }
-            while (part_end > part_start &&
-                   isspace((unsigned char)ctx->source[part_end - 1])) {
-                part_end--;
             }
             if (part_end > part_start) {
                 part = parse_andor(ctx, part_start, part_end, err_out);

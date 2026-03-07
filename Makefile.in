@@ -109,6 +109,13 @@ test-posix: $(TARGET)
 		TESTEE="$$testee" \
 		TESTCASE_TIMEOUT="$(TESTCASE_TIMEOUT)"
 
+test-posix-nosignal: $(TARGET)
+	@if [ -n "$(TESTEE)" ]; then testee="$(TESTEE)"; else testee="`pwd`/$(TARGET)"; fi; \
+	$(MAKE) -C tests/posix test-posix-nosignal \
+		YASH_RUNNER="$(YASH_RUNNER)" \
+		TESTEE="$$testee" \
+		TESTCASE_TIMEOUT="$(TESTCASE_TIMEOUT)"
+
 build-sanitize:
 	$(MAKE) clean
 	$(MAKE) CFLAGS="$(CFLAGS) $(SAN_CFLAGS)" \

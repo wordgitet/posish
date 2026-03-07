@@ -732,15 +732,36 @@ static bool line_has_comment_before(const char *buf, size_t line_start,
     return false;
 }
 
+static size_t trailing_backslash_run_before_newline(const char *buf, size_t len) {
+    size_t count;
+
+    if (len < 2 || buf[len - 1] != '\n') {
+        return 0;
+    }
+
+    count = 0;
+    while (count + 1 < len && buf[len - 2 - count] == '\\') {
+        count++;
+    }
+    return count;
+}
+
+static bool ends_with_line_continuation(const char *buf, size_t len) {
+    return (trailing_backslash_run_before_newline(buf, len) & 1u) != 0;
+}
+
 static bool trailing_backslash_newline_is_comment(const char *buf, size_t len) {
     size_t line_start;
     size_t comment_pos;
 
-    if (len < 2 || buf[len - 2] != '\\' || buf[len - 1] != '\n') {
+    if (!ends_with_line_continuation(buf, len)) {
         return false;
     }
 
-    line_start = len - 2;
+    line_start = len - 1;
+    while (line_start > 0 && buf[line_start - 1] == '\\') {
+        line_start--;
+    }
     while (line_start > 0 && buf[line_start - 1] != '\n') {
         line_start--;
     }
@@ -1283,7 +1304,7 @@ static int needs_more_input(char *buf, size_t *len, bool include_heredoc) {
     if (*len <= 8192 && looks_like_function_header_only_input(buf, *len)) {
         return 1;
     }
-    if (*len >= 2 && buf[*len - 2] == '\\' && buf[*len - 1] == '\n' &&
+    if (ends_with_line_continuation(buf, *len) &&
         !trailing_backslash_newline_is_comment(buf, *len)) {
         return 1;
     }
@@ -1427,9 +1448,7 @@ static bool merge_need_more_with_alias_preview(struct shell_state *state,
 
         alias_len = strlen(alias_preview);
         raw_trailing_backslash_nl =
-            command_len >= 2 &&
-            command[command_len - 2] == '\\' &&
-            command[command_len - 1] == '\n';
+            ends_with_line_continuation(command, command_len);
 
         if (strstr(alias_preview, "<<") != NULL) {
             alias_need_more =
@@ -1489,6 +1508,18 @@ static int shell_run_stream_command(struct shell_state *state,
     status = shell_run_command(state, command_text);
     state->suppress_ast_aliases = saved_suppress_aliases;
     return status;
+}
+
+static bool shell_has_pending_flow_control(const struct shell_state *state) {
+    return state->break_levels > 0 || state->continue_levels > 0 ||
+           state->return_requested;
+}
+
+static bool shell_should_exit_for_status(const struct shell_state *state,
+                                         int status) {
+    return status != 0 && state->errexit && !state->interactive &&
+           !state->errexit_ignored && !state->should_exit &&
+           !shell_has_pending_flow_control(state);
 }
 
 static bool inherited_ignore_locked(const struct shell_state *state, int signo) {
@@ -2082,6 +2113,19 @@ int shell_run_command(struct shell_state *state, const char *command) {
         state->suppress_ast_aliases = true;
     }
 
+    if (state->noexec && !exec_noexec_allows_set_toggle(command_text)) {
+        state->suppress_ast_aliases = saved_suppress_aliases;
+        arena_set_current(saved_arena);
+        if (top_level_command) {
+            arena_reset(&state->arena_cmd);
+            arena_reset(&state->arena_script);
+        } else {
+            arena_mark_rewind(active_arena, &nested_mark);
+        }
+        arena_maybe_free(command_copy);
+        return 0;
+    }
+
     if (parse_program_at(state->current_source_name,
                          state->current_source_base_line,
                          command_text, &program) != 0) {
@@ -2122,6 +2166,10 @@ int shell_run_command(struct shell_state *state, const char *command) {
     arena_maybe_free(command_copy);
 
     state->last_status = status;
+    if (shell_should_exit_for_status(state, status)) {
+        state->should_exit = true;
+        state->exit_status = status;
+    }
     trace_log(POSISH_TRACE_TRAPS, "command finished status=%d", status);
     shell_run_pending_traps(state);
     return status;

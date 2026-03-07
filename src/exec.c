@@ -256,6 +256,17 @@ static void set_lineno_for_command(const char *source, size_t start) {
     (void)setenv("LINENO", line_buf, 1);
 }
 
+static void set_lineno_for_ast_node(const struct ast_node *node) {
+    char line_buf[32];
+
+    if (node == NULL || node->span.start_line == 0) {
+        return;
+    }
+
+    snprintf(line_buf, sizeof(line_buf), "%zu", node->span.start_line);
+    (void)setenv("LINENO", line_buf, 1);
+}
+
 static void free_string_vec(char **vec, size_t len) {
     size_t i;
 
@@ -359,7 +370,7 @@ static void trace_simple_words(struct shell_state *state, char *const words[],
     arena_maybe_free(out.items);
 }
 
-static bool noexec_allows_set_toggle(const char *source) {
+bool exec_noexec_allows_set_toggle(const char *source) {
     struct token_vec tokens;
     size_t i;
     bool allowed;
@@ -3830,6 +3841,11 @@ static int execute_ast_node(struct shell_state *state,
 
     if (node == NULL) {
         return 0;
+    }
+
+    if (node->kind != AST_NODE_EMPTY && node->kind != AST_NODE_SEQUENCE &&
+        node->kind != AST_NODE_AND_OR) {
+        set_lineno_for_ast_node(node);
     }
 
     switch (node->kind) {
