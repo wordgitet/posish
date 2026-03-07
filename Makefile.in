@@ -26,6 +26,8 @@ SRC = \
 	src/case_command.c \
 	src/compound_parse.c \
 	src/heredoc_command.c \
+	src/command_subst.c \
+	src/field_split.c \
 	src/expand.c \
 	src/exec.c \
 	src/alias.c \
@@ -54,6 +56,8 @@ OBJ = \
 	src/case_command.o \
 	src/compound_parse.o \
 	src/heredoc_command.o \
+	src/command_subst.o \
+	src/field_split.o \
 	src/expand.o \
 	src/exec.o \
 	src/alias.o \

@@ -6,10 +6,12 @@
 
 #include "arena.h"
 #include "arith.h"
+#include "command_subst.h"
 #include "error.h"
+#include "expand_markers.h"
+#include "field_split.h"
 #include "options.h"
 #include "shell.h"
-#include "signals.h"
 #include "vars.h"
 
 #include <ctype.h>
@@ -17,27 +19,9 @@
 #include <fnmatch.h>
 #include <glob.h>
 #include <pwd.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
-#define QUOTED_IFS_SPACE '\x81'
-#define QUOTED_IFS_TAB '\x82'
-#define QUOTED_IFS_NEWLINE '\x83'
-#define QUOTED_GLOB_STAR '\x84'
-#define QUOTED_GLOB_QMARK '\x85'
-#define QUOTED_GLOB_LBRACK '\x86'
-#define QUOTED_EMPTY_MARK '\x87'
-#define QUOTED_LITERAL_PREFIX '\x88'
-#define PARAM_AT_SPLIT '\x89'
-#define PATTERN_LIT_STAR '\x12'
-#define PATTERN_LIT_QMARK '\x13'
-#define PATTERN_LIT_LBRACK '\x14'
-#define PATTERN_LIT_RBRACK '\x15'
-#define PATTERN_LIT_BSLASH '\x16'
 
 static void *xrealloc(void *ptr, size_t size) {
   return arena_xrealloc(ptr, size);
@@ -374,167 +358,6 @@ static bool try_tilde_expansion(const char *in, size_t *i, bool assignment_conte
   return true;
 }
 
-static bool find_command_substitution_close(const char *in, size_t start,
-                                            size_t *close_out) {
-  size_t i;
-  char quote;
-  bool dollar_single;
-  bool in_comment;
-
-  if (in[start] != '$' || in[start + 1] != '(') {
-    return false;
-  }
-
-  quote = '\0';
-  dollar_single = false;
-  in_comment = false;
-  for (i = start + 2; in[i] != '\0'; i++) {
-    size_t inner_len;
-    char *inner;
-    char *inner_with_candidate;
-    bool in_candidate_comment;
-    int need_more;
-    char ch;
-
-    ch = in[i];
-    if (in_comment) {
-      if (ch == '\n') {
-        in_comment = false;
-      }
-      continue;
-    }
-    if (dollar_single) {
-      if (ch == '\\' && in[i + 1] != '\0') {
-        i++;
-        continue;
-      }
-      if (ch == '\'') {
-        dollar_single = false;
-      }
-      continue;
-    }
-    if (quote == '\'') {
-      if (ch == '\'') {
-        quote = '\0';
-      }
-      continue;
-    }
-    if (quote == '"') {
-      if (ch == '\\' && in[i + 1] != '\0') {
-        i++;
-        continue;
-      }
-      if (ch == '"') {
-        quote = '\0';
-      }
-      continue;
-    }
-    if (ch == '\\' && in[i + 1] != '\0') {
-      i++;
-      continue;
-    }
-    if (ch == '$' && in[i + 1] == '\'') {
-      dollar_single = true;
-      i++;
-      continue;
-    }
-    if (ch == '\'' || ch == '"') {
-      quote = ch;
-      continue;
-    }
-    if (ch == '#' && (i == start + 2 || isspace((unsigned char)in[i - 1]) ||
-                      in[i - 1] == ';' || in[i - 1] == '&' ||
-                      in[i - 1] == '|' || in[i - 1] == '(' ||
-                      in[i - 1] == ')' || in[i - 1] == '{' ||
-                      in[i - 1] == '}')) {
-      in_comment = true;
-      continue;
-    }
-
-    if (ch != ')') {
-      continue;
-    }
-
-    inner_len = i - (start + 2);
-    inner = arena_xmalloc(inner_len + 1);
-    if (inner_len > 0) {
-      memcpy(inner, in + start + 2, inner_len);
-    }
-    inner[inner_len] = '\0';
-
-    need_more = shell_needs_more_input_text(inner, inner_len);
-    inner_with_candidate = arena_xmalloc(inner_len + 2);
-    if (inner_len > 0) {
-      memcpy(inner_with_candidate, in + start + 2, inner_len);
-    }
-    inner_with_candidate[inner_len] = ')';
-    inner_with_candidate[inner_len + 1] = '\0';
-    in_candidate_comment =
-        shell_position_in_comment(inner_with_candidate, inner_len + 1, inner_len);
-    arena_maybe_free(inner_with_candidate);
-    arena_maybe_free(inner);
-
-    if (!in_candidate_comment && need_more == 0) {
-      *close_out = i;
-      return true;
-    }
-  }
-
-  return false;
-}
-
-static size_t skip_command_subst_token(const char *token, size_t pos) {
-  size_t i;
-  int depth;
-  char quote;
-
-  if (token[pos] != '$' || token[pos + 1] != '(') {
-    return pos + 1;
-  }
-
-  i = pos + 2;
-  depth = 1;
-  quote = '\0';
-  while (token[i] != '\0') {
-    char ch;
-
-    ch = token[i];
-    if (quote == '\0') {
-      if (ch == '\\' && token[i + 1] != '\0') {
-        i += 2;
-        continue;
-      }
-      if (ch == '\'' || ch == '"') {
-        quote = ch;
-        i++;
-        continue;
-      }
-      if (ch == '(') {
-        depth++;
-      } else if (ch == ')') {
-        depth--;
-        if (depth == 0) {
-          return i + 1;
-        }
-      }
-      i++;
-      continue;
-    }
-
-    if (quote == '\'' && ch == '\'') {
-      quote = '\0';
-    } else if (quote == '"' && ch == '"') {
-      quote = '\0';
-    } else if (ch == '\\' && token[i + 1] != '\0') {
-      i += 2;
-      continue;
-    }
-    i++;
-  }
-
-  return i;
-}
-
 static size_t skip_braced_param_token(const char *token, size_t pos) {
   size_t i;
   int depth;
@@ -587,34 +410,13 @@ static size_t skip_braced_param_token(const char *token, size_t pos) {
   return i;
 }
 
-static size_t skip_backtick_token(const char *token, size_t pos) {
-  size_t i;
-
-  if (token[pos] != '`') {
-    return pos + 1;
-  }
-
-  i = pos + 1;
-  while (token[i] != '\0') {
-    if (token[i] == '\\' && token[i + 1] != '\0') {
-      i += 2;
-      continue;
-    }
-    if (token[i] == '`') {
-      return i + 1;
-    }
-    i++;
-  }
-  return i;
-}
-
 static bool token_is_unquoted(const char *token) {
   size_t i;
 
   i = 0;
   while (token[i] != '\0') {
     if (token[i] == '$' && token[i + 1] == '(') {
-      i = skip_command_subst_token(token, i);
+      i = command_subst_skip_dollar_paren(token, i);
       continue;
     }
     if (token[i] == '$' && token[i + 1] == '{') {
@@ -622,7 +424,7 @@ static bool token_is_unquoted(const char *token) {
       continue;
     }
     if (token[i] == '`') {
-      i = skip_backtick_token(token, i);
+      i = command_subst_skip_backtick(token, i);
       continue;
     }
     if (token[i] == '$' && token[i + 1] == '\'') {
@@ -706,219 +508,6 @@ static bool token_is_pure_quoted_at(const char *token) {
 static bool is_short_parameter_char(char ch) {
   return ch == '$' || ch == '?' || ch == '!' || ch == '#' || ch == '@' ||
          ch == '*' || ch == '-' || isdigit((unsigned char)ch);
-}
-
-static bool inherited_ignore_locked(const struct shell_state *state,
-                                    int signo) {
-  return !state->interactive && signals_inherited_ignored(signo) &&
-         !state->parent_was_interactive;
-}
-
-static void reset_signal_traps_for_cmdsub(struct shell_state *state) {
-  int signo;
-
-    for (signo = 1; signo < NSIG; signo++) {
-        if (state->signal_traps[signo] != NULL) {
-            if (state->signal_traps[signo][0] == '\0') {
-                (void)signals_set_ignored(signo);
-            } else {
-                if (inherited_ignore_locked(state, signo)) {
-                    (void)signals_set_ignored(signo);
-                } else {
-                    (void)signals_set_default(signo);
-                }
-      }
-    } else if (state->signal_cleared[signo]) {
-      (void)signals_set_default(signo);
-    } else {
-      struct sigaction sa;
-
-      if (sigaction(signo, NULL, &sa) == 0 && sa.sa_handler == SIG_IGN &&
-          signals_policy_ignored(signo) && !signals_inherited_ignored(signo)) {
-        (void)signals_set_default(signo);
-      }
-    }
-    signals_clear_pending(signo);
-  }
-}
-
-static int run_command_substitution(struct shell_state *state, const char *cmd,
-                                    char **out_value, int *status_out) {
-  int pipefd[2];
-  pid_t pid;
-  int status;
-  char *buf;
-  size_t len;
-  size_t cap;
-
-  if (pipe(pipefd) != 0) {
-    perror("pipe");
-    return -1;
-  }
-
-  pid = fork();
-  if (pid < 0) {
-    perror("fork");
-    close(pipefd[0]);
-    close(pipefd[1]);
-    return -1;
-  }
-
-  if (pid == 0) {
-    struct shell_state local_state;
-    int st;
-
-    dup2(pipefd[1], STDOUT_FILENO);
-    close(pipefd[0]);
-    close(pipefd[1]);
-
-    local_state = *state;
-    arena_init(&local_state.arena_perm, state->arena_perm.default_block_size);
-    arena_init(&local_state.arena_script, state->arena_script.default_block_size);
-    arena_init(&local_state.arena_cmd, state->arena_cmd.default_block_size);
-    arena_set_current(&local_state.arena_perm);
-    local_state.should_exit = false;
-    local_state.exit_status = 0;
-    local_state.exit_trap = NULL;
-    local_state.running_signal_trap = false;
-    local_state.running_exit_trap = false;
-    local_state.main_context = false;
-    reset_signal_traps_for_cmdsub(&local_state);
-
-    st = shell_run_command(&local_state, cmd);
-    shell_run_pending_traps(&local_state);
-    shell_run_exit_trap(&local_state);
-    if (local_state.should_exit) {
-      st = local_state.exit_status;
-    }
-    fflush(NULL);
-    _exit(st);
-  }
-
-  close(pipefd[1]);
-
-  buf = arena_xmalloc(64);
-  len = 0;
-  cap = 64;
-
-  for (;;) {
-    ssize_t n;
-
-    if (len + 64 > cap) {
-      cap *= 2;
-      buf = arena_xrealloc(buf, cap);
-    }
-
-    n = read(pipefd[0], buf + len, cap - len - 1);
-    if (n < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      perror("read");
-      close(pipefd[0]);
-      arena_maybe_free(buf);
-      return -1;
-    }
-    if (n == 0) {
-      break;
-    }
-
-    len += (size_t)n;
-  }
-
-  close(pipefd[0]);
-
-  for (;;) {
-    if (waitpid(pid, &status, 0) < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      break;
-    }
-    break;
-  }
-
-  while (len > 0 && buf[len - 1] == '\n') {
-    len--;
-  }
-
-  buf[len] = '\0';
-  if (WIFEXITED(status)) {
-    *status_out = WEXITSTATUS(status);
-  } else if (WIFSIGNALED(status)) {
-    *status_out = 128 + WTERMSIG(status);
-  } else {
-    *status_out = 1;
-  }
-  *out_value = buf;
-  return 0;
-}
-
-static char *normalize_backquote_command_text(const char *raw) {
-  size_t i;
-  char quote;
-  bool pseudo_dquote;
-  char *out;
-  size_t len;
-  size_t cap;
-
-  i = 0;
-  quote = '\0';
-  pseudo_dquote = false;
-  out = NULL;
-  len = 0;
-  cap = 0;
-
-  while (raw[i] != '\0') {
-    if (raw[i] == '\\' && raw[i + 1] != '\0') {
-      char next;
-      size_t j;
-      bool has_matching_escaped_quote;
-
-      next = raw[i + 1];
-      has_matching_escaped_quote = false;
-      if (next == '"' && quote == '\0' && !pseudo_dquote) {
-        j = i + 2;
-        while (raw[j] != '\0' && !isspace((unsigned char)raw[j])) {
-          if (raw[j] == '\\' && raw[j + 1] == '"') {
-            has_matching_escaped_quote = true;
-            break;
-          }
-          if (raw[j] == '\\' && raw[j + 1] != '\0') {
-            j += 2;
-            continue;
-          }
-          j++;
-        }
-      }
-
-      if (next == '$' || next == '`' || next == '\\' || next == '\n' ||
-          (next == '"' && quote == '\0' &&
-           (pseudo_dquote || has_matching_escaped_quote))) {
-        if (next != '\n') {
-          append_char(&out, &len, &cap, next);
-        }
-        if (next == '"' && quote == '\0') {
-          pseudo_dquote = !pseudo_dquote;
-        }
-        i += 2;
-        continue;
-      }
-    }
-
-    append_char(&out, &len, &cap, raw[i]);
-    if (quote == '\0' && (raw[i] == '\'' || raw[i] == '"')) {
-      quote = raw[i];
-    } else if (quote != '\0' && raw[i] == quote) {
-      quote = '\0';
-    }
-    i++;
-  }
-
-  if (out == NULL) {
-    out = arena_xstrdup("");
-  }
-  return out;
 }
 
 static int run_arithmetic_expansion(const char *expr, char **out_value,
@@ -1170,7 +759,6 @@ static int append_expanded_fragment(const char *expr, size_t start, size_t elen,
                                     struct shell_state *state, char **buf,
                                     size_t *len, size_t *cap,
                                     bool in_double_quotes);
-static void restore_quoted_ifs_markers(char *s);
 static int expand_pattern_fragment(const char *expr, size_t start, size_t elen,
                                    struct shell_state *state, char **out);
 
@@ -1293,7 +881,7 @@ static char *mark_pattern_escapes(const char *word) {
       if (ch == '$' && word[i + 1] == '(') {
         size_t end;
 
-        end = skip_command_subst_token(word, i);
+        end = command_subst_skip_dollar_paren(word, i);
         while (i < end) {
           append_char(&marked, &len, &cap, word[i]);
           i++;
@@ -1315,7 +903,7 @@ static char *mark_pattern_escapes(const char *word) {
       if (ch == '`') {
         size_t end;
 
-        end = skip_backtick_token(word, i);
+        end = command_subst_skip_backtick(word, i);
         while (i < end) {
           append_char(&marked, &len, &cap, word[i]);
           i++;
@@ -1725,7 +1313,7 @@ static int append_braced_parameter(const char *expr, size_t elen,
             if (special_text == NULL) {
                 special_text = arena_xstrdup("");
             }
-            restore_quoted_ifs_markers(special_text);
+            field_split_restore_quoted_markers(special_text);
             snprintf(text, sizeof(text), "%zu", strlen(special_text));
             arena_maybe_free(special_text);
             append_context_string(buf, len, cap, text, in_double_quotes);
@@ -1809,7 +1397,7 @@ static int append_braced_parameter(const char *expr, size_t elen,
                 arena_maybe_free(name);
                 return -1;
             }
-            restore_quoted_ifs_markers(expanded_word);
+            field_split_restore_quoted_markers(expanded_word);
             rc = vars_set_assignment(state, name, expanded_word, true);
             arena_maybe_free(expanded_word);
             if (rc != 0) {
@@ -1867,7 +1455,7 @@ static int append_braced_parameter(const char *expr, size_t elen,
                 arena_maybe_free(name);
                 return -1;
             }
-            restore_quoted_ifs_markers(msg_expanded);
+            field_split_restore_quoted_markers(msg_expanded);
         }
         if (msg_expanded != NULL && msg_expanded[0] != '\0') {
             posish_errorf("%s: %s", name, msg_expanded);
@@ -1914,7 +1502,7 @@ static int append_braced_parameter(const char *expr, size_t elen,
             if (special_value == NULL) {
                 special_value = arena_xstrdup("");
             }
-            restore_quoted_ifs_markers(special_value);
+            field_split_restore_quoted_markers(special_value);
             value = special_value;
         }
 
@@ -1994,263 +1582,6 @@ static int append_braced_parameter(const char *expr, size_t elen,
 
     arena_maybe_free(name);
     return append_parameter(expr, elen, state, buf, len, cap, in_double_quotes);
-}
-
-static bool is_ifs_char(const char *ifs, char ch) {
-  size_t i;
-
-  for (i = 0; ifs[i] != '\0'; i++) {
-    if (ifs[i] == ch) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static bool is_ifs_whitespace_char(const char *ifs, char ch) {
-  if (ch != ' ' && ch != '\t' && ch != '\n') {
-    return false;
-  }
-  return is_ifs_char(ifs, ch);
-}
-
-static bool is_split_delimiter(const char *ifs, char ch) {
-  if (ch == QUOTED_IFS_SPACE || ch == QUOTED_IFS_TAB ||
-      ch == QUOTED_IFS_NEWLINE) {
-    return false;
-  }
-  return is_ifs_char(ifs, ch);
-}
-
-static void restore_quoted_ifs_markers(char *s) {
-  size_t i;
-  size_t j;
-
-  j = 0;
-  for (i = 0; s[i] != '\0'; i++) {
-    char ch;
-
-    ch = s[i];
-    if (ch == QUOTED_LITERAL_PREFIX && s[i + 1] != '\0') {
-      s[j++] = s[i + 1];
-      i++;
-      continue;
-    }
-    if (ch == QUOTED_EMPTY_MARK) {
-      continue;
-    }
-    if (ch == QUOTED_IFS_SPACE) {
-      ch = ' ';
-    } else if (ch == QUOTED_IFS_TAB) {
-      ch = '\t';
-    } else if (ch == QUOTED_IFS_NEWLINE) {
-      ch = '\n';
-    } else if (ch == QUOTED_GLOB_STAR) {
-      ch = '*';
-    } else if (ch == QUOTED_GLOB_QMARK) {
-      ch = '?';
-    } else if (ch == QUOTED_GLOB_LBRACK) {
-      ch = '[';
-    }
-    s[j++] = ch;
-  }
-  s[j] = '\0';
-}
-
-static int split_and_append_fields(const char *expanded, struct token_vec *out) {
-  const char *ifs_env;
-  const char *ifs;
-  size_t pos;
-  int appended;
-  bool has_delimiter;
-
-  ifs_env = getenv("IFS");
-  if (ifs_env == NULL) {
-    ifs = " \t\n";
-  } else {
-    ifs = ifs_env;
-  }
-
-  if (ifs[0] == '\0') {
-    return 0;
-  }
-
-  has_delimiter = false;
-  for (pos = 0; expanded[pos] != '\0'; pos++) {
-    if (expanded[pos] == QUOTED_LITERAL_PREFIX && expanded[pos + 1] != '\0') {
-      pos++;
-      continue;
-    }
-    if (is_split_delimiter(ifs, expanded[pos])) {
-      has_delimiter = true;
-      break;
-    }
-  }
-  if (!has_delimiter) {
-    return 0;
-  }
-
-  pos = 0;
-  appended = 0;
-  while (expanded[pos] != '\0') {
-    size_t start;
-    size_t end;
-    char *field;
-
-    /* Leading IFS-whitespace does not create empty fields. */
-    while (expanded[pos] != '\0' &&
-           is_ifs_whitespace_char(ifs, expanded[pos])) {
-      pos++;
-    }
-    if (expanded[pos] == '\0') {
-      break;
-    }
-
-    start = pos;
-    while (expanded[pos] != '\0') {
-      if (expanded[pos] == QUOTED_LITERAL_PREFIX &&
-          expanded[pos + 1] != '\0') {
-        pos += 2;
-        continue;
-      }
-      if (is_split_delimiter(ifs, expanded[pos])) {
-        break;
-      }
-      pos++;
-    }
-    end = pos;
-
-    field = arena_xmalloc((end - start) + 1);
-    memcpy(field, expanded + start, end - start);
-    field[end - start] = '\0';
-    restore_quoted_ifs_markers(field);
-    out->items = xrealloc(out->items, sizeof(*out->items) * (out->len + 1));
-    out->items[out->len++] = field;
-    appended++;
-
-    if (expanded[pos] == '\0') {
-      break;
-    }
-
-    /*
-     * Consume one full delimiter sequence. POSIX groups IFS-whitespace around
-     * an IFS non-whitespace delimiter into a single separator.
-     */
-    while (expanded[pos] != '\0') {
-      if (expanded[pos] == QUOTED_LITERAL_PREFIX && expanded[pos + 1] != '\0') {
-        break;
-      }
-      if (!is_split_delimiter(ifs, expanded[pos])) {
-        break;
-      }
-      if (!is_ifs_whitespace_char(ifs, expanded[pos])) {
-        pos++;
-        while (expanded[pos] != '\0' &&
-               is_ifs_whitespace_char(ifs, expanded[pos])) {
-          pos++;
-        }
-        break;
-      }
-      pos++;
-    }
-  }
-
-  return appended;
-}
-
-static bool expanded_has_split_delimiter(const char *expanded) {
-  const char *ifs_env;
-  const char *ifs;
-  size_t pos;
-
-  ifs_env = getenv("IFS");
-  if (ifs_env == NULL) {
-    ifs = " \t\n";
-  } else {
-    ifs = ifs_env;
-  }
-  if (ifs[0] == '\0') {
-    return false;
-  }
-
-  for (pos = 0; expanded[pos] != '\0'; pos++) {
-    if (expanded[pos] == QUOTED_LITERAL_PREFIX && expanded[pos + 1] != '\0') {
-      pos++;
-      continue;
-    }
-    if (is_split_delimiter(ifs, expanded[pos])) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static bool expanded_has_at_split_marker(const char *expanded) {
-  size_t i;
-
-  for (i = 0; expanded[i] != '\0'; i++) {
-    if (expanded[i] == PARAM_AT_SPLIT) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static int append_expanded_piece(char *piece, struct token_vec *out,
-                                 bool split_fields) {
-  if (split_fields) {
-    int count;
-    bool had_delim;
-
-    had_delim = expanded_has_split_delimiter(piece);
-    count = split_and_append_fields(piece, out);
-    if (count > 0) {
-      arena_maybe_free(piece);
-      return count;
-    }
-    if (had_delim) {
-      arena_maybe_free(piece);
-      return 0;
-    }
-  }
-
-  restore_quoted_ifs_markers(piece);
-  out->items = xrealloc(out->items, sizeof(*out->items) * (out->len + 1));
-  out->items[out->len++] = piece;
-  return 1;
-}
-
-static int append_at_split_expansion(const char *expanded, struct token_vec *out,
-                                     bool split_fields) {
-  size_t start;
-  size_t i;
-  int added_total;
-
-  start = 0;
-  added_total = 0;
-  for (i = 0;; i++) {
-    if (expanded[i] != PARAM_AT_SPLIT && expanded[i] != '\0') {
-      continue;
-    }
-
-    {
-      char *piece;
-      size_t plen;
-
-      plen = i - start;
-      piece = arena_xmalloc(plen + 1);
-      memcpy(piece, expanded + start, plen);
-      piece[plen] = '\0';
-      added_total += append_expanded_piece(piece, out, split_fields);
-    }
-
-    if (expanded[i] == '\0') {
-      break;
-    }
-    start = i + 1;
-  }
-
-  return added_total;
 }
 
 static int expand_token(const char *in, struct shell_state *state, char **out,
@@ -2525,7 +1856,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
         char *value;
         int cmd_status;
 
-        if (!find_command_substitution_close(in, next - 1, &j)) {
+        if (!command_subst_find_close(in, next - 1, &j)) {
           posish_errorf("unterminated command substitution");
           arena_maybe_free(buf);
           return -1;
@@ -2535,7 +1866,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
         memcpy(cmd, in + next + 1, j - (next + 1));
         cmd[j - (next + 1)] = '\0';
 
-          if (run_command_substitution(state, cmd, &value, &cmd_status) != 0) {
+          if (command_subst_run(state, cmd, &value, &cmd_status) != 0) {
             arena_maybe_free(cmd);
             arena_maybe_free(buf);
             return -1;
@@ -2612,11 +1943,11 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
       cmd = arena_xmalloc((j - (i + 1)) + 1);
       memcpy(cmd, in + i + 1, j - (i + 1));
       cmd[j - (i + 1)] = '\0';
-      normalized_cmd = normalize_backquote_command_text(cmd);
+      normalized_cmd = command_subst_normalize_backquote(cmd);
       arena_maybe_free(cmd);
       cmd = normalized_cmd;
 
-      if (run_command_substitution(state, cmd, &value, &cmd_status) != 0) {
+      if (command_subst_run(state, cmd, &value, &cmd_status) != 0) {
         arena_maybe_free(cmd);
         arena_maybe_free(buf);
         return -1;
@@ -2826,7 +2157,7 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
         char *value;
         int cmd_status;
 
-        if (!find_command_substitution_close(in, i, &j)) {
+        if (!command_subst_find_close(in, i, &j)) {
           posish_errorf("unterminated command substitution");
           arena_maybe_free(buf);
           return -1;
@@ -2836,7 +2167,7 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
         memcpy(cmd, in + i + 2, j - (i + 2));
         cmd[j - (i + 2)] = '\0';
 
-        if (run_command_substitution(state, cmd, &value, &cmd_status) != 0) {
+        if (command_subst_run(state, cmd, &value, &cmd_status) != 0) {
           arena_maybe_free(cmd);
           arena_maybe_free(buf);
           return -1;
@@ -2912,11 +2243,11 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
       cmd = arena_xmalloc((j - (i + 1)) + 1);
       memcpy(cmd, in + i + 1, j - (i + 1));
       cmd[j - (i + 1)] = '\0';
-      normalized_cmd = normalize_backquote_command_text(cmd);
+      normalized_cmd = command_subst_normalize_backquote(cmd);
       arena_maybe_free(cmd);
       cmd = normalized_cmd;
 
-      if (run_command_substitution(state, cmd, &value, &cmd_status) != 0) {
+      if (command_subst_run(state, cmd, &value, &cmd_status) != 0) {
         arena_maybe_free(cmd);
         arena_maybe_free(buf);
         return -1;
@@ -2938,7 +2269,7 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
   if (buf == NULL) {
     buf = arena_xstrdup("");
   }
-  restore_quoted_ifs_markers(buf);
+  field_split_restore_quoted_markers(buf);
   *out = buf;
   return 0;
 }
@@ -2977,8 +2308,8 @@ int expand_words(const struct token_vec *in, struct token_vec *out,
       continue;
     }
 
-    if (expanded_has_at_split_marker(expanded)) {
-      (void)append_at_split_expansion(expanded, out, split_fields);
+    if (field_split_has_at_marker(expanded)) {
+      (void)field_split_append_at_expansion(expanded, out, split_fields);
       arena_maybe_free(expanded);
       continue;
     }
@@ -2995,8 +2326,8 @@ int expand_words(const struct token_vec *in, struct token_vec *out,
         arena_maybe_free(expanded);
         continue;
       }
-      had_delim = expanded_has_split_delimiter(expanded);
-      count = split_and_append_fields(expanded, out);
+      had_delim = field_split_has_delimiter(expanded);
+      count = field_split_split(expanded, out);
       if (count > 0) {
         arena_maybe_free(expanded);
         continue;
@@ -3032,7 +2363,7 @@ int expand_words(const struct token_vec *in, struct token_vec *out,
       }
     }
 
-    restore_quoted_ifs_markers(expanded);
+    field_split_restore_quoted_markers(expanded);
     out->items = xrealloc(out->items, sizeof(*out->items) * (out->len + 1));
     out->items[out->len++] = expanded;
   }
