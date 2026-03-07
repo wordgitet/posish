@@ -368,22 +368,95 @@ static bool parse_function_definition_text(const char *source, char **name_out,
     return true;
 }
 
+static bool parser_hash_starts_comment(const char *source, size_t pos) {
+    if (source[pos] != '#') {
+        return false;
+    }
+
+    if (pos == 0) {
+        return true;
+    }
+    return isspace((unsigned char)source[pos - 1]) || source[pos - 1] == ';' ||
+           source[pos - 1] == '&' || source[pos - 1] == '|' ||
+           source[pos - 1] == '(' || source[pos - 1] == ')' ||
+           source[pos - 1] == '}';
+}
+
 static char *strip_parser_comments(const char *source) {
     size_t i;
     size_t len;
     size_t out_len;
     char *out;
+    int quote;
+    int param_depth;
+    bool in_comment;
 
     len = strlen(source);
     out = arena_xmalloc(len + 1);
     out_len = 0;
+    quote = 0;
+    param_depth = 0;
+    in_comment = false;
 
     for (i = 0; i < len; i++) {
-        if (shell_position_in_comment(source, len, i)) {
+        char ch;
+
+        ch = source[i];
+        if (in_comment) {
+            if (ch == '\n') {
+                out[out_len++] = ch;
+                in_comment = false;
+            }
             continue;
         }
-        out[out_len++] = source[i];
+
+        if (quote == 0) {
+            if (ch == '\\' && i + 1 < len) {
+                out[out_len++] = ch;
+                out[out_len++] = source[++i];
+                continue;
+            }
+            if (ch == '\'' || ch == '"') {
+                quote = ch;
+                out[out_len++] = ch;
+                continue;
+            }
+            if (ch == '$' && i + 1 < len && source[i + 1] == '{') {
+                param_depth++;
+                out[out_len++] = ch;
+                out[out_len++] = source[++i];
+                continue;
+            }
+            if (ch == '}' && param_depth > 0) {
+                param_depth--;
+                out[out_len++] = ch;
+                continue;
+            }
+            if (param_depth == 0 && ch == '#' &&
+                parser_hash_starts_comment(source, i)) {
+                in_comment = true;
+                continue;
+            }
+            out[out_len++] = ch;
+            continue;
+        }
+
+        if (quote == '\'' && ch == '\'') {
+            quote = 0;
+            out[out_len++] = ch;
+            continue;
+        }
+        if (quote == '"' && ch == '\\' && i + 1 < len) {
+            out[out_len++] = ch;
+            out[out_len++] = source[++i];
+            continue;
+        }
+        if (quote == '"' && ch == '"') {
+            quote = 0;
+        }
+        out[out_len++] = ch;
     }
+
     out[out_len] = '\0';
     return out;
 }
