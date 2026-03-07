@@ -9,19 +9,45 @@ This is an internal engineering roadmap for `posish`.
 
 ## Current Snapshot
 
-- Release line: `v0.1.2`
+- Release line: `v0.1.4`
 - Imported POSIX suite is green.
 - Current truth snapshot from the latest tty-source-of-truth run:
 
 ```text
-TOTAL:   10917
-OK:      10903
+TOTAL:   11104
+OK:      11104
 ERROR:       0
-SKIPPED:    14
+SKIPPED:     0
 ```
 
 - `%REQUIRETTY%` behavior should still be debugged from a real terminal session when there is any doubt.
-- Current focus is no longer "make tests pass"; current focus is "make `posish` feel like a real shell and stop being slow".
+- Active development is currently happening on branch `ast/parser-migration`.
+- Current AST branch health snapshot:
+  - latest commits:
+    - `12325f4` `shell: fix non-signal POSIX parser regressions`
+    - `42a2020` `parser: recover AST heredoc execution`
+    - `c24714c` `expand: extract command substitution and field splitting`
+    - `ea29e1b` `tests: provide checkfg for imported tty tests`
+    - `cee17c2` `parser: strip comments across multiline quotes`
+    - `baa40ba` `shell: preserve AST execution for aliased multiline commands`
+  - imported regression guard:
+    - `TOTAL 183`
+    - `OK 183`
+    - `ERROR 0`
+    - `SKIPPED 0`
+  - targeted imported AST-heavy checks are green:
+    - `alias-p.tst`
+    - `cmdsub-p.tst`
+    - `function-p.tst`
+    - `grouping-p.tst`
+    - `if-p.tst`
+    - `while-p.tst`
+    - `for-p.tst`
+    - `case-p.tst`
+    - `sigttou4-p.tst`
+  - branch remains unmerged to `main`
+  - current shellbench data is still directional and does not by itself clear the merge bar
+- Current focus is no longer "make tests pass"; current focus is "finish the AST/parser branch carefully, keep imported guards green, and only merge after a fresh wider validation pass".
 
 ## What Just Shipped
 
@@ -29,19 +55,23 @@ SKIPPED:    14
 - Arithmetic invalid-shift handling was hardened.
 - `pwd` shell behavior was fixed.
 - Command substitution `EXIT` trap behavior was fixed.
-- Imported POSIX conformance was brought back to green after follow-up regressions.
-- `v0.1.2` was released after the conformance fixes were verified.
+- Interactive prompt expansion and prompt defaults landed.
+- Startup behavior and startup-file loading contract landed.
+- Remaining imported POSIX skips were eliminated; the imported `*-p.tst` corpus is now fully green with `SKIPPED 0`.
+- Fast builtin execution for `echo` and `printf` landed while keeping `command -v/-V` substitutive-style.
+- `v0.1.3` was released after the shell-identity work was verified.
+- `v0.1.4` shipped the first real `posish(1)` man page and aligned usage/docs around current behavior.
 
 ## Release Horizon
 
 - This roadmap covers the next 3 releases.
 - Target releases:
-  - `v0.1.3`
-  - `v0.1.4`
   - `v0.1.5`
+  - `v0.1.6`
+  - `v0.1.7`
 - Prioritization principle:
   - correctness and shell identity first
-  - then maturity, documentation, and structure
+  - then structure and architecture cleanup
   - then performance floor-raising
   - larger architecture work stays parked unless it directly unblocks a release goal
 
@@ -138,6 +168,34 @@ subshell.sh: external command                           1,692      2,420      2,
 * count: number of executions per second
 ```
 
+Latest same-machine snapshot after builtin `echo` / `printf` landed:
+
+- Date: `2026-03-06`
+- Commit: `109091f`
+- Command:
+
+```sh
+tmp/external/shellbench/shellbench -c -s "$PWD/build/posish,dash,freebsd-sh,yash" tmp/external/shellbench/sample/output.sh
+```
+
+```text
+----------------------------------------------------------------------------------------------
+name                                               /home/mario/proj/posish/build/posish       dash freebsd-sh       yash
+----------------------------------------------------------------------------------------------
+[null loop]                                         177,184  2,660,820  2,804,196    394,350
+output.sh: echo                                      48,684  1,342,329  1,500,489    207,581
+output.sh: printf                                    48,982  1,247,926  1,393,128    203,223
+output.sh: print                                      error      error      error      error
+----------------------------------------------------------------------------------------------
+* count: number of executions per second
+```
+
+Immediate takeaway:
+
+- The `echo` / `printf` basement problem is no longer catastrophic.
+- The output path is still far behind peer shells, but it is no longer stuck in the low-thousands.
+- Future bench work should shift attention toward dispatch, expansion-heavy paths, and command-substitution overhead rather than treating output builtins as completely missing.
+
 - Benchmark is internal-only and allowed to be a little mean.
 - Benchmark score is executions per second.
 - Compare revisions on the same machine.
@@ -169,6 +227,8 @@ Hotspot buckets:
   - cases dominated by external-process cost
 
 ## v0.1.3 - Shell Identity
+
+Status: shipped in `v0.1.3`
 
 Scope: make `posish` behave more like a real shell at startup and in interactive use.
 
@@ -215,40 +275,32 @@ This release must document the matrix, not just code it.
 
 Remove hardcoded unconditional `PS1="posish$"` behavior.
 
-Required target behavior:
+Implemented behavior:
 
 - only set a default `PS1` for interactive shells
 - only set it if `PS1` is unset
 - do not force a prompt in non-interactive mode
-- keep the default simple for now
+- support prompt expansion as a `posish` extension
 
-Recommended default:
+Current default:
 
 ```sh
-PS1='$ '
+PS1='\w \$ '
 PS2='> '
 ```
 
-If project identity later wants `posish$ ` back, revisit that after startup semantics are stable.
+Shipped highlights:
 
-Acceptance criteria:
-
-- startup behavior is written down as a matrix
-- shell-owned environment variable policy is documented
-- default prompt is no longer hardcoded unconditionally
-- interactive and non-interactive behavior is intentional and testable
-- imported POSIX suite remains green
-
-Test scenarios:
-
-- interactive tty shell with no `PS1`
-- interactive tty shell with inherited `PS1`
-- non-interactive `-c` shell does not emit a prompt
-- login-shell path does not regress batch behavior
-- `ENV` handling in interactive and non-interactive modes
-- `PWD` and `OLDPWD` consistency across `cd`
+- prompt rendering now honors `PS1` / `PS2`
+- default prompts are interactive-only and only applied when unset
+- interactive startup loads `ENV` and `~/.posishrc`
+- login shells load `~/.posish_profile`
+- interactive login shells load profile, then `ENV`, then rc
+- imported POSIX suite remained green through the shell-identity work
 
 ## v0.1.4 - Project Maturity
+
+Status: shipped in `v0.1.4`
 
 Scope: turn correctness into maintainability and usability.
 
@@ -352,13 +404,18 @@ This script should:
 Optimization order:
 
 1. shell startup and dispatch overhead for trivial commands
-2. builtin output path
-   - `echo`
-   - `printf`
-3. variable assignment and parameter lookup fast paths
-4. expansion-heavy string operations
-5. function and `eval` dispatch cost
-6. command substitution and subshell overhead
+2. variable assignment and parameter lookup fast paths
+3. expansion-heavy string operations
+4. function and `eval` dispatch cost
+5. command substitution and subshell overhead
+6. remaining builtin output-path polish where measurement justifies it
+
+Current status before `v0.1.5`:
+
+- builtin execution for `echo` and `printf` is already in place
+- `output.sh: echo` improved from roughly `1.3k/s` to roughly `48.7k/s`
+- `output.sh: printf` improved from roughly `1.3k/s` to roughly `49.0k/s`
+- the next likely wins are no longer “add the missing builtin”; they are “shave dispatch/format/expansion overhead without breaking conformance”
 
 ### C. Success metric
 
@@ -366,8 +423,8 @@ Close major gaps first.
 
 Define success for `v0.1.5` as:
 
-- achieve at least one order-of-magnitude improvement on the worst builtin-heavy outliers from the baseline
-- eliminate obviously pathological low-thousands scores for simple builtin cases where peer shells are in the hundreds of thousands or millions
+- achieve at least one order-of-magnitude improvement on additional catastrophic builtin-heavy outliers beyond the already-fixed output baseline
+- keep pushing simple builtin and dispatch-heavy cases out of obviously pathological territory
 - keep the imported POSIX suite green throughout optimization work
 
 This is intentionally not "beat `dash`".
@@ -398,6 +455,8 @@ These items matter, but they are outside the next 3-release core path.
 
 - High-value long-term architecture work.
 - Not urgent while imported POSIX conformance is green.
+- Exploratory AST/parser migration work is active on branch `ast/parser-migration`.
+- Do not treat AST work as merge-ready mainline structure until wider imported validation is rerun.
 - Start it only when the project is ready for major parser and executor churn.
 
 ### B. Line editing
@@ -437,8 +496,9 @@ Every release in this roadmap must satisfy all of the following:
 - `REVIEW_ROADMAP.md` is the canonical committed internal roadmap.
 - "Hall of Shame" is acceptable project-internal wording.
 - The shellbench table above is the first committed benchmark baseline.
+- The `2026-03-06` output-only snapshot is the first committed post-baseline benchmark win.
 - Future canonical shellbench runs should use correction mode and the local sample suite.
-- The roadmap horizon is exactly `v0.1.3`, `v0.1.4`, and `v0.1.5`.
+- The roadmap horizon is now `v0.1.5`, `v0.1.6`, and `v0.1.7`.
 - Success for performance work means closing major gaps first, not trying to beat `dash` immediately.
 - Full AST and line editing are intentionally parked outside the next 3-release core path.
 - This roadmap is docs-only and does not imply that every planned interface already exists.
