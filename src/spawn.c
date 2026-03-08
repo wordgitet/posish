@@ -5,9 +5,9 @@
 #include "spawn.h"
 
 #include "arena.h"
-#include "exec.h"
 #include "jobs.h"
 #include "path.h"
+#include "signals.h"
 #include "trace.h"
 #include "vars.h"
 

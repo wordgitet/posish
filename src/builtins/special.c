@@ -7,11 +7,11 @@
 #include "alias.h"
 #include "arena.h"
 #include "error.h"
-#include "exec.h"
 #include "functions.h"
 #include "options.h"
 #include "path.h"
 #include "signals.h"
+#include "spawn.h"
 #include "trace.h"
 #include "vars.h"
 

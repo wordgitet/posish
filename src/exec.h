@@ -9,9 +9,6 @@
 #include "shell.h"
 
 int exec_run_program(struct shell_state *state, const struct ast_program *program);
-void exec_prepare_signals_for_exec_child(const struct shell_state *state);
-int exec_replace_with_utility(struct shell_state *state, const char *path,
-                              char *const argv[]);
 char *exec_alias_expand_preview(struct shell_state *state, const char *source);
 bool exec_alias_preview_needs_more(const char *preview);
 bool exec_noexec_allows_set_toggle(const char *source);
