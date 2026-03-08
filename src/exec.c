@@ -1372,7 +1372,8 @@ static int run_simple_ast(struct shell_state *state,
   bool saved_suppress_aliases;
   int status;
 
-  if (state->suppress_ast_aliases) {
+  if (state->suppress_ast_aliases || state->aliases_table.count == 0) {
+    /* No aliases are defined, so the rewrite pass cannot change the command. */
     return simple_command_execute_parts(state, &node->data.simple.raw_words,
                                         &node->data.simple.redirs,
                                         allow_builtin, execute_program_text);
