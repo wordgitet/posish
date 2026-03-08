@@ -4,6 +4,7 @@
 
 #include "builtins/builtin.h"
 
+#include "alias.h"
 #include "arena.h"
 #include "error.h"
 #include "exec.h"
@@ -161,26 +162,15 @@ static char *xstrdup_local(const char *s) {
     return arena_xstrdup(s);
 }
 
-static char *command_alias_value_dup(const char *name) {
-    static const char prefix[] = "POSISH_ALIAS_";
-    size_t plen;
-    size_t nlen;
-    char *key;
+static char *command_alias_value_dup(const struct shell_state *state,
+                                     const char *name) {
     const char *value;
-    char *copy;
 
-    plen = sizeof(prefix) - 1;
-    nlen = strlen(name);
-    key = arena_xmalloc(plen + nlen + 1);
-    memcpy(key, prefix, plen);
-    memcpy(key + plen, name, nlen + 1);
-    value = getenv(key);
-    arena_maybe_free(key);
+    value = alias_lookup(state, name);
     if (value == NULL) {
         return NULL;
     }
-    copy = xstrdup_local(value);
-    return copy;
+    return xstrdup_local(value);
 }
 
 static int builtin_command_describe(struct shell_state *state, char *const argv[],
@@ -197,7 +187,7 @@ static int builtin_command_describe(struct shell_state *state, char *const argv[
             path = xstrdup_local(argv[i]);
         } else if (has_shell_function(state, argv[i])) {
             path = xstrdup_local(argv[i]);
-        } else if ((path = command_alias_value_dup(argv[i])) != NULL) {
+        } else if ((path = command_alias_value_dup(state, argv[i])) != NULL) {
             if (verbose) {
                 printf("%s is an alias for %s\n", argv[i], path);
             } else {
@@ -853,48 +843,56 @@ static char *double_quote_for_eval(const char *value) {
     return out;
 }
 
-static int print_exported_variables(const struct shell_state *state) {
-    size_t i;
+struct print_shell_var_ctx {
+    bool readonly_only;
+    int status;
+};
 
-    for (i = 0; i < state->var_count; i++) {
-        char *quoted;
+static bool print_shell_var_visit(const char *name, const struct shell_var *var,
+                                  void *user_data) {
+    struct print_shell_var_ctx *ctx;
+    char *quoted;
 
-        if (!state->vars[i].exported || !vars_is_name_valid(state->vars[i].name)) {
-            continue;
+    ctx = user_data;
+    if (ctx->readonly_only) {
+        if (!var->readonly) {
+            return true;
         }
-
-        quoted = double_quote_for_eval(state->vars[i].value);
-        if (quoted == NULL) {
-            return 1;
+    } else {
+        if (!var->exported || !vars_is_name_valid(name)) {
+            return true;
         }
-        printf("export %s=%s\n", state->vars[i].name, quoted);
-        arena_maybe_free(quoted);
     }
-    fflush(stdout);
 
-    return 0;
+    quoted = double_quote_for_eval(var->value);
+    if (quoted == NULL) {
+        ctx->status = 1;
+        return false;
+    }
+    printf("%s %s=%s\n", ctx->readonly_only ? "readonly" : "export", name,
+           quoted);
+    arena_maybe_free(quoted);
+    return true;
+}
+
+static int print_exported_variables(const struct shell_state *state) {
+    struct print_shell_var_ctx ctx;
+
+    ctx.readonly_only = false;
+    ctx.status = 0;
+    vars_for_each(state, print_shell_var_visit, &ctx);
+    fflush(stdout);
+    return ctx.status;
 }
 
 static int print_readonly_variables(const struct shell_state *state) {
-    size_t i;
+    struct print_shell_var_ctx ctx;
 
-    for (i = 0; i < state->var_count; i++) {
-        char *quoted;
-
-        if (!state->vars[i].readonly) {
-            continue;
-        }
-
-        quoted = double_quote_for_eval(state->vars[i].value);
-        if (quoted == NULL) {
-            return 1;
-        }
-        printf("readonly %s=%s\n", state->vars[i].name, quoted);
-        arena_maybe_free(quoted);
-    }
+    ctx.readonly_only = true;
+    ctx.status = 0;
+    vars_for_each(state, print_shell_var_visit, &ctx);
     fflush(stdout);
-
-    return 0;
+    return ctx.status;
 }
 
 static int builtin_unset(struct shell_state *state, char *const argv[]) {

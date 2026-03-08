@@ -7,6 +7,7 @@
 #include "arena.h"
 #include "error.h"
 #include "path.h"
+#include "symbols.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -18,6 +19,22 @@
 
 extern char **environ;
 
+struct shell_var_entry {
+    struct symbol_node sym;
+    struct shell_var var;
+};
+
+static struct shell_var_entry *vars_entry_from_node(struct symbol_node *node) {
+    return (struct shell_var_entry *)((char *)node -
+                                      offsetof(struct shell_var_entry, sym));
+}
+
+static const struct shell_var_entry *
+vars_entry_from_const_node(const struct symbol_node *node) {
+    return (const struct shell_var_entry *)((const char *)node -
+                                            offsetof(struct shell_var_entry, sym));
+}
+
 static bool vars_is_process_marker(const char *name) {
     return strcmp(name, "POSISH_PARENT_INTERACTIVE") == 0 ||
            strcmp(name, "POSISH_TRACE") == 0 ||
@@ -25,10 +42,7 @@ static bool vars_is_process_marker(const char *name) {
 }
 
 static bool vars_should_skip_import(const char *name) {
-    static const char alias_prefix[] = "POSISH_ALIAS_";
-
-    return vars_is_process_marker(name) ||
-           strncmp(name, alias_prefix, sizeof(alias_prefix) - 1) == 0;
+    return vars_is_process_marker(name);
 }
 
 static bool vars_is_storage_name(const char *name) {
@@ -52,83 +66,59 @@ static bool vars_is_name_valid_n(const char *name, size_t len) {
     return true;
 }
 
-static bool vars_name_equals_n(const char *stored, const char *name, size_t len) {
-    return stored[0] == name[0] && stored[len] == '\0' &&
-           memcmp(stored, name, len) == 0;
-}
-
-static void vars_cache_store(struct shell_state *state, size_t idx) {
-    state->var_mru_valid = true;
-    state->var_mru_index = idx;
+static void vars_cache_store(struct shell_state *state,
+                             struct shell_var_entry *entry) {
+    state->var_mru = entry;
 }
 
 static void vars_cache_invalidate(struct shell_state *state) {
-    state->var_mru_valid = false;
-    state->var_mru_index = 0;
+    state->var_mru = NULL;
 }
 
-static ssize_t vars_find_n(struct shell_state *state, const char *name,
-                           size_t len) {
-    size_t i;
+static bool vars_cache_matches(const struct shell_var_entry *entry,
+                               const char *name, size_t len) {
+    size_t stored_len;
 
-    if (state->var_mru_valid && state->var_mru_index < state->var_count &&
-        vars_name_equals_n(state->vars[state->var_mru_index].name, name, len)) {
-        return (ssize_t)state->var_mru_index;
+    if (entry == NULL) {
+        return false;
+    }
+    stored_len = strlen(entry->sym.name);
+    return stored_len == len && entry->sym.name[0] == name[0] &&
+           memcmp(entry->sym.name, name, len) == 0;
+}
+
+static struct shell_var_entry *vars_lookup_entry_n(struct shell_state *state,
+                                                   const char *name,
+                                                   size_t len) {
+    struct symbol_node *node;
+
+    if (vars_cache_matches(state->var_mru, name, len)) {
+        return state->var_mru;
     }
 
-    /*
-     * Benchmarks mostly hammer variables created after startup (for example
-     * __count, loop temporaries, PATH overrides). Those entries sit near the
-     * end of the table because the inherited environment is imported first.
-     * Searching newest-first keeps the common hot path close to O(1) without
-     * changing external behavior or adding a larger indexing structure yet.
-     */
-    for (i = state->var_count; i > 0; i--) {
-        const struct shell_var *var;
-
-        var = &state->vars[i - 1];
-        if (vars_name_equals_n(var->name, name, len)) {
-            vars_cache_store(state, i - 1);
-            return (ssize_t)(i - 1);
-        }
-    }
-    return -1;
-}
-
-static ssize_t vars_find(struct shell_state *state, const char *name) {
-    return vars_find_n(state, name, strlen(name));
-}
-
-static struct shell_var *vars_lookup_mut_n(struct shell_state *state,
-                                           const char *name, size_t len) {
-    ssize_t idx;
-
-    idx = vars_find_n(state, name, len);
-    if (idx < 0) {
+    node = symbol_table_lookup_n(&state->vars_table, name, len);
+    if (node == NULL) {
         return NULL;
     }
-    return &state->vars[idx];
+
+    vars_cache_store(state, vars_entry_from_node(node));
+    return vars_entry_from_node(node);
 }
 
-static struct shell_var *vars_lookup_mut(struct shell_state *state,
-                                         const char *name) {
-    return vars_lookup_mut_n(state, name, strlen(name));
+static struct shell_var_entry *vars_lookup_entry(struct shell_state *state,
+                                                 const char *name) {
+    return vars_lookup_entry_n(state, name, strlen(name));
 }
 
-static const struct shell_var *vars_lookup_n(struct shell_state *state,
-                                             const char *name, size_t len) {
-    ssize_t idx;
-
-    idx = vars_find_n(state, name, len);
-    if (idx < 0) {
-        return NULL;
-    }
-    return &state->vars[idx];
+static const struct shell_var_entry *
+vars_lookup_const_entry_n(struct shell_state *state, const char *name,
+                          size_t len) {
+    return vars_lookup_entry_n(state, name, len);
 }
 
-static const struct shell_var *vars_lookup(struct shell_state *state,
-                                           const char *name) {
-    return vars_lookup_n(state, name, strlen(name));
+static const struct shell_var_entry *
+vars_lookup_const_entry(struct shell_state *state, const char *name) {
+    return vars_lookup_entry(state, name);
 }
 
 static bool vars_affects_path_cache(const char *name) {
@@ -172,7 +162,8 @@ static bool vars_parse_long_value(const char *value, long *out) {
     return true;
 }
 
-static size_t vars_format_long_decimal(long value, char buf[static 3 + sizeof(long) * 3]) {
+static size_t vars_format_long_decimal(long value,
+                                       char buf[static 3 + sizeof(long) * 3]) {
     unsigned long magnitude;
     size_t pos;
     bool negative;
@@ -196,6 +187,7 @@ static size_t vars_format_long_decimal(long value, char buf[static 3 + sizeof(lo
 
     {
         size_t i;
+
         for (i = 0; i < pos / 2; i++) {
             char tmp;
 
@@ -204,74 +196,85 @@ static size_t vars_format_long_decimal(long value, char buf[static 3 + sizeof(lo
             buf[pos - 1 - i] = tmp;
         }
     }
+
     buf[pos] = '\0';
     return pos;
 }
 
-static int vars_append_new(struct shell_state *state, const char *name,
-                           const char *value, bool exported, bool readonly) {
-    struct shell_var *grown;
-    struct shell_var *var;
+static void vars_destroy_entry(struct shell_var_entry *entry) {
+    free(entry->sym.name);
+    free(entry->var.value);
+    free(entry);
+}
+
+static void vars_destroy_node(struct symbol_node *node) {
+    vars_destroy_entry(vars_entry_from_node(node));
+}
+
+static struct shell_var_entry *vars_alloc_entry_n(const char *name, size_t len,
+                                                  const char *value,
+                                                  bool exported,
+                                                  bool readonly) {
+    struct shell_var_entry *entry;
     const char *stored_value;
     long parsed_long;
 
-    grown = arena_realloc_in(NULL, state->vars,
-                             sizeof(*state->vars) * (state->var_count + 1));
-    state->vars = grown;
-    var = &state->vars[state->var_count++];
-    var->name = arena_strdup_in(NULL, name);
+    entry = arena_alloc_in(NULL, sizeof(*entry));
+    memset(entry, 0, sizeof(*entry));
+
+    entry->sym.name = arena_alloc_in(NULL, len + 1);
+    memcpy(entry->sym.name, name, len);
+    entry->sym.name[len] = '\0';
+    entry->sym.hash = symbol_hash_n(name, len);
+
     stored_value = value == NULL ? "" : value;
+    entry->var.value = arena_strdup_in(NULL, stored_value);
+    entry->var.value_len = strlen(stored_value);
     parsed_long = 0;
-    var->value = arena_strdup_in(NULL, stored_value);
-    var->value_len = strlen(stored_value);
-    var->long_cache_valid = vars_parse_long_value(stored_value, &parsed_long);
-    var->long_cache = parsed_long;
-    var->exported = exported;
-    var->readonly = readonly;
-    vars_cache_store(state, state->var_count - 1);
-    vars_maybe_invalidate_path_cache(state, name);
-    return 0;
+    entry->var.long_cache_valid =
+        vars_parse_long_value(stored_value, &parsed_long);
+    entry->var.long_cache = parsed_long;
+    entry->var.exported = exported;
+    entry->var.readonly = readonly;
+    return entry;
 }
 
 static int vars_append_new_n(struct shell_state *state, const char *name,
                              size_t len, const char *value, bool exported,
                              bool readonly) {
-    struct shell_var *grown;
-    struct shell_var *var;
-    const char *stored_value;
-    long parsed_long;
+    struct shell_var_entry *entry;
+    int rc;
 
-    grown = arena_realloc_in(NULL, state->vars,
-                             sizeof(*state->vars) * (state->var_count + 1));
-    state->vars = grown;
-    var = &state->vars[state->var_count++];
-    var->name = arena_alloc_in(NULL, len + 1);
-    memcpy(var->name, name, len);
-    var->name[len] = '\0';
-    stored_value = value == NULL ? "" : value;
-    parsed_long = 0;
-    var->value = arena_strdup_in(NULL, stored_value);
-    var->value_len = strlen(stored_value);
-    var->long_cache_valid = vars_parse_long_value(stored_value, &parsed_long);
-    var->long_cache = parsed_long;
-    var->exported = exported;
-    var->readonly = readonly;
-    vars_cache_store(state, state->var_count - 1);
-    vars_maybe_invalidate_path_cache(state, var->name);
+    entry = vars_alloc_entry_n(name, len, value, exported, readonly);
+    rc = symbol_table_insert(&state->vars_table, &entry->sym);
+    if (rc != 0) {
+        vars_destroy_entry(entry);
+        return rc;
+    }
+
+    vars_cache_store(state, entry);
+    vars_maybe_invalidate_path_cache_n(state, name, len);
     return 0;
+}
+
+static int vars_append_new(struct shell_state *state, const char *name,
+                           const char *value, bool exported, bool readonly) {
+    return vars_append_new_n(state, name, strlen(name), value, exported,
+                             readonly);
 }
 
 static void vars_replace_value(struct shell_var *var, const char *value) {
     size_t len;
     long parsed_long;
+    const char *stored_value;
 
-    len = strlen(value == NULL ? "" : value);
+    stored_value = value == NULL ? "" : value;
+    len = strlen(stored_value);
     var->value = arena_realloc_in(NULL, var->value, len + 1);
-    memcpy(var->value, value == NULL ? "" : value, len + 1);
+    memcpy(var->value, stored_value, len + 1);
     var->value_len = len;
     parsed_long = 0;
-    var->long_cache_valid = vars_parse_long_value(value == NULL ? "" : value,
-                                                  &parsed_long);
+    var->long_cache_valid = vars_parse_long_value(stored_value, &parsed_long);
     var->long_cache = parsed_long;
 }
 
@@ -287,52 +290,28 @@ static void vars_replace_value_long(struct shell_var *var, long value) {
     var->long_cache = value;
 }
 
-static int vars_store(struct shell_state *state, const char *name,
-                      const char *value, bool check_readonly, bool exported,
-                      bool mark_readonly) {
-    struct shell_var *var;
-
-    var = vars_lookup_mut(state, name);
-    if (var != NULL) {
-        if (check_readonly && var->readonly) {
-            posish_errorf("%s: is read-only", name);
-            return 1;
-        }
-        vars_replace_value(var, value);
-        var->exported = exported;
-        if (mark_readonly) {
-            var->readonly = true;
-        }
-        vars_cache_store(state, (size_t)(var - state->vars));
-        vars_maybe_invalidate_path_cache(state, name);
-        return 0;
-    }
-
-    return vars_append_new(state, name, value, exported, mark_readonly);
-}
-
 static int vars_store_n(struct shell_state *state, const char *name, size_t len,
                         const char *value, bool check_readonly, bool exported,
                         bool mark_readonly) {
-    struct shell_var *var;
+    struct shell_var_entry *entry;
     char *name_copy;
 
-    var = vars_lookup_mut_n(state, name, len);
-    if (var != NULL) {
-        if (check_readonly && var->readonly) {
+    entry = vars_lookup_entry_n(state, name, len);
+    if (entry != NULL) {
+        if (check_readonly && entry->var.readonly) {
             name_copy = arena_alloc_in(NULL, len + 1);
             memcpy(name_copy, name, len);
             name_copy[len] = '\0';
             posish_errorf("%s: is read-only", name_copy);
-            arena_maybe_free(name_copy);
+            free(name_copy);
             return 1;
         }
-        vars_replace_value(var, value);
-        var->exported = exported;
+        vars_replace_value(&entry->var, value);
+        entry->var.exported = exported;
         if (mark_readonly) {
-            var->readonly = true;
+            entry->var.readonly = true;
         }
-        vars_cache_store(state, (size_t)(var - state->vars));
+        vars_cache_store(state, entry);
         vars_maybe_invalidate_path_cache_n(state, name, len);
         return 0;
     }
@@ -340,23 +319,30 @@ static int vars_store_n(struct shell_state *state, const char *name, size_t len,
     return vars_append_new_n(state, name, len, value, exported, mark_readonly);
 }
 
+static int vars_store(struct shell_state *state, const char *name,
+                      const char *value, bool check_readonly, bool exported,
+                      bool mark_readonly) {
+    return vars_store_n(state, name, strlen(name), value, check_readonly,
+                        exported, mark_readonly);
+}
+
 static int vars_mark_readonly_existing(struct shell_state *state,
                                        const char *name) {
-    struct shell_var *var;
+    struct shell_var_entry *entry;
 
-    var = vars_lookup_mut(state, name);
-    if (var == NULL) {
+    entry = vars_lookup_entry(state, name);
+    if (entry == NULL) {
         return vars_append_new(state, name, "", false, true);
     }
-    var->readonly = true;
+    entry->var.readonly = true;
+    vars_cache_store(state, entry);
     return 0;
 }
 
 void vars_init(struct shell_state *state) {
     size_t i;
 
-    state->vars = NULL;
-    state->var_count = 0;
+    symbol_table_init(&state->vars_table);
     vars_cache_invalidate(state);
 
     for (i = 0; environ != NULL && environ[i] != NULL; i++) {
@@ -376,34 +362,21 @@ void vars_init(struct shell_state *state) {
         memcpy(name, entry, nlen);
         name[nlen] = '\0';
         if (!vars_is_name_valid(name) || vars_should_skip_import(name)) {
-            arena_maybe_free(name);
+            free(name);
             continue;
         }
         (void)vars_store(state, name, eq + 1, false, true, false);
-        arena_maybe_free(name);
+        free(name);
     }
 
-    /*
-     * POSIX shells initialize IFS to <space><tab><newline> regardless of
-     * inherited environment so field splitting has a predictable baseline.
-     */
     (void)vars_set_with_mode(state, "IFS", " \t\n", false, false);
-    /* OPTIND starts at 1 for getopts parsing state in each fresh shell. */
     (void)vars_set_with_mode(state, "OPTIND", "1", false, false);
     (void)vars_set_with_mode(state, "LINENO", "1", false, false);
     (void)vars_unset(state, "OPTARG");
 }
 
 void vars_destroy(struct shell_state *state) {
-    size_t i;
-
-    for (i = 0; i < state->var_count; i++) {
-        arena_maybe_free(state->vars[i].name);
-        arena_maybe_free(state->vars[i].value);
-    }
-    arena_maybe_free(state->vars);
-    state->vars = NULL;
-    state->var_count = 0;
+    symbol_table_destroy(&state->vars_table, vars_destroy_node);
     vars_cache_invalidate(state);
 }
 
@@ -425,28 +398,28 @@ bool vars_is_name_valid(const char *name) {
 }
 
 bool vars_is_readonly(const struct shell_state *state, const char *name) {
-    const struct shell_var *var;
+    const struct shell_var_entry *entry;
 
-    var = vars_lookup((struct shell_state *)state, name);
-    return var != NULL && var->readonly;
+    entry = vars_lookup_const_entry((struct shell_state *)state, name);
+    return entry != NULL && entry->var.readonly;
 }
 
 bool vars_is_set(const struct shell_state *state, const char *name) {
-    return vars_lookup((struct shell_state *)state, name) != NULL;
+    return vars_lookup_const_entry((struct shell_state *)state, name) != NULL;
 }
 
 bool vars_is_exported(const struct shell_state *state, const char *name) {
-    const struct shell_var *var;
+    const struct shell_var_entry *entry;
 
-    var = vars_lookup((struct shell_state *)state, name);
-    return var != NULL && var->exported;
+    entry = vars_lookup_const_entry((struct shell_state *)state, name);
+    return entry != NULL && entry->var.exported;
 }
 
 bool vars_is_unexported(const struct shell_state *state, const char *name) {
-    const struct shell_var *var;
+    const struct shell_var_entry *entry;
 
-    var = vars_lookup((struct shell_state *)state, name);
-    return var != NULL && !var->exported;
+    entry = vars_lookup_const_entry((struct shell_state *)state, name);
+    return entry != NULL && !entry->var.exported;
 }
 
 const char *vars_get(const struct shell_state *state, const char *name) {
@@ -454,35 +427,35 @@ const char *vars_get(const struct shell_state *state, const char *name) {
 }
 
 const char *vars_get_n(struct shell_state *state, const char *name, size_t len) {
-    const struct shell_var *var;
+    const struct shell_var_entry *entry;
 
-    var = vars_lookup_n(state, name, len);
-    if (var == NULL) {
+    entry = vars_lookup_const_entry_n(state, name, len);
+    if (entry == NULL) {
         return NULL;
     }
-    return var->value;
+    return entry->var.value;
 }
 
 bool vars_get_long_n(struct shell_state *state, const char *name, size_t len,
                      long *out) {
-    struct shell_var *var;
+    struct shell_var_entry *entry;
     long parsed;
 
-    var = vars_lookup_mut_n(state, name, len);
-    if (var == NULL || var->value_len == 0) {
+    entry = vars_lookup_entry_n(state, name, len);
+    if (entry == NULL || entry->var.value_len == 0) {
         return false;
     }
-    if (var->long_cache_valid) {
-        *out = var->long_cache;
+    if (entry->var.long_cache_valid) {
+        *out = entry->var.long_cache;
         return true;
     }
-    if (!vars_parse_long_value(var->value, &parsed)) {
+    if (!vars_parse_long_value(entry->var.value, &parsed)) {
         *out = 0;
         return true;
     }
 
-    var->long_cache_valid = true;
-    var->long_cache = parsed;
+    entry->var.long_cache_valid = true;
+    entry->var.long_cache = parsed;
     *out = parsed;
     return true;
 }
@@ -510,7 +483,7 @@ int vars_set_assignment(struct shell_state *state, const char *name,
 int vars_set_assignment_n(struct shell_state *state, const char *name,
                           size_t len, const char *value, bool check_readonly) {
     bool exported;
-    const struct shell_var *existing;
+    const struct shell_var_entry *existing;
 
     if (!vars_is_name_valid_n(name, len)) {
         char *name_copy;
@@ -519,12 +492,12 @@ int vars_set_assignment_n(struct shell_state *state, const char *name,
         memcpy(name_copy, name, len);
         name_copy[len] = '\0';
         posish_errorf("invalid variable name: %s", name_copy);
-        arena_maybe_free(name_copy);
+        free(name_copy);
         return 1;
     }
 
-    existing = vars_lookup_n(state, name, len);
-    exported = existing != NULL ? existing->exported : false;
+    existing = vars_lookup_const_entry_n(state, name, len);
+    exported = existing != NULL ? existing->var.exported : false;
     if (len == 4 && memcmp(name, "PATH", 4) == 0) {
         exported = true;
     }
@@ -532,14 +505,15 @@ int vars_set_assignment_n(struct shell_state *state, const char *name,
         exported = true;
     }
 
-    return vars_store_n(state, name, len, value, check_readonly, exported, false);
+    return vars_store_n(state, name, len, value, check_readonly, exported,
+                        false);
 }
 
 int vars_set_assignment_long_n(struct shell_state *state, const char *name,
                                size_t len, long value,
                                bool check_readonly) {
     bool exported;
-    struct shell_var *var;
+    struct shell_var_entry *entry;
     char *name_copy;
 
     if (!vars_is_name_valid_n(name, len)) {
@@ -547,12 +521,12 @@ int vars_set_assignment_long_n(struct shell_state *state, const char *name,
         memcpy(name_copy, name, len);
         name_copy[len] = '\0';
         posish_errorf("invalid variable name: %s", name_copy);
-        arena_maybe_free(name_copy);
+        free(name_copy);
         return 1;
     }
 
-    var = vars_lookup_mut_n(state, name, len);
-    exported = var != NULL ? var->exported : false;
+    entry = vars_lookup_entry_n(state, name, len);
+    exported = entry != NULL ? entry->var.exported : false;
     if (len == 4 && memcmp(name, "PATH", 4) == 0) {
         exported = true;
     }
@@ -560,18 +534,18 @@ int vars_set_assignment_long_n(struct shell_state *state, const char *name,
         exported = true;
     }
 
-    if (var != NULL) {
-        if (check_readonly && var->readonly) {
+    if (entry != NULL) {
+        if (check_readonly && entry->var.readonly) {
             name_copy = arena_alloc_in(NULL, len + 1);
             memcpy(name_copy, name, len);
             name_copy[len] = '\0';
             posish_errorf("%s: is read-only", name_copy);
-            arena_maybe_free(name_copy);
+            free(name_copy);
             return 1;
         }
-        vars_replace_value_long(var, value);
-        var->exported = exported;
-        vars_cache_store(state, (size_t)(var - state->vars));
+        vars_replace_value_long(&entry->var, value);
+        entry->var.exported = exported;
+        vars_cache_store(state, entry);
         vars_maybe_invalidate_path_cache_n(state, name, len);
         return 0;
     }
@@ -585,46 +559,45 @@ int vars_set_assignment_long_n(struct shell_state *state, const char *name,
 }
 
 int vars_mark_exported(struct shell_state *state, const char *name) {
-    struct shell_var *var;
+    struct shell_var_entry *entry;
 
     if (!vars_is_name_valid(name)) {
         posish_errorf("export: invalid variable name: %s", name);
         return 1;
     }
 
-    var = vars_lookup_mut(state, name);
-    if (var == NULL) {
+    entry = vars_lookup_entry(state, name);
+    if (entry == NULL) {
         return vars_append_new(state, name, "", true, false);
     }
-    var->exported = true;
+    entry->var.exported = true;
+    vars_cache_store(state, entry);
     vars_maybe_invalidate_path_cache(state, name);
     return 0;
 }
 
 int vars_unset(struct shell_state *state, const char *name) {
-    ssize_t idx;
-    size_t i;
+    struct symbol_node *node;
+    struct shell_var_entry *entry;
 
     if (!vars_is_name_valid(name)) {
         posish_errorf("unset: invalid variable name: %s", name);
         return 1;
     }
 
-    idx = vars_find(state, name);
-    if (idx < 0) {
+    entry = vars_lookup_entry(state, name);
+    if (entry == NULL) {
         return 0;
     }
-    if (state->vars[idx].readonly) {
+    if (entry->var.readonly) {
         posish_errorf("unset: %s: is read-only", name);
         return 1;
     }
 
-    arena_maybe_free(state->vars[idx].name);
-    arena_maybe_free(state->vars[idx].value);
-    for (i = (size_t)idx + 1; i < state->var_count; i++) {
-        state->vars[i - 1] = state->vars[i];
+    node = symbol_table_remove(&state->vars_table, name);
+    if (node != NULL) {
+        vars_destroy_node(node);
     }
-    state->var_count--;
     vars_cache_invalidate(state);
     vars_maybe_invalidate_path_cache(state, name);
     return 0;
@@ -632,7 +605,7 @@ int vars_unset(struct shell_state *state, const char *name) {
 
 int vars_mark_readonly(struct shell_state *state, const char *name,
                        const char *value, bool with_value) {
-    const struct shell_var *existing;
+    const struct shell_var_entry *existing;
     bool exported;
     int rc;
 
@@ -641,8 +614,8 @@ int vars_mark_readonly(struct shell_state *state, const char *name,
         return 1;
     }
 
-    existing = vars_lookup(state, name);
-    exported = existing != NULL ? existing->exported : false;
+    existing = vars_lookup_const_entry(state, name);
+    exported = existing != NULL ? existing->var.exported : false;
     if (with_value) {
         rc = vars_store(state, name, value, true, exported, true);
         if (rc != 0) {
@@ -658,36 +631,44 @@ char **vars_build_envp(const struct shell_state *state, size_t *count_out) {
     char **envp;
     size_t count;
     size_t i;
+    const struct symbol_node *node;
 
     count = 0;
-    for (i = 0; i < state->var_count; i++) {
-        if (state->vars[i].exported) {
+    for (node = symbol_table_first(&state->vars_table); node != NULL;
+         node = symbol_table_next(node)) {
+        const struct shell_var_entry *entry;
+
+        entry = vars_entry_from_const_node(node);
+        if (entry->var.exported) {
             count++;
         }
     }
 
     envp = arena_alloc_in(NULL, sizeof(*envp) * (count + 1));
-    count = 0;
-    for (i = 0; i < state->var_count; i++) {
+    i = 0;
+    for (node = symbol_table_first(&state->vars_table); node != NULL;
+         node = symbol_table_next(node)) {
+        const struct shell_var_entry *entry;
         size_t nlen;
         size_t vlen;
-        char *entry;
+        char *item;
 
-        if (!state->vars[i].exported) {
+        entry = vars_entry_from_const_node(node);
+        if (!entry->var.exported) {
             continue;
         }
 
-        nlen = strlen(state->vars[i].name);
-        vlen = strlen(state->vars[i].value);
-        entry = arena_alloc_in(NULL, nlen + 1 + vlen + 1);
-        memcpy(entry, state->vars[i].name, nlen);
-        entry[nlen] = '=';
-        memcpy(entry + nlen + 1, state->vars[i].value, vlen + 1);
-        envp[count++] = entry;
+        nlen = strlen(entry->sym.name);
+        vlen = entry->var.value_len;
+        item = arena_alloc_in(NULL, nlen + 1 + vlen + 1);
+        memcpy(item, entry->sym.name, nlen);
+        item[nlen] = '=';
+        memcpy(item + nlen + 1, entry->var.value, vlen + 1);
+        envp[i++] = item;
     }
-    envp[count] = NULL;
+    envp[i] = NULL;
     if (count_out != NULL) {
-        *count_out = count;
+        *count_out = i;
     }
     return envp;
 }
@@ -701,9 +682,8 @@ char **vars_build_exec_envp(const struct shell_state *state) {
     envp = vars_build_envp(state, &count);
     for (i = 0; i < count; i++) {
         if (strncmp(envp[i], key, sizeof(key) - 1) == 0) {
-            arena_maybe_free(envp[i]);
-            envp[i] =
-                arena_alloc_in(NULL, sizeof(key) + 1);
+            free(envp[i]);
+            envp[i] = arena_alloc_in(NULL, sizeof(key) + 1);
             memcpy(envp[i], key, sizeof(key) - 1);
             envp[i][sizeof(key) - 1] = state->interactive ? '1' : '0';
             envp[i][sizeof(key)] = '\0';
@@ -727,7 +707,22 @@ void vars_free_envp(char **envp) {
         return;
     }
     for (i = 0; envp[i] != NULL; i++) {
-        arena_maybe_free(envp[i]);
+        free(envp[i]);
     }
-    arena_maybe_free(envp);
+    free(envp);
+}
+
+void vars_for_each(const struct shell_state *state, vars_visit_fn visit,
+                   void *user_data) {
+    const struct symbol_node *node;
+
+    for (node = symbol_table_first(&state->vars_table); node != NULL;
+         node = symbol_table_next(node)) {
+        const struct shell_var_entry *entry;
+
+        entry = vars_entry_from_const_node(node);
+        if (!visit(entry->sym.name, &entry->var, user_data)) {
+            return;
+        }
+    }
 }

@@ -20,7 +20,6 @@ struct shell_function {
 };
 
 struct shell_var {
-    char *name;
     char *value;
     size_t value_len;
     bool long_cache_valid;
@@ -28,6 +27,12 @@ struct shell_var {
     bool exported;
     bool readonly;
 };
+
+struct shell_alias {
+    char *value;
+};
+
+struct shell_var_entry;
 
 struct command_path_cache_entry {
     char *name;
@@ -84,11 +89,10 @@ struct shell_state {
     int trap_entry_status;
     char *signal_traps[NSIG];
     bool signal_cleared[NSIG];
-    struct shell_var *vars;
-    size_t var_count;
-    bool var_mru_valid;
-    size_t var_mru_index;
+    struct symbol_table vars_table;
+    struct shell_var_entry *var_mru;
     struct symbol_table functions_table;
+    struct symbol_table aliases_table;
     struct command_path_cache_entry *path_cache;
     size_t path_cache_count;
     char **positional_params;

@@ -5,6 +5,7 @@
 #include "builtins/builtin.h"
 #include "builtins/test.h"
 
+#include "alias.h"
 #include "arena.h"
 #include "error.h"
 #include "exec.h"
@@ -25,8 +26,6 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
-
-#define POSISH_ALIAS_ENV_PREFIX "POSISH_ALIAS_"
 
 static size_t getopts_nextchar_index = 0;
 static unsigned long getopts_last_optind = 1;
@@ -1443,19 +1442,6 @@ static bool alias_name_valid(const char *name) {
     return true;
 }
 
-static char *alias_env_key(const char *name) {
-    size_t plen;
-    size_t nlen;
-    char *key;
-
-    plen = strlen(POSISH_ALIAS_ENV_PREFIX);
-    nlen = strlen(name);
-    key = arena_xmalloc(plen + nlen + 1);
-    memcpy(key, POSISH_ALIAS_ENV_PREFIX, plen);
-    memcpy(key + plen, name, nlen + 1);
-    return key;
-}
-
 static char *alias_quote_value(const char *value) {
     size_t i;
     size_t out_len;
@@ -1502,7 +1488,23 @@ static int alias_print_entry(const char *name, const char *value) {
     return 0;
 }
 
-static int builtin_alias(char *const argv[]) {
+struct alias_print_ctx {
+    int status;
+};
+
+static bool alias_print_visit(const char *name, const char *value,
+                              void *user_data) {
+    struct alias_print_ctx *ctx;
+
+    ctx = user_data;
+    if (alias_print_entry(name, value) != 0) {
+        ctx->status = 1;
+        return false;
+    }
+    return true;
+}
+
+static int builtin_alias(struct shell_state *state, char *const argv[]) {
     int status;
     size_t i;
 
@@ -1512,48 +1514,17 @@ static int builtin_alias(char *const argv[]) {
     }
 
     if (argv[i] == NULL) {
-        size_t prefix_len;
-        size_t k;
+        struct alias_print_ctx ctx;
 
-        prefix_len = strlen(POSISH_ALIAS_ENV_PREFIX);
-        for (k = 0; environ[k] != NULL; k++) {
-            const char *eq;
-            const char *name;
-            const char *value;
-            size_t name_len;
-            char *name_buf;
-
-            if (strncmp(environ[k], POSISH_ALIAS_ENV_PREFIX, prefix_len) != 0) {
-                continue;
-            }
-
-            eq = strchr(environ[k], '=');
-            if (eq == NULL || (size_t)(eq - environ[k]) <= prefix_len) {
-                continue;
-            }
-
-            name = environ[k] + prefix_len;
-            name_len = (size_t)(eq - name);
-            value = eq + 1;
-
-            name_buf = arena_xmalloc(name_len + 1);
-            memcpy(name_buf, name, name_len);
-            name_buf[name_len] = '\0';
-
-            if (alias_print_entry(name_buf, value) != 0) {
-                arena_maybe_free(name_buf);
-                return 1;
-            }
-            arena_maybe_free(name_buf);
-        }
-        return 0;
+        ctx.status = 0;
+        alias_for_each(state, alias_print_visit, &ctx);
+        return ctx.status;
     }
 
     status = 0;
     for (; argv[i] != NULL; i++) {
         char *eq;
         char *name;
-        char *key;
         const char *value;
 
         eq = strchr(argv[i], '=');
@@ -1563,23 +1534,15 @@ static int builtin_alias(char *const argv[]) {
                 status = 1;
                 continue;
             }
-
-            key = alias_env_key(argv[i]);
-            if (key == NULL) {
-                return 1;
-            }
-            value = getenv(key);
+            value = alias_lookup(state, argv[i]);
             if (value == NULL) {
                 posish_error_idf(POSERR_ALIAS_NOT_FOUND, argv[i]);
-                arena_maybe_free(key);
                 status = 1;
                 continue;
             }
             if (alias_print_entry(argv[i], value) != 0) {
-                arena_maybe_free(key);
                 return 1;
             }
-            arena_maybe_free(key);
             continue;
         }
 
@@ -1595,30 +1558,21 @@ static int builtin_alias(char *const argv[]) {
             continue;
         }
 
-        key = alias_env_key(name);
-        if (key == NULL) {
-            arena_maybe_free(name);
-            return 1;
-        }
-        if (setenv(key, value, 1) != 0) {
-            perror("setenv");
-            arena_maybe_free(key);
+        if (alias_set(state, name, value) != 0) {
             arena_maybe_free(name);
             return 1;
         }
 
-        arena_maybe_free(key);
         arena_maybe_free(name);
     }
 
     return status;
 }
 
-static int builtin_unalias(char *const argv[]) {
+static int builtin_unalias(struct shell_state *state, char *const argv[]) {
     int status;
     size_t i;
     bool clear_all;
-    size_t prefix_len;
 
     clear_all = false;
     i = 1;
@@ -1642,71 +1596,23 @@ static int builtin_unalias(char *const argv[]) {
     }
 
     status = 0;
-    prefix_len = strlen(POSISH_ALIAS_ENV_PREFIX);
 
     if (clear_all) {
-        char **keys;
-        size_t key_count;
-        size_t k;
-
-        keys = NULL;
-        key_count = 0;
-        for (k = 0; environ[k] != NULL; k++) {
-            const char *eq;
-            size_t len;
-            char *key;
-
-            if (strncmp(environ[k], POSISH_ALIAS_ENV_PREFIX, prefix_len) != 0) {
-                continue;
-            }
-            eq = strchr(environ[k], '=');
-            if (eq == NULL) {
-                continue;
-            }
-
-            len = (size_t)(eq - environ[k]);
-            key = arena_xmalloc(len + 1);
-            memcpy(key, environ[k], len);
-            key[len] = '\0';
-            keys = arena_xrealloc(keys, sizeof(*keys) * (key_count + 1));
-            keys[key_count++] = key;
-        }
-
-        for (k = 0; k < key_count; k++) {
-            if (unsetenv(keys[k]) != 0) {
-                perror("unsetenv");
-                status = 1;
-            }
-            arena_maybe_free(keys[k]);
-        }
-        arena_maybe_free(keys);
+        alias_clear(state);
     }
 
     for (; argv[i] != NULL; i++) {
-        char *key;
-
         if (!alias_name_valid(argv[i])) {
             posish_error_idf(POSERR_UNALIAS_INVALID_NAME, argv[i]);
             status = 1;
             continue;
         }
-
-        key = alias_env_key(argv[i]);
-        if (key == NULL) {
-            return 1;
-        }
-        if (getenv(key) == NULL) {
+        if (alias_lookup(state, argv[i]) == NULL) {
             posish_error_idf(POSERR_UNALIAS_NOT_FOUND, argv[i]);
-            arena_maybe_free(key);
             status = 1;
             continue;
         }
-        if (unsetenv(key) != 0) {
-            perror("unsetenv");
-            arena_maybe_free(key);
-            return 1;
-        }
-        arena_maybe_free(key);
+        (void)alias_unset(state, argv[i]);
     }
     return status;
 }
@@ -2466,7 +2372,7 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
     }
     if (strcmp(argv[0], "alias") == 0) {
         *handled = true;
-        return builtin_alias(argv);
+        return builtin_alias(state, argv);
     }
     if (strcmp(argv[0], "getopts") == 0) {
         *handled = true;
@@ -2486,7 +2392,7 @@ int builtin_dispatch(struct shell_state *state, char *const argv[], bool *handle
     }
     if (strcmp(argv[0], "unalias") == 0) {
         *handled = true;
-        return builtin_unalias(argv);
+        return builtin_unalias(state, argv);
     }
     *handled = false;
     return 0;

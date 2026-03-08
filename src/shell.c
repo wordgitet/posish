@@ -7,6 +7,7 @@
 #include "shell.h"
 
 #include "ast.h"
+#include "alias.h"
 #include "error.h"
 #include "expand.h"
 #include "exec.h"
@@ -24,8 +25,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-#define POSISH_ALIAS_ENV_PREFIX "POSISH_ALIAS_"
 
 struct heredoc_marker {
     char *delimiter;
@@ -1539,13 +1538,13 @@ static bool trap_clear_keeps_ignore(const struct shell_state *state, int signo) 
     return inherited_ignore_locked(state, signo);
 }
 
-static const char *trap_resolve_alias_command(const char *command) {
+static const char *trap_resolve_alias_command(struct shell_state *state,
+                                              const char *command) {
     size_t start;
     size_t end;
     size_t i;
     size_t name_len;
-    size_t key_len;
-    char *key;
+    char *name;
     const char *value;
 
     start = 0;
@@ -1573,13 +1572,11 @@ static const char *trap_resolve_alias_command(const char *command) {
     }
 
     name_len = end - start;
-    key_len = strlen(POSISH_ALIAS_ENV_PREFIX) + name_len;
-    key = arena_xmalloc(key_len + 1);
-    memcpy(key, POSISH_ALIAS_ENV_PREFIX, strlen(POSISH_ALIAS_ENV_PREFIX));
-    memcpy(key + strlen(POSISH_ALIAS_ENV_PREFIX), command + start, name_len);
-    key[key_len] = '\0';
-    value = getenv(key);
-    arena_maybe_free(key);
+    name = arena_alloc_in(NULL, name_len + 1);
+    memcpy(name, command + start, name_len);
+    name[name_len] = '\0';
+    value = alias_lookup(state, name);
+    free(name);
     return value;
 }
 
@@ -1641,11 +1638,10 @@ void shell_state_init(struct shell_state *state) {
         state->signal_traps[signo] = NULL;
         state->signal_cleared[signo] = false;
     }
-    state->vars = NULL;
-    state->var_count = 0;
-    state->var_mru_valid = false;
-    state->var_mru_index = 0;
-    functions_init(state);
+    symbol_table_init(&state->vars_table);
+    state->var_mru = NULL;
+    symbol_table_init(&state->functions_table);
+    symbol_table_init(&state->aliases_table);
     state->path_cache = NULL;
     state->path_cache_count = 0;
     state->positional_params = NULL;
@@ -1672,8 +1668,9 @@ void shell_state_destroy(struct shell_state *state) {
         state->signal_cleared[signo] = false;
     }
 
-    vars_destroy(state);
+    aliases_destroy(state);
     functions_destroy(state);
+    vars_destroy(state);
     path_cache_destroy(state);
     free_shell_positionals(state);
     state->login_shell = false;
@@ -1687,8 +1684,7 @@ void shell_state_destroy(struct shell_state *state) {
     state->last_async_pid = -1;
     state->break_levels = 0;
     state->continue_levels = 0;
-    state->var_mru_valid = false;
-    state->var_mru_index = 0;
+    state->var_mru = NULL;
     state->loop_depth = 0;
     state->return_requested = false;
     state->return_status = 0;
@@ -1999,7 +1995,7 @@ void shell_run_pending_traps(struct shell_state *state) {
 
         trace_log(POSISH_TRACE_TRAPS, "run signal trap signo=%d command=%s",
                   signo, command);
-        alias_value = trap_resolve_alias_command(command);
+        alias_value = trap_resolve_alias_command(state, command);
         run_command = alias_value != NULL ? alias_value : command;
 
         saved_last_status = state->last_status;

@@ -46,9 +46,9 @@ static char *path_duplicate_with_cwd(const char *name) {
 static void path_cache_remove_at(struct shell_state *state, size_t idx) {
     size_t i;
 
-    arena_maybe_free(state->path_cache[idx].name);
-    arena_maybe_free(state->path_cache[idx].path_value);
-    arena_maybe_free(state->path_cache[idx].resolved_path);
+    free(state->path_cache[idx].name);
+    free(state->path_cache[idx].path_value);
+    free(state->path_cache[idx].resolved_path);
     for (i = idx + 1; i < state->path_cache_count; i++) {
         state->path_cache[i - 1] = state->path_cache[i];
     }
@@ -95,7 +95,7 @@ static void path_cache_store(struct shell_state *state, const char *name,
             strcmp(entry->path_value, path_value) != 0) {
             continue;
         }
-        arena_maybe_free(entry->resolved_path);
+        free(entry->resolved_path);
         entry->resolved_path = path_strdup_heap(resolved_path);
         return;
     }
@@ -145,7 +145,7 @@ static char *path_search_command_in_path(const char *name, const char *path) {
         if (access(candidate, X_OK) == 0) {
             return candidate;
         }
-        arena_maybe_free(candidate);
+        free(candidate);
 
         if (*end == '\0') {
             break;
@@ -166,16 +166,16 @@ char *path_getcwd_alloc(void) {
     for (;;) {
         if (getcwd(buf, size) != NULL) {
             result = arena_xstrdup(buf);
-            arena_maybe_free(buf);
+            free(buf);
             return result;
         }
 
         if (errno != ERANGE) {
-            arena_maybe_free(buf);
+            free(buf);
             return NULL;
         }
         if (size > SIZE_MAX / 2) {
-            arena_maybe_free(buf);
+            free(buf);
             errno = ERANGE;
             return NULL;
         }
@@ -188,11 +188,11 @@ void path_cache_invalidate(struct shell_state *state) {
     size_t i;
 
     for (i = 0; i < state->path_cache_count; i++) {
-        arena_maybe_free(state->path_cache[i].name);
-        arena_maybe_free(state->path_cache[i].path_value);
-        arena_maybe_free(state->path_cache[i].resolved_path);
+        free(state->path_cache[i].name);
+        free(state->path_cache[i].path_value);
+        free(state->path_cache[i].resolved_path);
     }
-    arena_maybe_free(state->path_cache);
+    free(state->path_cache);
     state->path_cache = NULL;
     state->path_cache_count = 0;
 }
@@ -244,7 +244,7 @@ bool path_resolves_command(struct shell_state *state, const char *name,
     if (resolved == NULL) {
         return false;
     }
-    arena_maybe_free(resolved);
+    free(resolved);
     return true;
 }
 
@@ -289,7 +289,7 @@ char *path_resolve_dot_script(struct shell_state *state, const char *name) {
         if (access(candidate, R_OK) == 0) {
             return candidate;
         }
-        arena_maybe_free(candidate);
+        free(candidate);
 
         if (colon == NULL) {
             break;

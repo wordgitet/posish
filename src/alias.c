@@ -5,8 +5,10 @@
 #include "alias.h"
 #include "arena.h"
 #include "shell.h"
+#include "symbols.h"
 
 #include <ctype.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -17,37 +19,112 @@
 static bool find_command_subst_end_alias(const char *source, size_t start, size_t *out_end);
 static bool find_dollar_single_quote_end_alias(const char *source, size_t start, size_t *out_end);
 
-/* ---------- helpers ---------- */
+struct shell_alias_entry {
+    struct symbol_node sym;
+    struct shell_alias alias;
+};
 
-static char *alias_env_key(const char *name) {
-    size_t len;
-    char *key;
-
-    len = strlen(name);
-    key = arena_xmalloc(len + 14);
-    memcpy(key, "POSISH_ALIAS_", 13);
-    memcpy(key + 13, name, len + 1);
-    return key;
+static struct shell_alias_entry *alias_entry_from_node(struct symbol_node *node) {
+    return (struct shell_alias_entry *)((char *)node -
+                                        offsetof(struct shell_alias_entry, sym));
 }
 
-char *alias_lookup_dup(const char *name) {
-    char *key;
-    const char *value;
-    char *dup;
+static const struct shell_alias_entry *
+alias_entry_from_const_node(const struct symbol_node *node) {
+    return (const struct shell_alias_entry *)((const char *)node -
+                                              offsetof(struct shell_alias_entry, sym));
+}
+
+static void alias_destroy_node(struct symbol_node *node) {
+    struct shell_alias_entry *entry;
+
+    entry = alias_entry_from_node(node);
+    free(entry->sym.name);
+    free(entry->alias.value);
+    free(entry);
+}
+
+void aliases_init(struct shell_state *state) {
+    symbol_table_init(&state->aliases_table);
+}
+
+void aliases_destroy(struct shell_state *state) {
+    symbol_table_destroy(&state->aliases_table, alias_destroy_node);
+}
+
+const char *alias_lookup(const struct shell_state *state, const char *name) {
+    const struct symbol_node *node;
 
     if (name == NULL || name[0] == '\0') {
         return NULL;
     }
 
-    key = alias_env_key(name);
-    value = getenv(key);
-    arena_maybe_free(key);
+    node = symbol_table_lookup(&state->aliases_table, name);
+    if (node == NULL) {
+        return NULL;
+    }
+    return alias_entry_from_const_node(node)->alias.value;
+}
+
+char *alias_lookup_dup(const struct shell_state *state, const char *name) {
+    const char *value;
+
+    value = alias_lookup(state, name);
     if (value == NULL) {
         return NULL;
     }
+    return arena_strdup_in(NULL, value);
+}
 
-    dup = arena_xstrdup(value);
-    return dup;
+int alias_set(struct shell_state *state, const char *name, const char *value) {
+    struct symbol_node *node;
+    struct shell_alias_entry *entry;
+
+    node = symbol_table_lookup(&state->aliases_table, name);
+    if (node != NULL) {
+        entry = alias_entry_from_node(node);
+        entry->alias.value =
+            arena_realloc_in(NULL, entry->alias.value, strlen(value) + 1);
+        memcpy(entry->alias.value, value, strlen(value) + 1);
+        return 0;
+    }
+
+    entry = arena_alloc_in(NULL, sizeof(*entry));
+    memset(entry, 0, sizeof(*entry));
+    entry->sym.name = arena_strdup_in(NULL, name);
+    entry->sym.hash = symbol_hash_n(name, strlen(name));
+    entry->alias.value = arena_strdup_in(NULL, value);
+    return symbol_table_insert(&state->aliases_table, &entry->sym);
+}
+
+int alias_unset(struct shell_state *state, const char *name) {
+    struct symbol_node *node;
+
+    node = symbol_table_remove(&state->aliases_table, name);
+    if (node != NULL) {
+        alias_destroy_node(node);
+    }
+    return 0;
+}
+
+void alias_clear(struct shell_state *state) {
+    aliases_destroy(state);
+    aliases_init(state);
+}
+
+void alias_for_each(const struct shell_state *state, alias_visit_fn visit,
+                    void *user_data) {
+    const struct symbol_node *node;
+
+    for (node = symbol_table_first(&state->aliases_table); node != NULL;
+         node = symbol_table_next(node)) {
+        const struct shell_alias_entry *entry;
+
+        entry = alias_entry_from_const_node(node);
+        if (!visit(entry->sym.name, entry->alias.value, user_data)) {
+            return;
+        }
+    }
 }
 
 static bool alias_value_has_trailing_blank(const char *value) {
@@ -844,7 +921,8 @@ int alias_rewrite_snippet(struct shell_state *state, const char *text,
                     blocked = alias_chain_contains(tokens.items[i].suppress_alias,
                                                    tokens.items[i].text);
                     if (!blocked) {
-                        alias_value = alias_lookup_dup(tokens.items[i].text);
+                        alias_value =
+                            alias_lookup_dup(state, tokens.items[i].text);
                         if (alias_value != NULL) {
                             char *next_chain;
                             struct alias_token_vec repl;
@@ -940,4 +1018,3 @@ state_update:
     alias_token_vec_free(&tokens);
     return 0;
 }
-

@@ -10,6 +10,9 @@
 
 #include "shell.h"
 
+typedef bool (*vars_visit_fn)(const char *name, const struct shell_var *var,
+                              void *user_data);
+
 void vars_init(struct shell_state *state);
 void vars_destroy(struct shell_state *state);
 bool vars_is_name_valid(const char *name);
@@ -39,5 +42,7 @@ int vars_mark_readonly(struct shell_state *state, const char *name,
 char **vars_build_envp(const struct shell_state *state, size_t *count_out);
 char **vars_build_exec_envp(const struct shell_state *state);
 void vars_free_envp(char **envp);
+void vars_for_each(const struct shell_state *state, vars_visit_fn visit,
+                   void *user_data);
 
 #endif

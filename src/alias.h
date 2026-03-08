@@ -10,8 +10,18 @@
 
 struct shell_state;
 
-/* Look up an alias value by name (arena-allocated copy, or NULL). */
-char *alias_lookup_dup(const char *name);
+typedef bool (*alias_visit_fn)(const char *name, const char *value,
+                               void *user_data);
+
+void aliases_init(struct shell_state *state);
+void aliases_destroy(struct shell_state *state);
+const char *alias_lookup(const struct shell_state *state, const char *name);
+char *alias_lookup_dup(const struct shell_state *state, const char *name);
+int alias_set(struct shell_state *state, const char *name, const char *value);
+int alias_unset(struct shell_state *state, const char *name);
+void alias_clear(struct shell_state *state);
+void alias_for_each(const struct shell_state *state, alias_visit_fn visit,
+                    void *user_data);
 
 /* Returns true if word looks like VAR=value. */
 bool alias_is_assignment_word(const char *word);
