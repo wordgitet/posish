@@ -12,6 +12,7 @@
 #include "compound_parse.h"
 #include "error.h"
 #include "expand.h"
+#include "functions.h"
 #include "jobs.h"
 #include "lexer.h"
 #include "parser.h"
@@ -864,84 +865,6 @@ static void positional_pop(struct shell_state *state, const struct positional_ba
     free_positional_params(state->positional_params, state->positional_count);
     state->positional_params = backup->params;
     state->positional_count = backup->count;
-}
-
-static int find_function_index(const struct shell_state *state, const char *name) {
-    size_t i;
-
-    for (i = 0; i < state->function_count; i++) {
-        if (strcmp(state->functions[i].name, name) == 0) {
-            return (int)i;
-        }
-    }
-    return -1;
-}
-
-static void clone_redirs_into_perm(struct shell_state *state,
-                                   struct redir_vec *dst,
-                                   const struct redir_vec *src) {
-    size_t i;
-
-    dst->items = NULL;
-    dst->len = 0;
-    if (src == NULL || src->len == 0) {
-        return;
-    }
-
-    dst->items = arena_alloc_in(&state->arena_perm,
-                                sizeof(*dst->items) * src->len);
-    dst->len = src->len;
-    for (i = 0; i < src->len; i++) {
-        dst->items[i] = src->items[i];
-        if (src->items[i].path != NULL) {
-            dst->items[i].path =
-                arena_strdup_in(&state->arena_perm, src->items[i].path);
-        }
-        if (src->items[i].delimiter != NULL) {
-            dst->items[i].delimiter =
-                arena_strdup_in(&state->arena_perm, src->items[i].delimiter);
-        }
-        if (src->items[i].body_raw != NULL) {
-            dst->items[i].body_raw =
-                arena_strdup_in(&state->arena_perm, src->items[i].body_raw);
-        }
-    }
-}
-
-static int shell_set_function(struct shell_state *state, const char *name,
-                              const char *body,
-                              const struct redir_vec *redirs) {
-    int idx;
-
-    idx = find_function_index(state, name);
-    if (idx >= 0) {
-        arena_maybe_free(state->functions[idx].body);
-        state->functions[idx].body = arena_strdup_in(&state->arena_perm, body);
-        clone_redirs_into_perm(state, &state->functions[idx].redirs, redirs);
-        return 0;
-    }
-
-    state->functions = arena_realloc_in(
-        &state->arena_perm, state->functions,
-        sizeof(*state->functions) * (state->function_count + 1));
-    state->functions[state->function_count].name =
-        arena_strdup_in(&state->arena_perm, name);
-    state->functions[state->function_count].body =
-        arena_strdup_in(&state->arena_perm, body);
-    clone_redirs_into_perm(state, &state->functions[state->function_count].redirs,
-                           redirs);
-    state->function_count++;
-    return 0;
-}
-
-static const struct shell_function *shell_get_function(const struct shell_state *state,
-                                                       const char *name) {
-    int idx;
-    idx = find_function_index(state, name);
-    if (idx < 0) {
-        return NULL;
-    }
-    return &state->functions[idx];
 }
 
 static bool keyword_boundary(char ch) {
@@ -2302,7 +2225,7 @@ static int execute_simple_command_parts(struct shell_state *state,
 
     special_name = allow_builtin && builtin_is_special_name(argv[0]);
     function_def = allow_builtin && !special_name ?
-                       shell_get_function(state, argv[0]) :
+                       functions_get(state, argv[0]) :
                        NULL;
     assignment_special = special_name && strcmp(argv[0], "command") != 0;
     persist_builtin_redirs =
@@ -2925,9 +2848,9 @@ done:
 
 static int run_function_def_ast(struct shell_state *state,
                                 const struct ast_node *node) {
-    return shell_set_function(state, node->data.funcdef.name,
-                              node->data.funcdef.body,
-                              &node->data.funcdef.redirs);
+    return functions_set(state, node->data.funcdef.name,
+                         node->data.funcdef.body,
+                         &node->data.funcdef.redirs);
 }
 
 static int execute_case_ast_body_node(struct shell_state *state,
@@ -3171,7 +3094,7 @@ static int run_legacy_atom_fallback(struct shell_state *state, char *trimmed,
     brace_redirs = NULL;
 
     if (parse_function_definition(trimmed, &fn_name, &fn_body)) {
-        status = shell_set_function(state, fn_name, fn_body, NULL);
+        status = functions_set(state, fn_name, fn_body, NULL);
         arena_maybe_free(fn_name);
         arena_maybe_free(fn_body);
         arena_maybe_free(trimmed);

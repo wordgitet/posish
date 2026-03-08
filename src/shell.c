@@ -10,6 +10,7 @@
 #include "error.h"
 #include "expand.h"
 #include "exec.h"
+#include "functions.h"
 #include "lexer.h"
 #include "parser.h"
 #include "path.h"
@@ -1644,8 +1645,7 @@ void shell_state_init(struct shell_state *state) {
     state->var_count = 0;
     state->var_mru_valid = false;
     state->var_mru_index = 0;
-    state->functions = NULL;
-    state->function_count = 0;
+    functions_init(state);
     state->path_cache = NULL;
     state->path_cache_count = 0;
     state->positional_params = NULL;
@@ -1673,8 +1673,7 @@ void shell_state_destroy(struct shell_state *state) {
     }
 
     vars_destroy(state);
-    state->functions = NULL;
-    state->function_count = 0;
+    functions_destroy(state);
     path_cache_destroy(state);
     free_shell_positionals(state);
     state->login_shell = false;

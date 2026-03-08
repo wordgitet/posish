@@ -7,6 +7,7 @@
 
 #include "arena.h"
 #include "redir.h"
+#include "symbols.h"
 
 #include <signal.h>
 #include <stdbool.h>
@@ -14,7 +15,6 @@
 #include <sys/types.h>
 
 struct shell_function {
-    char *name;
     char *body;
     struct redir_vec redirs;
 };
@@ -88,8 +88,7 @@ struct shell_state {
     size_t var_count;
     bool var_mru_valid;
     size_t var_mru_index;
-    struct shell_function *functions;
-    size_t function_count;
+    struct symbol_table functions_table;
     struct command_path_cache_entry *path_cache;
     size_t path_cache_count;
     char **positional_params;

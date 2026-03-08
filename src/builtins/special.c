@@ -7,6 +7,7 @@
 #include "arena.h"
 #include "error.h"
 #include "exec.h"
+#include "functions.h"
 #include "options.h"
 #include "path.h"
 #include "signals.h"
@@ -149,30 +150,11 @@ static bool is_regular_builtin_name(const char *name) {
 
 static bool has_shell_function(const struct shell_state *state,
                                const char *name) {
-    size_t i;
-
-    for (i = 0; i < state->function_count; i++) {
-        if (strcmp(state->functions[i].name, name) == 0) {
-            return true;
-        }
-    }
-    return false;
+    return functions_has(state, name);
 }
 
 static int remove_shell_function(struct shell_state *state, const char *name) {
-    size_t i;
-
-    for (i = 0; i < state->function_count; i++) {
-        if (strcmp(state->functions[i].name, name) == 0) {
-            if (i + 1 < state->function_count) {
-                memmove(&state->functions[i], &state->functions[i + 1],
-                        sizeof(*state->functions) * (state->function_count - (i + 1)));
-            }
-            state->function_count--;
-            return 0;
-        }
-    }
-    return 0;
+    return functions_remove(state, name);
 }
 
 static char *xstrdup_local(const char *s) {

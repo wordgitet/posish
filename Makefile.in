@@ -31,6 +31,7 @@ SRC = \
 	src/field_split.c \
 	src/expand.c \
 	src/exec.c \
+	src/functions.c \
 	src/alias.c \
 	src/redir.c \
 	src/jobs.c \
@@ -63,6 +64,7 @@ OBJ = \
 	src/field_split.o \
 	src/expand.o \
 	src/exec.o \
+	src/functions.o \
 	src/alias.o \
 	src/redir.o \
 	src/jobs.o \
