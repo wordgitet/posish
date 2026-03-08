@@ -1422,7 +1422,7 @@ static bool merge_need_more_with_alias_preview(struct shell_state *state,
                                                bool need_more,
                                                bool include_heredoc) {
     struct arena *saved_arena;
-    struct arena_mark tmp_mark;
+    struct arena_mark tmp_mark = {0};
     bool used_temp_arena;
     char *alias_preview;
     bool result;
@@ -1828,7 +1828,7 @@ static int expand_startup_path(struct shell_state *state, const char *text,
     struct token_vec lexed;
     struct token_vec expanded;
     struct arena *saved_arena;
-    struct arena_mark cmd_mark;
+    struct arena_mark cmd_mark = {0};
     int rc;
 
     *out = NULL;
@@ -2074,8 +2074,8 @@ int shell_run_command(struct shell_state *state, const char *command) {
     bool top_level_command;
     bool alias_changed;
     bool saved_suppress_aliases;
-    struct arena_mark cmd_mark;
-    struct arena_mark nested_mark;
+    struct arena_mark cmd_mark = {0};
+    struct arena_mark nested_mark = {0};
 
     command_copy = arena_alloc_in(NULL, strlen(command) + 1);
     memcpy(command_copy, command, strlen(command) + 1);

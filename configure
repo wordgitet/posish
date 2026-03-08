@@ -712,6 +712,7 @@ SHELL'
 ac_subst_files=''
 ac_user_opts='
 enable_option_checking
+enable_native
 enable_largefile
 enable_trace
 '
@@ -1346,6 +1347,8 @@ Optional Features:
   --disable-option-checking  ignore unrecognized --enable/--with options
   --disable-FEATURE       do not include FEATURE (same as --enable-FEATURE=no)
   --enable-FEATURE[=ARG]  include FEATURE [ARG=yes]
+  --enable-native         build with -march=native for local machine binaries
+                          (default: no)
   --disable-largefile     omit support for large files
   --enable-trace          enable runtime tracing hooks (default: no)
 
@@ -3516,6 +3519,37 @@ ac_cpp='$CPP $CPPFLAGS'
 ac_compile='$CC -c $CFLAGS $CPPFLAGS conftest.$ac_ext >&5'
 ac_link='$CC -o conftest$ac_exeext $CFLAGS $CPPFLAGS $LDFLAGS conftest.$ac_ext $LIBS >&5'
 ac_compiler_gnu=$ac_cv_c_compiler_gnu
+
+
+# Check whether --enable-native was given.
+if test ${enable_native+y}
+then :
+  enableval=$enable_native; enable_native="$enableval"
+else $as_nop
+  enable_native="no"
+fi
+
+
+if test "$ac_env_CFLAGS_set" != set
+then :
+
+    CFLAGS="-O3 -DNDEBUG -flto=auto -fno-plt"
+
+fi
+
+if test "$ac_env_LDFLAGS_set" != set
+then :
+
+    LDFLAGS="-flto=auto"
+
+fi
+
+if test "x$enable_native" = "xyes"
+then :
+
+    CFLAGS="$CFLAGS -march=native"
+
+fi
 
 
 ac_header= ac_cache=

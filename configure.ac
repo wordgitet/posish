@@ -9,6 +9,24 @@ AC_CANONICAL_HOST
 AC_CANONICAL_TARGET
 
 AC_PROG_CC
+
+AC_ARG_ENABLE([native],
+    [AS_HELP_STRING([--enable-native], [build with -march=native for local machine binaries (default: no)])],
+    [enable_native="$enableval"],
+    [enable_native="no"])
+
+AS_IF([test "$ac_env_CFLAGS_set" != set], [
+    CFLAGS="-O3 -DNDEBUG -flto=auto -fno-plt"
+])
+
+AS_IF([test "$ac_env_LDFLAGS_set" != set], [
+    LDFLAGS="-flto=auto"
+])
+
+AS_IF([test "x$enable_native" = "xyes"], [
+    CFLAGS="$CFLAGS -march=native"
+])
+
 AC_USE_SYSTEM_EXTENSIONS
 AC_SYS_LARGEFILE
 
