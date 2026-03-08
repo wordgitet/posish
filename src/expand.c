@@ -27,6 +27,19 @@ static void *xrealloc(void *ptr, size_t size) {
   return arena_xrealloc(ptr, size);
 }
 
+static void scratch_dispose(void *ptr) {
+  /*
+   * Expansion scratch is normally reclaimed by the surrounding arena mark.
+   * When expansion runs without a current arena, arena_x* falls back to heap.
+   */
+  if (ptr == NULL) {
+    return;
+  }
+  if (arena_get_current() == NULL) {
+    heap_free(ptr);
+  }
+}
+
 static void append_char(char **buf, size_t *len, size_t *cap, char ch) {
   if (*len + 2 > *cap) {
     size_t new_cap;
@@ -1074,16 +1087,16 @@ static int expand_pattern_fragment(const char *expr, size_t start, size_t elen,
   word[wlen] = '\0';
 
   marked = mark_pattern_escapes(word);
-  arena_maybe_free(word);
+  scratch_dispose(word);
 
   rc = expand_token(marked, state, &expanded, false, false);
-  arena_maybe_free(marked);
+  scratch_dispose(marked);
   if (rc != 0) {
     return rc;
   }
 
   unmarked = unmark_pattern_escapes(expanded);
-  arena_maybe_free(expanded);
+  scratch_dispose(expanded);
   *out = unmarked;
   return 0;
 }
@@ -1683,7 +1696,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
         i++;
         if (in[i] == '\0') {
           posish_errorf("trailing backslash in expansion");
-          arena_maybe_free(buf);
+          scratch_dispose(buf);
           return -1;
         }
         if (in[i] == '\n') {
@@ -1720,7 +1733,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
           i = next;
         }
         if (append_dollar_single_quoted(in, &i, &buf, &len, &cap) != 0) {
-          arena_maybe_free(buf);
+          scratch_dispose(buf);
           return -1;
         }
         continue;
@@ -1780,7 +1793,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
         }
         if (depth != 0 || in[j] != '}') {
           posish_errorf("unterminated parameter expansion");
-          arena_maybe_free(buf);
+          scratch_dispose(buf);
           return -1;
         }
 
@@ -1792,7 +1805,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
                                                   &expr_len);
           if (append_braced_parameter(expr, expr_len, state, &buf, &len, &cap,
                                       dquote_mode || quote == '"') != 0) {
-          arena_maybe_free(buf);
+          scratch_dispose(buf);
           return -1;
         }
         }
@@ -1834,7 +1847,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
           }
           if (in[j] == '\0' || in[j + 1] != ')') {
             posish_errorf("unterminated arithmetic expansion");
-            arena_maybe_free(buf);
+            scratch_dispose(buf);
             return -1;
           }
 
@@ -1843,7 +1856,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
           expr[j - (next + 2)] = '\0';
 
           if (run_arithmetic_expansion(expr, &value, &cmd_status, state) != 0) {
-            arena_maybe_free(buf);
+            scratch_dispose(buf);
             return -1;
           }
           append_context_string(&buf, &len, &cap, value,
@@ -1861,7 +1874,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
 
         if (!command_subst_find_close(in, next - 1, &j)) {
           posish_errorf("unterminated command substitution");
-          arena_maybe_free(buf);
+          scratch_dispose(buf);
           return -1;
         }
 
@@ -1870,7 +1883,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
         cmd[j - (next + 1)] = '\0';
 
           if (command_subst_run(state, cmd, &value, &cmd_status) != 0) {
-            arena_maybe_free(buf);
+            scratch_dispose(buf);
             return -1;
           }
 
@@ -1891,7 +1904,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
       if (is_short_parameter_char(in[next])) {
         if (append_parameter(in + next, 1, state, &buf, &len, &cap,
                              dquote_mode || quote == '"') != 0) {
-          arena_maybe_free(buf);
+          scratch_dispose(buf);
           return -1;
         }
         i = next + 1;
@@ -1907,7 +1920,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
         }
         if (append_parameter(in + next, j - next, state, &buf, &len, &cap,
                              dquote_mode || quote == '"') != 0) {
-          arena_maybe_free(buf);
+          scratch_dispose(buf);
           return -1;
         }
         i = j;
@@ -1936,7 +1949,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
 
       if (in[j] != '`') {
         posish_errorf("unterminated backtick command substitution");
-        arena_maybe_free(buf);
+        scratch_dispose(buf);
         return -1;
       }
 
@@ -1947,7 +1960,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
       cmd = normalized_cmd;
 
       if (command_subst_run(state, cmd, &value, &cmd_status) != 0) {
-        arena_maybe_free(buf);
+        scratch_dispose(buf);
         return -1;
       }
 
@@ -1978,7 +1991,7 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
 
   if (quote != '\0') {
     posish_errorf("unterminated quote in expansion");
-    arena_maybe_free(buf);
+    scratch_dispose(buf);
     return -1;
   }
 
@@ -2070,7 +2083,7 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
         }
         if (depth != 0 || in[j] != '}') {
           posish_errorf("unterminated parameter expansion");
-          arena_maybe_free(buf);
+          scratch_dispose(buf);
           return -1;
         }
 
@@ -2082,7 +2095,7 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
                                                   &expr_len);
           if (append_braced_parameter(expr, expr_len, state, &buf, &len, &cap,
                                       true) != 0) {
-          arena_maybe_free(buf);
+          scratch_dispose(buf);
           return -1;
         }
         }
@@ -2124,7 +2137,7 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
           }
           if (in[j] == '\0' || in[j + 1] != ')') {
             posish_errorf("unterminated arithmetic expansion");
-            arena_maybe_free(buf);
+            scratch_dispose(buf);
             return -1;
           }
 
@@ -2133,7 +2146,7 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
           expr[j - (i + 3)] = '\0';
 
           if (run_arithmetic_expansion(expr, &value, &cmd_status, state) != 0) {
-            arena_maybe_free(buf);
+            scratch_dispose(buf);
             return -1;
           }
           append_str(&buf, &len, &cap, value);
@@ -2150,7 +2163,7 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
 
         if (!command_subst_find_close(in, i, &j)) {
           posish_errorf("unterminated command substitution");
-          arena_maybe_free(buf);
+          scratch_dispose(buf);
           return -1;
         }
 
@@ -2159,7 +2172,7 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
         cmd[j - (i + 2)] = '\0';
 
         if (command_subst_run(state, cmd, &value, &cmd_status) != 0) {
-          arena_maybe_free(buf);
+          scratch_dispose(buf);
           return -1;
         }
 
@@ -2179,7 +2192,7 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
       if (is_short_parameter_char(in[i + 1])) {
         if (append_parameter(in + i + 1, 1, state, &buf, &len, &cap, false) !=
             0) {
-          arena_maybe_free(buf);
+          scratch_dispose(buf);
           return -1;
         }
         i += 2;
@@ -2195,7 +2208,7 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
         }
         if (append_parameter(in + i + 1, j - (i + 1), state, &buf, &len, &cap,
                              false) != 0) {
-          arena_maybe_free(buf);
+          scratch_dispose(buf);
           return -1;
         }
         i = j;
@@ -2224,7 +2237,7 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
 
       if (in[j] != '`') {
         posish_errorf("unterminated backtick command substitution");
-        arena_maybe_free(buf);
+        scratch_dispose(buf);
         return -1;
       }
 
@@ -2235,7 +2248,7 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
       cmd = normalized_cmd;
 
       if (command_subst_run(state, cmd, &value, &cmd_status) != 0) {
-        arena_maybe_free(buf);
+        scratch_dispose(buf);
         return -1;
       }
 
@@ -2278,9 +2291,9 @@ int expand_words(const struct token_vec *in, struct token_vec *out,
         0) {
       size_t j;
       for (j = 0; j < out->len; j++) {
-        arena_maybe_free(out->items[j]);
+        scratch_dispose(out->items[j]);
       }
-      arena_maybe_free(out->items);
+      scratch_dispose(out->items);
       out->items = NULL;
       out->len = 0;
       return -1;
@@ -2288,13 +2301,13 @@ int expand_words(const struct token_vec *in, struct token_vec *out,
 
     if (state->positional_count == 0 &&
         token_is_pure_quoted_at(in->items[i])) {
-      arena_maybe_free(expanded);
+      scratch_dispose(expanded);
       continue;
     }
 
     if (field_split_has_at_marker(expanded)) {
       (void)field_split_append_at_expansion(expanded, out, split_fields, state);
-      arena_maybe_free(expanded);
+      scratch_dispose(expanded);
       continue;
     }
 
@@ -2307,17 +2320,17 @@ int expand_words(const struct token_vec *in, struct token_vec *out,
       bool had_delim;
 
       if (expanded[0] == '\0' && token_has_runtime_expansion(in->items[i])) {
-        arena_maybe_free(expanded);
+        scratch_dispose(expanded);
         continue;
       }
       had_delim = field_split_has_delimiter(expanded, state);
       count = field_split_split(expanded, out, state);
       if (count > 0) {
-        arena_maybe_free(expanded);
+        scratch_dispose(expanded);
         continue;
       }
       if (had_delim) {
-        arena_maybe_free(expanded);
+        scratch_dispose(expanded);
         continue;
       }
     }
@@ -2337,7 +2350,7 @@ int expand_words(const struct token_vec *in, struct token_vec *out,
           out->items[out->len++] = arena_xstrdup(g.gl_pathv[j]);
         }
         globfree(&g);
-        arena_maybe_free(expanded);
+        scratch_dispose(expanded);
         continue;
       }
       if (grc == 0) {

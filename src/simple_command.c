@@ -7,6 +7,7 @@
 #include "arena.h"
 #include "builtins/builtin.h"
 #include "error.h"
+#include "exec.h"
 #include "expand.h"
 #include "functions.h"
 #include "path.h"
@@ -64,7 +65,7 @@ struct prepared_command {
   int last_cmdsub_status;
   bool pre_expand_redirs;
   bool builtin_available;
-  const struct shell_function *function_def;
+  struct shell_function *function_def;
   enum prepared_kind kind;
 };
 
@@ -218,7 +219,7 @@ static void prepared_command_refresh_dispatch(struct shell_state *state,
                                               bool allow_builtin) {
   cmd->special_name = allow_builtin && builtin_is_special_name(cmd->argv[0]);
   cmd->function_def =
-      allow_builtin && !cmd->special_name ? functions_get(state, cmd->argv[0]) : NULL;
+      allow_builtin && !cmd->special_name ? functions_get_mut(state, cmd->argv[0]) : NULL;
   cmd->assignment_special =
       cmd->special_name && strcmp(cmd->argv[0], "command") != 0;
   cmd->persist_builtin_redirs =
@@ -1260,7 +1261,14 @@ int simple_command_execute_parts(struct shell_state *state,
           }
         }
         if (status == 0) {
-          status = run_body(state, cmd.function_def->body);
+          const struct ast_program *cached_program;
+
+          cached_program = functions_get_cached_program(state, cmd.function_def);
+          if (cached_program != NULL) {
+            status = exec_run_program(state, cached_program);
+          } else {
+            status = run_body(state, cmd.function_def->body);
+          }
         }
         if (function_redirs_applied) {
           fd_backup_restore(&function_backups);

@@ -14,9 +14,14 @@
 #include <stdio.h>
 #include <sys/types.h>
 
+struct ast_program;
+
 struct shell_function {
   char *body;
   struct redir_vec redirs;
+  struct ast_program *cached_program;
+  struct arena cache_arena;
+  bool cache_attempted;
 };
 
 struct shell_var {

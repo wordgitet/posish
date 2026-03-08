@@ -11,6 +11,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+static void scratch_dispose(void *ptr) {
+  if (ptr == NULL) {
+    return;
+  }
+  if (arena_get_current() == NULL) {
+    heap_free(ptr);
+  }
+}
+
 static bool is_ifs_char(const char *ifs, char ch) {
   size_t i;
 
@@ -218,11 +227,11 @@ int field_split_append_piece(char *piece, struct token_vec *out,
     had_delim = field_split_has_delimiter(piece, state);
     count = field_split_split(piece, out, state);
     if (count > 0) {
-      arena_maybe_free(piece);
+      scratch_dispose(piece);
       return count;
     }
     if (had_delim) {
-      arena_maybe_free(piece);
+      scratch_dispose(piece);
       return 0;
     }
   }
