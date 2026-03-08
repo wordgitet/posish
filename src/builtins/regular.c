@@ -706,12 +706,13 @@ static int builtin_umask(char *const argv[]) {
     return 0;
 }
 
-static int run_utility(struct shell_state *state, char *const argv[]) {
+static int run_utility(struct shell_state *state, char *const argv[],
+                       bool use_standard_path) {
     char *path;
     int status;
     pid_t pid;
 
-    path = path_resolve_command(state, argv[0], false);
+    path = path_resolve_command(state, argv[0], use_standard_path);
     if (path == NULL) {
         int saved_errno;
 
@@ -1413,7 +1414,8 @@ static int builtin_kill(struct shell_state *state, char *const argv[]) {
         final_argv[argc + 1] = NULL;
     }
 
-    status = run_utility(state, final_argv != NULL ? final_argv : converted);
+    status = run_utility(state, final_argv != NULL ? final_argv : converted,
+                         true);
 
 done:
     for (i = 0; i < argc; i++) {
