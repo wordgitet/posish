@@ -35,6 +35,7 @@ SRC = \
 	src/redir.c \
 	src/jobs.c \
 	src/signals.c \
+	src/symbols.c \
 	src/trace.c \
 	src/vars.c \
 	src/options.c \
@@ -66,6 +67,7 @@ OBJ = \
 	src/redir.o \
 	src/jobs.o \
 	src/signals.o \
+	src/symbols.o \
 	src/trace.o \
 	src/vars.o \
 	src/options.o \
