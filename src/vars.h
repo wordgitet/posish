@@ -39,9 +39,9 @@ int vars_mark_exported(struct shell_state *state, const char *name);
 int vars_unset(struct shell_state *state, const char *name);
 int vars_mark_readonly(struct shell_state *state, const char *name,
                        const char *value, bool with_value);
-char **vars_build_envp(const struct shell_state *state, size_t *count_out);
-char **vars_build_exec_envp(const struct shell_state *state);
-void vars_free_envp(char **envp);
+char **vars_build_envp(struct shell_state *state, size_t *count_out);
+char **vars_build_exec_envp(struct shell_state *state);
+void vars_free_envp(struct shell_state *state, char **envp);
 void vars_for_each(const struct shell_state *state, vars_visit_fn visit,
                    void *user_data);
 

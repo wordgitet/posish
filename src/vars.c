@@ -162,6 +162,36 @@ static bool vars_parse_long_value(const char *value, long *out) {
     return true;
 }
 
+static void vars_free_exec_envp_cache(struct shell_state *state) {
+    heap_free(state->exec_envp);
+    state->exec_envp = NULL;
+    state->exec_envp_count = 0;
+}
+
+static void vars_mark_exec_envp_dirty(struct shell_state *state) {
+    state->exec_envp_dirty = true;
+    vars_free_exec_envp_cache(state);
+}
+
+static void vars_sync_export_text(struct shell_var_entry *entry) {
+    size_t nlen;
+
+    if (!entry->var.exported || vars_is_process_marker(entry->sym.name)) {
+        heap_free(entry->var.export_text);
+        entry->var.export_text = NULL;
+        return;
+    }
+
+    nlen = strlen(entry->sym.name);
+    entry->var.export_text =
+        heap_xrealloc(entry->var.export_text,
+                      nlen + 1 + entry->var.value_len + 1);
+    memcpy(entry->var.export_text, entry->sym.name, nlen);
+    entry->var.export_text[nlen] = '=';
+    memcpy(entry->var.export_text + nlen + 1, entry->var.value,
+           entry->var.value_len + 1);
+}
+
 static size_t vars_format_long_decimal(long value,
                                        char buf[static 3 + sizeof(long) * 3]) {
     unsigned long magnitude;
@@ -202,9 +232,10 @@ static size_t vars_format_long_decimal(long value,
 }
 
 static void vars_destroy_entry(struct shell_var_entry *entry) {
-    free(entry->sym.name);
-    free(entry->var.value);
-    free(entry);
+    heap_free(entry->sym.name);
+    heap_free(entry->var.value);
+    heap_free(entry->var.export_text);
+    heap_free(entry);
 }
 
 static void vars_destroy_node(struct symbol_node *node) {
@@ -219,16 +250,16 @@ static struct shell_var_entry *vars_alloc_entry_n(const char *name, size_t len,
     const char *stored_value;
     long parsed_long;
 
-    entry = arena_alloc_in(NULL, sizeof(*entry));
+    entry = heap_xmalloc(sizeof(*entry));
     memset(entry, 0, sizeof(*entry));
 
-    entry->sym.name = arena_alloc_in(NULL, len + 1);
+    entry->sym.name = heap_xmalloc(len + 1);
     memcpy(entry->sym.name, name, len);
     entry->sym.name[len] = '\0';
     entry->sym.hash = symbol_hash_n(name, len);
 
     stored_value = value == NULL ? "" : value;
-    entry->var.value = arena_strdup_in(NULL, stored_value);
+    entry->var.value = heap_xstrdup(stored_value);
     entry->var.value_len = strlen(stored_value);
     parsed_long = 0;
     entry->var.long_cache_valid =
@@ -236,6 +267,7 @@ static struct shell_var_entry *vars_alloc_entry_n(const char *name, size_t len,
     entry->var.long_cache = parsed_long;
     entry->var.exported = exported;
     entry->var.readonly = readonly;
+    vars_sync_export_text(entry);
     return entry;
 }
 
@@ -254,6 +286,9 @@ static int vars_append_new_n(struct shell_state *state, const char *name,
 
     vars_cache_store(state, entry);
     vars_maybe_invalidate_path_cache_n(state, name, len);
+    if (exported) {
+        vars_mark_exec_envp_dirty(state);
+    }
     return 0;
 }
 
@@ -270,7 +305,7 @@ static void vars_replace_value(struct shell_var *var, const char *value) {
 
     stored_value = value == NULL ? "" : value;
     len = strlen(stored_value);
-    var->value = arena_realloc_in(NULL, var->value, len + 1);
+    var->value = heap_xrealloc(var->value, len + 1);
     memcpy(var->value, stored_value, len + 1);
     var->value_len = len;
     parsed_long = 0;
@@ -283,7 +318,7 @@ static void vars_replace_value_long(struct shell_var *var, long value) {
     size_t len;
 
     len = vars_format_long_decimal(value, buf);
-    var->value = arena_realloc_in(NULL, var->value, len + 1);
+    var->value = heap_xrealloc(var->value, len + 1);
     memcpy(var->value, buf, len + 1);
     var->value_len = len;
     var->long_cache_valid = true;
@@ -295,24 +330,30 @@ static int vars_store_n(struct shell_state *state, const char *name, size_t len,
                         bool mark_readonly) {
     struct shell_var_entry *entry;
     char *name_copy;
+    bool env_changed;
 
     entry = vars_lookup_entry_n(state, name, len);
     if (entry != NULL) {
         if (check_readonly && entry->var.readonly) {
-            name_copy = arena_alloc_in(NULL, len + 1);
+            name_copy = heap_xmalloc(len + 1);
             memcpy(name_copy, name, len);
             name_copy[len] = '\0';
-            posish_errorf("%s: is read-only", name_copy);
-            free(name_copy);
+            posish_error_idf(POSERR_VARIABLE_IS_READONLY, name_copy);
+            heap_free(name_copy);
             return 1;
         }
+        env_changed = entry->var.exported || exported;
         vars_replace_value(&entry->var, value);
         entry->var.exported = exported;
         if (mark_readonly) {
             entry->var.readonly = true;
         }
+        vars_sync_export_text(entry);
         vars_cache_store(state, entry);
         vars_maybe_invalidate_path_cache_n(state, name, len);
+        if (env_changed) {
+            vars_mark_exec_envp_dirty(state);
+        }
         return 0;
     }
 
@@ -344,6 +385,8 @@ void vars_init(struct shell_state *state) {
 
     symbol_table_init(&state->vars_table);
     vars_cache_invalidate(state);
+    vars_free_exec_envp_cache(state);
+    state->exec_envp_dirty = true;
 
     for (i = 0; environ != NULL && environ[i] != NULL; i++) {
         const char *entry;
@@ -358,15 +401,15 @@ void vars_init(struct shell_state *state) {
         }
 
         nlen = (size_t)(eq - entry);
-        name = arena_alloc_in(NULL, nlen + 1);
+        name = heap_xmalloc(nlen + 1);
         memcpy(name, entry, nlen);
         name[nlen] = '\0';
         if (!vars_is_name_valid(name) || vars_should_skip_import(name)) {
-            free(name);
+            heap_free(name);
             continue;
         }
         (void)vars_store(state, name, eq + 1, false, true, false);
-        free(name);
+        heap_free(name);
     }
 
     (void)vars_set_with_mode(state, "IFS", " \t\n", false, false);
@@ -376,6 +419,8 @@ void vars_init(struct shell_state *state) {
 }
 
 void vars_destroy(struct shell_state *state) {
+    vars_free_exec_envp_cache(state);
+    state->exec_envp_dirty = true;
     symbol_table_destroy(&state->vars_table, vars_destroy_node);
     vars_cache_invalidate(state);
 }
@@ -468,7 +513,7 @@ int vars_set(struct shell_state *state, const char *name, const char *value,
 int vars_set_with_mode(struct shell_state *state, const char *name,
                        const char *value, bool check_readonly, bool exported) {
     if (!vars_is_storage_name(name)) {
-        posish_errorf("invalid variable name: %s", name);
+        posish_error_idf(POSERR_INVALID_VARIABLE_NAME, name);
         return 1;
     }
     return vars_store(state, name, value, check_readonly, exported, false);
@@ -488,11 +533,11 @@ int vars_set_assignment_n(struct shell_state *state, const char *name,
     if (!vars_is_name_valid_n(name, len)) {
         char *name_copy;
 
-        name_copy = arena_alloc_in(NULL, len + 1);
+        name_copy = heap_xmalloc(len + 1);
         memcpy(name_copy, name, len);
         name_copy[len] = '\0';
-        posish_errorf("invalid variable name: %s", name_copy);
-        free(name_copy);
+        posish_error_idf(POSERR_INVALID_VARIABLE_NAME, name_copy);
+        heap_free(name_copy);
         return 1;
     }
 
@@ -517,11 +562,11 @@ int vars_set_assignment_long_n(struct shell_state *state, const char *name,
     char *name_copy;
 
     if (!vars_is_name_valid_n(name, len)) {
-        name_copy = arena_alloc_in(NULL, len + 1);
+        name_copy = heap_xmalloc(len + 1);
         memcpy(name_copy, name, len);
         name_copy[len] = '\0';
-        posish_errorf("invalid variable name: %s", name_copy);
-        free(name_copy);
+        posish_error_idf(POSERR_INVALID_VARIABLE_NAME, name_copy);
+        heap_free(name_copy);
         return 1;
     }
 
@@ -536,17 +581,21 @@ int vars_set_assignment_long_n(struct shell_state *state, const char *name,
 
     if (entry != NULL) {
         if (check_readonly && entry->var.readonly) {
-            name_copy = arena_alloc_in(NULL, len + 1);
+            name_copy = heap_xmalloc(len + 1);
             memcpy(name_copy, name, len);
             name_copy[len] = '\0';
-            posish_errorf("%s: is read-only", name_copy);
-            free(name_copy);
+            posish_error_idf(POSERR_VARIABLE_IS_READONLY, name_copy);
+            heap_free(name_copy);
             return 1;
         }
         vars_replace_value_long(&entry->var, value);
         entry->var.exported = exported;
+        vars_sync_export_text(entry);
         vars_cache_store(state, entry);
         vars_maybe_invalidate_path_cache_n(state, name, len);
+        if (entry->var.exported || exported) {
+            vars_mark_exec_envp_dirty(state);
+        }
         return 0;
     }
 
@@ -562,7 +611,7 @@ int vars_mark_exported(struct shell_state *state, const char *name) {
     struct shell_var_entry *entry;
 
     if (!vars_is_name_valid(name)) {
-        posish_errorf("export: invalid variable name: %s", name);
+        posish_error_idf(POSERR_EXPORT_INVALID_VARIABLE_NAME, name);
         return 1;
     }
 
@@ -571,8 +620,10 @@ int vars_mark_exported(struct shell_state *state, const char *name) {
         return vars_append_new(state, name, "", true, false);
     }
     entry->var.exported = true;
+    vars_sync_export_text(entry);
     vars_cache_store(state, entry);
     vars_maybe_invalidate_path_cache(state, name);
+    vars_mark_exec_envp_dirty(state);
     return 0;
 }
 
@@ -581,7 +632,7 @@ int vars_unset(struct shell_state *state, const char *name) {
     struct shell_var_entry *entry;
 
     if (!vars_is_name_valid(name)) {
-        posish_errorf("unset: invalid variable name: %s", name);
+        posish_error_idf(POSERR_UNSET_INVALID_VARIABLE_NAME, name);
         return 1;
     }
 
@@ -590,12 +641,15 @@ int vars_unset(struct shell_state *state, const char *name) {
         return 0;
     }
     if (entry->var.readonly) {
-        posish_errorf("unset: %s: is read-only", name);
+        posish_error_idf(POSERR_UNSET_READONLY_VARIABLE, name);
         return 1;
     }
 
     node = symbol_table_remove(&state->vars_table, name);
     if (node != NULL) {
+        if (entry->var.exported) {
+            vars_mark_exec_envp_dirty(state);
+        }
         vars_destroy_node(node);
     }
     vars_cache_invalidate(state);
@@ -610,7 +664,7 @@ int vars_mark_readonly(struct shell_state *state, const char *name,
     int rc;
 
     if (!vars_is_name_valid(name)) {
-        posish_errorf("readonly: invalid variable name: %s", name);
+        posish_error_idf(POSERR_READONLY_INVALID_VARIABLE_NAME, name);
         return 1;
     }
 
@@ -627,11 +681,18 @@ int vars_mark_readonly(struct shell_state *state, const char *name,
     return vars_mark_readonly_existing(state, name);
 }
 
-char **vars_build_envp(const struct shell_state *state, size_t *count_out) {
+char **vars_build_envp(struct shell_state *state, size_t *count_out) {
     char **envp;
     size_t count;
     size_t i;
     const struct symbol_node *node;
+
+    if (!state->exec_envp_dirty && state->exec_envp != NULL) {
+        if (count_out != NULL) {
+            *count_out = state->exec_envp_count;
+        }
+        return state->exec_envp;
+    }
 
     count = 0;
     for (node = symbol_table_first(&state->vars_table); node != NULL;
@@ -639,60 +700,45 @@ char **vars_build_envp(const struct shell_state *state, size_t *count_out) {
         const struct shell_var_entry *entry;
 
         entry = vars_entry_from_const_node(node);
-        if (entry->var.exported) {
+        if (entry->var.exported && entry->var.export_text != NULL) {
             count++;
         }
     }
 
-    envp = arena_alloc_in(NULL, sizeof(*envp) * (count + 1));
+    envp = heap_xmalloc(sizeof(*envp) * (count + 1));
     i = 0;
     for (node = symbol_table_first(&state->vars_table); node != NULL;
          node = symbol_table_next(node)) {
         const struct shell_var_entry *entry;
-        size_t nlen;
-        size_t vlen;
-        char *item;
 
         entry = vars_entry_from_const_node(node);
-        if (!entry->var.exported) {
+        if (!entry->var.exported || entry->var.export_text == NULL) {
             continue;
         }
-
-        nlen = strlen(entry->sym.name);
-        vlen = entry->var.value_len;
-        item = arena_alloc_in(NULL, nlen + 1 + vlen + 1);
-        memcpy(item, entry->sym.name, nlen);
-        item[nlen] = '=';
-        memcpy(item + nlen + 1, entry->var.value, vlen + 1);
-        envp[i++] = item;
+        envp[i++] = entry->var.export_text;
     }
     envp[i] = NULL;
+    state->exec_envp = envp;
+    state->exec_envp_count = i;
+    state->exec_envp_dirty = false;
     if (count_out != NULL) {
         *count_out = i;
     }
     return envp;
 }
 
-char **vars_build_exec_envp(const struct shell_state *state) {
+char **vars_build_exec_envp(struct shell_state *state) {
     static const char key[] = "POSISH_PARENT_INTERACTIVE=";
+    char **base_envp;
     char **envp;
     size_t count;
-    size_t i;
 
-    envp = vars_build_envp(state, &count);
-    for (i = 0; i < count; i++) {
-        if (strncmp(envp[i], key, sizeof(key) - 1) == 0) {
-            free(envp[i]);
-            envp[i] = arena_alloc_in(NULL, sizeof(key) + 1);
-            memcpy(envp[i], key, sizeof(key) - 1);
-            envp[i][sizeof(key) - 1] = state->interactive ? '1' : '0';
-            envp[i][sizeof(key)] = '\0';
-            return envp;
-        }
+    base_envp = vars_build_envp(state, &count);
+    envp = heap_xmalloc(sizeof(*envp) * (count + 2));
+    if (count > 0) {
+        memcpy(envp, base_envp, sizeof(*envp) * count);
     }
-
-    envp = arena_realloc_in(NULL, envp, sizeof(*envp) * (count + 2));
-    envp[count] = arena_alloc_in(NULL, sizeof(key) + 1);
+    envp[count] = heap_xmalloc(sizeof(key) + 1);
     memcpy(envp[count], key, sizeof(key) - 1);
     envp[count][sizeof(key) - 1] = state->interactive ? '1' : '0';
     envp[count][sizeof(key)] = '\0';
@@ -700,16 +746,21 @@ char **vars_build_exec_envp(const struct shell_state *state) {
     return envp;
 }
 
-void vars_free_envp(char **envp) {
+void vars_free_envp(struct shell_state *state, char **envp) {
     size_t i;
 
     if (envp == NULL) {
         return;
     }
-    for (i = 0; envp[i] != NULL; i++) {
-        free(envp[i]);
+    if (envp == state->exec_envp) {
+        return;
     }
-    free(envp);
+    for (i = 0; envp[i] != NULL; i++) {
+    }
+    if (i > 0) {
+        heap_free(envp[i - 1]);
+    }
+    heap_free(envp);
 }
 
 void vars_for_each(const struct shell_state *state, vars_visit_fn visit,

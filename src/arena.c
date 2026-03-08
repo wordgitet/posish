@@ -50,6 +50,7 @@ static struct arena_block *arena_take_recycled_block(struct arena *arena,
 static void arena_register(struct arena *arena);
 static void arena_unregister(struct arena *arena);
 static bool arena_pointer_in_block(const struct arena_block *block, const void *ptr);
+static bool arena_pointer_in_arena(const struct arena *arena, const void *ptr);
 static union arena_alloc_slot *arena_ptr_header(void *ptr);
 
 static size_t align_up(size_t value, size_t alignment) {
@@ -158,6 +159,22 @@ static bool arena_pointer_in_block(const struct arena_block *block, const void *
      */
     end = block->data + block->cap;
     return p >= start && p < end;
+}
+
+static bool arena_pointer_in_arena(const struct arena *arena, const void *ptr) {
+    const struct arena_block *block;
+
+    for (block = arena->head; block != NULL; block = block->next) {
+        if (arena_pointer_in_block(block, ptr)) {
+            return true;
+        }
+    }
+    for (block = arena->free_list; block != NULL; block = block->next) {
+        if (arena_pointer_in_block(block, ptr)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static union arena_alloc_slot *arena_ptr_header(void *ptr) {
@@ -339,18 +356,16 @@ bool arena_owns_pointer(const void *ptr) {
         return false;
     }
 
-    for (entry = g_registry; entry != NULL; entry = entry->next) {
-        const struct arena_block *block;
+    if (g_current_arena != NULL && arena_pointer_in_arena(g_current_arena, ptr)) {
+        return true;
+    }
 
-        for (block = entry->arena->head; block != NULL; block = block->next) {
-            if (arena_pointer_in_block(block, ptr)) {
-                return true;
-            }
+    for (entry = g_registry; entry != NULL; entry = entry->next) {
+        if (entry->arena == g_current_arena) {
+            continue;
         }
-        for (block = entry->arena->free_list; block != NULL; block = block->next) {
-            if (arena_pointer_in_block(block, ptr)) {
-                return true;
-            }
+        if (arena_pointer_in_arena(entry->arena, ptr)) {
+            return true;
         }
     }
     return false;
@@ -368,6 +383,46 @@ void arena_maybe_free(void *ptr) {
     if (arena_owns_pointer(ptr)) {
         return;
     }
+    free(ptr);
+}
+
+void *heap_xmalloc(size_t size) {
+    void *ptr;
+    size_t payload_size;
+
+    payload_size = size == 0 ? 1 : size;
+    ptr = malloc(payload_size);
+    if (ptr == NULL) {
+        perror("malloc");
+        exit(EXIT_FAILURE);
+    }
+    return ptr;
+}
+
+void *heap_xrealloc(void *ptr, size_t size) {
+    void *re;
+    size_t payload_size;
+
+    payload_size = size == 0 ? 1 : size;
+    re = realloc(ptr, payload_size);
+    if (re == NULL) {
+        perror("realloc");
+        exit(EXIT_FAILURE);
+    }
+    return re;
+}
+
+char *heap_xstrdup(const char *s) {
+    size_t len;
+    char *copy;
+
+    len = strlen(s);
+    copy = heap_xmalloc(len + 1);
+    memcpy(copy, s, len + 1);
+    return copy;
+}
+
+void heap_free(void *ptr) {
     free(ptr);
 }
 

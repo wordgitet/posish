@@ -55,7 +55,7 @@ static char *dup_trimmed_command(const char *command) {
     end--;
   }
 
-  copy = arena_alloc_in(NULL, end - start + 1);
+  copy = heap_xmalloc(end - start + 1);
   if (copy == NULL) {
     return NULL;
   }
@@ -68,8 +68,8 @@ static void free_job_storage(struct tracked_job *job) {
   if (job == NULL) {
     return;
   }
-  arena_maybe_free(job->command);
-  arena_maybe_free(job->procs);
+  heap_free(job->command);
+  heap_free(job->procs);
   job->command = NULL;
   job->procs = NULL;
   job->proc_count = 0;
@@ -160,7 +160,7 @@ static void set_job_command(struct tracked_job *job, const char *command) {
     return;
   }
 
-  arena_maybe_free(job->command);
+  heap_free(job->command);
   job->command = copy;
 }
 
@@ -224,7 +224,7 @@ static struct tracked_job *add_job(pid_t pgid, const pid_t *pids, size_t count,
     return NULL;
   }
 
-  new_jobs = arena_realloc_in(NULL, g_jobs, sizeof(*g_jobs) * (g_job_count + 1));
+  new_jobs = heap_xrealloc(g_jobs, sizeof(*g_jobs) * (g_job_count + 1));
   if (new_jobs == NULL) {
     return NULL;
   }
@@ -232,7 +232,7 @@ static struct tracked_job *add_job(pid_t pgid, const pid_t *pids, size_t count,
 
   job = &g_jobs[g_job_count];
   memset(job, 0, sizeof(*job));
-  job->procs = arena_alloc_in(NULL, sizeof(*job->procs) * count);
+  job->procs = heap_xmalloc(sizeof(*job->procs) * count);
   if (job->procs == NULL) {
     return NULL;
   }
@@ -264,7 +264,7 @@ static void rebuild_job_processes(struct tracked_job *job, const pid_t *pids,
     return;
   }
 
-  new_procs = arena_alloc_in(NULL, sizeof(*new_procs) * count);
+  new_procs = heap_xmalloc(sizeof(*new_procs) * count);
   if (new_procs == NULL) {
     return;
   }
@@ -280,7 +280,7 @@ static void rebuild_job_processes(struct tracked_job *job, const pid_t *pids,
     }
   }
 
-  arena_maybe_free(job->procs);
+  heap_free(job->procs);
   job->procs = new_procs;
   job->proc_count = count;
 }
@@ -312,7 +312,7 @@ void jobs_destroy(void) {
   for (i = 0; i < g_job_count; i++) {
     free_job_storage(&g_jobs[i]);
   }
-  arena_maybe_free(g_jobs);
+  heap_free(g_jobs);
   g_jobs = NULL;
   g_job_count = 0;
   g_next_job_id = 1;
@@ -424,12 +424,12 @@ void jobs_forget_pgid(pid_t pgid) {
       g_jobs[i] = g_jobs[g_job_count - 1];
       g_job_count--;
       if (g_job_count == 0) {
-        arena_maybe_free(g_jobs);
+        heap_free(g_jobs);
         g_jobs = NULL;
       } else {
         struct tracked_job *shrunk;
 
-        shrunk = arena_realloc_in(NULL, g_jobs, sizeof(*g_jobs) * g_job_count);
+        shrunk = heap_xrealloc(g_jobs, sizeof(*g_jobs) * g_job_count);
         if (shrunk != NULL) {
           g_jobs = shrunk;
         }

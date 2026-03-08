@@ -788,7 +788,7 @@ static int quote_remove_word(const char *word, char **out_word) {
     }
 
     if (quote != '\0') {
-        posish_errorf("unterminated heredoc delimiter quote");
+        posish_error_idf(POSERR_UNTERMINATED_HEREDOC_DELIMITER_QUOTE);
         arena_maybe_free(buf);
         return -1;
     }
@@ -918,11 +918,11 @@ static int collect_words_and_redirs(struct parser_ctx *ctx,
 
         if (spec.kind == REDIR_HEREDOC) {
             if (spec.path == NULL || spec.path[0] == '\0') {
-                posish_errorf("missing heredoc delimiter");
+                posish_error_idf(POSERR_MISSING_HEREDOC_DELIMITER);
                 return -1;
             }
             if (ctx == NULL) {
-                posish_errorf("internal error: heredoc outside parser context");
+                posish_error_idf(POSERR_HEREDOC_OUTSIDE_PARSER_CONTEXT);
                 return -1;
             }
             if (init_heredoc_spec(&spec, spec.path) != 0) {
@@ -1313,7 +1313,7 @@ static int consume_pending_heredocs(struct parser_ctx *ctx, size_t start_pos,
             size_t delim_len;
 
             if (ctx->source[pos] == '\0') {
-                posish_errorf("unterminated here-document");
+                posish_error_idf(POSERR_UNTERMINATED_HEREDOC);
                 return -1;
             }
 
@@ -1350,7 +1350,7 @@ static int consume_pending_heredocs(struct parser_ctx *ctx, size_t start_pos,
                 append_slice(&body, &body_len, &body_cap, "\n", 0, 1);
                 pos++;
             } else {
-                posish_errorf("unterminated here-document");
+                posish_error_idf(POSERR_UNTERMINATED_HEREDOC);
                 arena_maybe_free(body);
                 return -1;
             }

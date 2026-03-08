@@ -25,6 +25,14 @@ static const struct posish_error_def error_defs[] = {
       "syntax error near unexpected token `%s'" },
     { POSERR_MISSING_REDIRECTION_OPERAND, POSISH_ERROR_KIND_SYNTAX,
       "missing redirection operand" },
+    { POSERR_MISSING_HEREDOC_DELIMITER, POSISH_ERROR_KIND_SYNTAX,
+      "missing heredoc delimiter" },
+    { POSERR_UNTERMINATED_HEREDOC_DELIMITER_QUOTE,
+      POSISH_ERROR_KIND_SYNTAX, "unterminated heredoc delimiter quote" },
+    { POSERR_HEREDOC_OUTSIDE_PARSER_CONTEXT, POSISH_ERROR_KIND_SYSTEM,
+      "internal error: heredoc outside parser context" },
+    { POSERR_UNTERMINATED_HEREDOC, POSISH_ERROR_KIND_SYNTAX,
+      "unterminated here-document" },
     { POSERR_AMBIGUOUS_REDIRECTION, POSISH_ERROR_KIND_RUNTIME,
       "ambiguous redirection" },
     { POSERR_INVALID_FD_REDIRECTION, POSISH_ERROR_KIND_RUNTIME,
@@ -146,6 +154,10 @@ static const struct posish_error_def error_defs[] = {
       "unset: invalid option: -%c" },
     { POSERR_UNSET_INVALID_FUNCTION_NAME, POSISH_ERROR_KIND_BUILTIN,
       "unset: invalid function name: %s" },
+    { POSERR_UNSET_INVALID_VARIABLE_NAME, POSISH_ERROR_KIND_BUILTIN,
+      "unset: invalid variable name: %s" },
+    { POSERR_UNSET_READONLY_VARIABLE, POSISH_ERROR_KIND_BUILTIN,
+      "unset: %s: is read-only" },
     { POSERR_EXPORT_INVALID_OPTION, POSISH_ERROR_KIND_BUILTIN,
       "export: invalid option: -%c" },
     { POSERR_EXPORT_INVALID_VARIABLE_NAME, POSISH_ERROR_KIND_BUILTIN,
@@ -156,6 +168,8 @@ static const struct posish_error_def error_defs[] = {
       "read: invalid option: -%c" },
     { POSERR_READONLY_INVALID_OPTION, POSISH_ERROR_KIND_BUILTIN,
       "readonly: invalid option: -%c" },
+    { POSERR_READONLY_INVALID_VARIABLE_NAME, POSISH_ERROR_KIND_BUILTIN,
+      "readonly: invalid variable name: %s" },
     { POSERR_TRAP_INVALID_SIGNAL, POSISH_ERROR_KIND_BUILTIN,
       "trap: invalid signal: %s" },
     { POSERR_TRAP_MISSING_CONDITION, POSISH_ERROR_KIND_BUILTIN,
@@ -163,7 +177,12 @@ static const struct posish_error_def error_defs[] = {
     { POSERR_EXIT_NUMERIC_ARGUMENT_REQUIRED, POSISH_ERROR_KIND_BUILTIN,
       "exit: numeric argument required: %s" },
     { POSERR_EXIT_TOO_MANY_ARGUMENTS, POSISH_ERROR_KIND_BUILTIN,
-      "exit: too many arguments" }
+      "exit: too many arguments" },
+
+    { POSERR_INVALID_VARIABLE_NAME, POSISH_ERROR_KIND_RUNTIME,
+      "invalid variable name: %s" },
+    { POSERR_VARIABLE_IS_READONLY, POSISH_ERROR_KIND_RUNTIME,
+      "%s: is read-only" }
 };
 
 const struct posish_error_def *posish_error_lookup(enum posish_error_id id) {

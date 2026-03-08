@@ -37,20 +37,20 @@ static void function_redirs_clone_heap(struct redir_vec *dst,
         return;
     }
 
-    dst->items = arena_alloc_in(NULL, sizeof(*dst->items) * src->len);
+    dst->items = heap_xmalloc(sizeof(*dst->items) * src->len);
     dst->len = src->len;
     for (i = 0; i < src->len; i++) {
         dst->items[i] = src->items[i];
         if (src->items[i].path != NULL) {
-            dst->items[i].path = arena_strdup_in(NULL, src->items[i].path);
+            dst->items[i].path = heap_xstrdup(src->items[i].path);
         }
         if (src->items[i].delimiter != NULL) {
             dst->items[i].delimiter =
-                arena_strdup_in(NULL, src->items[i].delimiter);
+                heap_xstrdup(src->items[i].delimiter);
         }
         if (src->items[i].body_raw != NULL) {
             dst->items[i].body_raw =
-                arena_strdup_in(NULL, src->items[i].body_raw);
+                heap_xstrdup(src->items[i].body_raw);
         }
     }
 }
@@ -59,11 +59,11 @@ static void function_redirs_destroy(struct redir_vec *redirs) {
     size_t i;
 
     for (i = 0; i < redirs->len; i++) {
-        free(redirs->items[i].delimiter);
-        free(redirs->items[i].body_raw);
-        free(redirs->items[i].path);
+        heap_free(redirs->items[i].delimiter);
+        heap_free(redirs->items[i].body_raw);
+        heap_free(redirs->items[i].path);
     }
-    free(redirs->items);
+    heap_free(redirs->items);
     redirs->items = NULL;
     redirs->len = 0;
 }
@@ -72,10 +72,10 @@ static void function_destroy_node(struct symbol_node *node) {
     struct shell_function_entry *entry;
 
     entry = function_entry_from_node(node);
-    free(entry->sym.name);
-    free(entry->function.body);
+    heap_free(entry->sym.name);
+    heap_free(entry->function.body);
     function_redirs_destroy(&entry->function.redirs);
-    free(entry);
+    heap_free(entry);
 }
 
 void functions_init(struct shell_state *state) {
@@ -109,18 +109,18 @@ int functions_set(struct shell_state *state, const char *name, const char *body,
     node = symbol_table_lookup(&state->functions_table, name);
     if (node != NULL) {
         entry = function_entry_from_node(node);
-        free(entry->function.body);
+        heap_free(entry->function.body);
         function_redirs_destroy(&entry->function.redirs);
-        entry->function.body = arena_strdup_in(NULL, body);
+        entry->function.body = heap_xstrdup(body);
         function_redirs_clone_heap(&entry->function.redirs, redirs);
         return 0;
     }
 
-    entry = arena_alloc_in(NULL, sizeof(*entry));
+    entry = heap_xmalloc(sizeof(*entry));
     memset(entry, 0, sizeof(*entry));
-    entry->sym.name = arena_strdup_in(NULL, name);
+    entry->sym.name = heap_xstrdup(name);
     entry->sym.hash = symbol_hash_n(name, strlen(name));
-    entry->function.body = arena_strdup_in(NULL, body);
+    entry->function.body = heap_xstrdup(body);
     function_redirs_clone_heap(&entry->function.redirs, redirs);
     return symbol_table_insert(&state->functions_table, &entry->sym);
 }

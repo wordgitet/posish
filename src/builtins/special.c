@@ -406,9 +406,9 @@ static void free_positional_parameters(struct shell_state *state) {
     size_t i;
 
     for (i = 0; i < state->positional_count; i++) {
-        arena_maybe_free(state->positional_params[i]);
+        heap_free(state->positional_params[i]);
     }
-    arena_maybe_free(state->positional_params);
+    heap_free(state->positional_params);
     state->positional_params = NULL;
     state->positional_count = 0;
 }
@@ -418,20 +418,19 @@ static void set_positional_parameters(struct shell_state *state, char *const arg
     size_t count;
     size_t i;
 
-    free_positional_parameters(state);
-    for (count = 0; argv[start_index + count] != NULL; count++) {
-    }
-    if (count == 0) {
-        return;
-    }
+  free_positional_parameters(state);
+  for (count = 0; argv[start_index + count] != NULL; count++) {
+  }
+  if (count == 0) {
+    return;
+  }
 
-    state->positional_params =
-        arena_alloc_in(NULL, sizeof(*state->positional_params) * count);
-    for (i = 0; i < count; i++) {
-        state->positional_params[i] =
-            arena_strdup_in(NULL, argv[start_index + i]);
-    }
-    state->positional_count = count;
+  state->positional_params =
+      heap_xmalloc(sizeof(*state->positional_params) * count);
+  for (i = 0; i < count; i++) {
+    state->positional_params[i] = heap_xstrdup(argv[start_index + i]);
+  }
+  state->positional_count = count;
 }
 
 static int builtin_shift(struct shell_state *state, char *const argv[]) {
@@ -471,7 +470,7 @@ static int builtin_shift(struct shell_state *state, char *const argv[]) {
     }
 
     for (i = 0; i < shift_count; i++) {
-        arena_maybe_free(state->positional_params[i]);
+        heap_free(state->positional_params[i]);
     }
 
     remain = state->positional_count - shift_count;
@@ -481,7 +480,7 @@ static int builtin_shift(struct shell_state *state, char *const argv[]) {
     }
     state->positional_count = remain;
     if (remain == 0) {
-        arena_maybe_free(state->positional_params);
+        heap_free(state->positional_params);
         state->positional_params = NULL;
     }
     return 0;
@@ -491,6 +490,11 @@ static int builtin_set(struct shell_state *state, char *const argv[]) {
     size_t i;
     bool refresh_signal_policy;
     bool set_positionals;
+
+    if (argv[1] != NULL && strcmp(argv[1], "--") == 0) {
+        set_positional_parameters(state, argv, 2);
+        return 0;
+    }
 
     i = 1;
     refresh_signal_policy = false;

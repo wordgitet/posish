@@ -1644,6 +1644,9 @@ void shell_state_init(struct shell_state *state) {
     symbol_table_init(&state->aliases_table);
     state->path_cache = NULL;
     state->path_cache_count = 0;
+    state->exec_envp = NULL;
+    state->exec_envp_count = 0;
+    state->exec_envp_dirty = true;
     state->positional_params = NULL;
     state->positional_count = 0;
     state->shell_name = NULL;
@@ -1653,9 +1656,9 @@ static void free_shell_positionals(struct shell_state *state) {
     size_t i;
 
     for (i = 0; i < state->positional_count; i++) {
-        arena_maybe_free(state->positional_params[i]);
+        heap_free(state->positional_params[i]);
     }
-    arena_maybe_free(state->positional_params);
+    heap_free(state->positional_params);
     state->positional_params = NULL;
     state->positional_count = 0;
 }

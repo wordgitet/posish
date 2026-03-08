@@ -38,22 +38,204 @@ struct positional_backup {
   size_t count;
 };
 
-static void env_restore_vec_free(struct env_restore_vec *restore) {
-  size_t i;
+enum prepared_kind {
+  PREPARED_KIND_NONE,
+  PREPARED_KIND_ASSIGN_ONLY,
+  PREPARED_KIND_BUILTIN,
+  PREPARED_KIND_FUNCTION,
+  PREPARED_KIND_EXTERNAL,
+};
 
-  for (i = 0; i < restore->len; i++) {
-    arena_maybe_free(restore->items[i].name);
-    arena_maybe_free(restore->items[i].old_value);
-  }
-  arena_maybe_free(restore->items);
+struct prepared_command {
+  struct ast_word_vec raw_words;
+  struct token_vec expanded;
+  struct token_vec assign_expanded;
+  struct token_vec cmd_expanded;
+  struct ast_word_vec words;
+  struct redir_vec redirs;
+  char **argv;
+  size_t argc;
+  size_t assign_count;
+  bool special_name;
+  bool assignment_special;
+  bool persist_builtin_redirs;
+  bool redirs_only_command;
+  bool saw_cmdsub;
+  int last_cmdsub_status;
+  bool pre_expand_redirs;
+  bool builtin_available;
+  const struct shell_function *function_def;
+  enum prepared_kind kind;
+};
+
+static bool is_exec_without_command(char *const argv[]);
+static bool is_command_exec_without_command(char *const argv[]);
+static bool is_assignment_word(const char *word);
+static void prepared_command_refresh_dispatch(struct shell_state *state,
+                                              struct prepared_command *cmd,
+                                              bool allow_builtin);
+
+static void env_restore_vec_free(struct env_restore_vec *restore) {
+  /*
+   * Restore vectors are command-scratch and reclaimed by the surrounding
+   * command arena mark.
+   */
   restore->items = NULL;
   restore->len = 0;
 }
 
 void simple_command_word_vec_free(struct ast_word_vec *words) {
-  arena_maybe_free(words->items);
+  /*
+   * Word vectors are arena-backed and reclaimed by the surrounding
+   * command/script arena reset.
+   */
   words->items = NULL;
   words->len = 0;
+}
+
+static void prepared_command_init(struct prepared_command *cmd,
+                                  const struct ast_word_vec *ast_raw_words,
+                                  const struct redir_vec *ast_redirs) {
+  cmd->raw_words.items = ast_raw_words->items;
+  cmd->raw_words.len = ast_raw_words->len;
+  cmd->expanded.items = NULL;
+  cmd->expanded.len = 0;
+  cmd->assign_expanded.items = NULL;
+  cmd->assign_expanded.len = 0;
+  cmd->cmd_expanded.items = NULL;
+  cmd->cmd_expanded.len = 0;
+  cmd->words.items = NULL;
+  cmd->words.len = 0;
+  cmd->redirs.items = NULL;
+  cmd->redirs.len = 0;
+  cmd->argv = NULL;
+  cmd->argc = 0;
+  cmd->assign_count = 0;
+  cmd->special_name = false;
+  cmd->assignment_special = false;
+  cmd->persist_builtin_redirs = false;
+  cmd->redirs_only_command = false;
+  cmd->saw_cmdsub = false;
+  cmd->last_cmdsub_status = 0;
+  cmd->pre_expand_redirs = false;
+  cmd->builtin_available = false;
+  cmd->function_def = NULL;
+  cmd->kind = PREPARED_KIND_NONE;
+
+  redir_vec_clone(&cmd->redirs, ast_redirs);
+  cmd->redirs_only_command = cmd->raw_words.len == 0;
+}
+
+static void prepared_command_free(struct prepared_command *cmd) {
+  /*
+   * Prepared-command storage is command-scratch and reclaimed by the
+   * surrounding command arena mark.
+   */
+  cmd->argv = NULL;
+  redir_vec_free(&cmd->redirs);
+  simple_command_word_vec_free(&cmd->words);
+  simple_command_word_vec_free(&cmd->raw_words);
+  lexer_free_tokens(&cmd->expanded);
+  lexer_free_tokens(&cmd->assign_expanded);
+  lexer_free_tokens(&cmd->cmd_expanded);
+}
+
+static void prepared_command_note_cmdsub(struct prepared_command *cmd,
+                                         const struct shell_state *state) {
+  if (!state->cmdsub_performed) {
+    return;
+  }
+  cmd->saw_cmdsub = true;
+  cmd->last_cmdsub_status = state->last_cmdsub_status;
+}
+
+static void prepared_command_merge_words(struct prepared_command *cmd) {
+  size_t i;
+
+  if (cmd->assign_expanded.len == 0) {
+    cmd->words.items = cmd->cmd_expanded.items;
+    cmd->words.len = cmd->cmd_expanded.len;
+    cmd->cmd_expanded.items = NULL;
+    cmd->cmd_expanded.len = 0;
+    return;
+  }
+
+  if (cmd->cmd_expanded.len == 0) {
+    cmd->words.items = cmd->assign_expanded.items;
+    cmd->words.len = cmd->assign_expanded.len;
+    cmd->assign_expanded.items = NULL;
+    cmd->assign_expanded.len = 0;
+    return;
+  }
+
+  cmd->expanded.len = cmd->assign_expanded.len + cmd->cmd_expanded.len;
+  cmd->expanded.items = arena_xmalloc(sizeof(*cmd->expanded.items) * cmd->expanded.len);
+  for (i = 0; i < cmd->assign_expanded.len; i++) {
+    cmd->expanded.items[i] = cmd->assign_expanded.items[i];
+  }
+  for (i = 0; i < cmd->cmd_expanded.len; i++) {
+    cmd->expanded.items[cmd->assign_expanded.len + i] = cmd->cmd_expanded.items[i];
+  }
+  cmd->words.items = cmd->expanded.items;
+  cmd->words.len = cmd->expanded.len;
+  cmd->expanded.items = NULL;
+  cmd->expanded.len = 0;
+
+  cmd->assign_expanded.items = NULL;
+  cmd->assign_expanded.len = 0;
+  cmd->cmd_expanded.items = NULL;
+  cmd->cmd_expanded.len = 0;
+}
+
+static void prepared_command_classify(struct shell_state *state,
+                                      struct prepared_command *cmd,
+                                      bool allow_builtin) {
+  size_t i;
+
+  cmd->assign_count = 0;
+  while (cmd->assign_count < cmd->words.len &&
+         is_assignment_word(cmd->words.items[cmd->assign_count])) {
+    cmd->assign_count++;
+  }
+
+  if (cmd->assign_count == cmd->words.len) {
+    cmd->kind = PREPARED_KIND_ASSIGN_ONLY;
+    return;
+  }
+
+  cmd->argc = cmd->words.len - cmd->assign_count;
+  cmd->argv = arena_xmalloc(sizeof(*cmd->argv) * (cmd->argc + 1));
+  for (i = 0; i < cmd->argc; i++) {
+    cmd->argv[i] = cmd->words.items[cmd->assign_count + i];
+  }
+  cmd->argv[cmd->argc] = NULL;
+
+  prepared_command_refresh_dispatch(state, cmd, allow_builtin);
+}
+
+static void prepared_command_refresh_dispatch(struct shell_state *state,
+                                              struct prepared_command *cmd,
+                                              bool allow_builtin) {
+  cmd->special_name = allow_builtin && builtin_is_special_name(cmd->argv[0]);
+  cmd->function_def =
+      allow_builtin && !cmd->special_name ? functions_get(state, cmd->argv[0]) : NULL;
+  cmd->assignment_special =
+      cmd->special_name && strcmp(cmd->argv[0], "command") != 0;
+  cmd->persist_builtin_redirs =
+      (cmd->special_name && is_exec_without_command(cmd->argv)) ||
+      (allow_builtin && is_command_exec_without_command(cmd->argv));
+  cmd->builtin_available =
+      allow_builtin && builtin_is_name(cmd->argv[0]) &&
+      (!builtin_is_substitutive_name(cmd->argv[0]) ||
+       path_resolves_command(state, cmd->argv[0], false));
+
+  if (cmd->function_def != NULL) {
+    cmd->kind = PREPARED_KIND_FUNCTION;
+  } else if (cmd->builtin_available) {
+    cmd->kind = PREPARED_KIND_BUILTIN;
+  } else {
+    cmd->kind = PREPARED_KIND_EXTERNAL;
+  }
 }
 
 static void trace_simple_words(struct shell_state *state, char *const words[],
@@ -202,9 +384,9 @@ static void free_positional_params(char **params, size_t count) {
   size_t i;
 
   for (i = 0; i < count; i++) {
-    arena_maybe_free(params[i]);
+    heap_free(params[i]);
   }
-  arena_maybe_free(params);
+  heap_free(params);
 }
 
 static void positional_push(struct shell_state *state, char *const argv[],
@@ -220,10 +402,10 @@ static void positional_push(struct shell_state *state, char *const argv[],
     return;
   }
 
-  state->positional_params = arena_alloc_in(
-      NULL, sizeof(*state->positional_params) * state->positional_count);
+  state->positional_params =
+      heap_xmalloc(sizeof(*state->positional_params) * state->positional_count);
   for (i = 0; i < state->positional_count; i++) {
-    state->positional_params[i] = arena_strdup_in(NULL, argv[i + 1]);
+    state->positional_params[i] = heap_xstrdup(argv[i + 1]);
   }
 }
 
@@ -497,10 +679,8 @@ static int apply_persistent_assignments(struct shell_state *state,
         state->should_exit = true;
         state->exit_status = 1;
       }
-      arena_maybe_free(name);
       return 1;
     }
-    arena_maybe_free(name);
   }
 
   return 0;
@@ -562,8 +742,6 @@ static int apply_temporary_assignments(struct shell_state *state,
         state->should_exit = true;
         state->exit_status = 1;
       }
-      arena_maybe_free(r.name);
-      arena_maybe_free(r.old_value);
       restore_temporary_assignments(state, restore);
       env_restore_vec_free(restore);
       return 1;
@@ -701,75 +879,67 @@ int simple_command_execute_parts(struct shell_state *state,
                                  const struct redir_vec *ast_redirs,
                                  bool allow_builtin,
                                  simple_command_body_runner run_body) {
-  struct ast_word_vec raw_words;
-  struct token_vec expanded;
-  struct token_vec assign_expanded;
-  struct token_vec cmd_expanded;
-  struct ast_word_vec words;
-  struct redir_vec redirs;
+  struct prepared_command cmd;
   struct env_restore_vec temp_env;
   struct fd_backup_vec fd_backups;
   struct fd_backup_vec pre_expand_backups;
-  char **argv;
-  size_t i;
-  size_t assign_count;
-  size_t argc;
   int status;
   bool handled;
   bool have_temp_env;
-  bool special_name;
-  bool assignment_special;
-  bool persist_builtin_redirs;
-  const struct shell_function *function_def;
   struct positional_backup positional_backup;
-  bool saw_cmdsub;
-  int last_cmdsub_status;
-  bool pre_expand_redirs;
-  bool redirs_only_command;
   struct token_vec in_vec;
+  struct arena *saved_arena;
+  struct arena_mark command_mark;
+  bool command_marked;
 
-  raw_words.items = ast_raw_words->items;
-  raw_words.len = ast_raw_words->len;
-  expanded.items = NULL;
-  expanded.len = 0;
-  assign_expanded.items = NULL;
-  assign_expanded.len = 0;
-  cmd_expanded.items = NULL;
-  cmd_expanded.len = 0;
-  words.items = NULL;
-  words.len = 0;
-  redirs.items = NULL;
-  redirs.len = 0;
+  prepared_command_init(&cmd, ast_raw_words, ast_redirs);
   temp_env.items = NULL;
   temp_env.len = 0;
   fd_backups.items = NULL;
   fd_backups.len = 0;
   pre_expand_backups.items = NULL;
   pre_expand_backups.len = 0;
-  argv = NULL;
-  argc = 0;
   status = 0;
   handled = false;
   have_temp_env = false;
-  function_def = NULL;
-  saw_cmdsub = false;
-  last_cmdsub_status = 0;
-  pre_expand_redirs = false;
-  redirs_only_command = false;
-  assignment_special = false;
-
-  redir_vec_clone(&redirs, ast_redirs);
-
-  redirs_only_command = raw_words.len == 0;
-
-  assign_count = 0;
-  while (assign_count < raw_words.len &&
-         is_assignment_word(raw_words.items[assign_count])) {
-    assign_count++;
+  saved_arena = arena_get_current();
+  command_mark.block = NULL;
+  command_mark.used = 0;
+  command_marked = saved_arena == &state->arena_cmd;
+  if (command_marked) {
+    arena_mark_take(&state->arena_cmd, &command_mark);
   }
 
-  in_vec.items = raw_words.items + assign_count;
-  in_vec.len = raw_words.len - assign_count;
+  if (allow_builtin && !state->noexec && cmd.redirs.len == 0 &&
+      cmd.raw_words.len == 1) {
+    char *trace_words[1];
+
+    trace_words[0] = cmd.raw_words.items[0];
+    if (strcmp(cmd.raw_words.items[0], ":") == 0 ||
+        strcmp(cmd.raw_words.items[0], "true") == 0) {
+      trace_simple_words(state, trace_words, 1);
+      state->cmdsub_performed = false;
+      state->last_cmdsub_status = 0;
+      status = 0;
+      goto done;
+    }
+    if (strcmp(cmd.raw_words.items[0], "false") == 0) {
+      trace_simple_words(state, trace_words, 1);
+      state->cmdsub_performed = false;
+      state->last_cmdsub_status = 0;
+      status = 1;
+      goto done;
+    }
+  }
+
+  cmd.assign_count = 0;
+  while (cmd.assign_count < cmd.raw_words.len &&
+         is_assignment_word(cmd.raw_words.items[cmd.assign_count])) {
+    cmd.assign_count++;
+  }
+
+  in_vec.items = cmd.raw_words.items + cmd.assign_count;
+  in_vec.len = cmd.raw_words.len - cmd.assign_count;
   if (in_vec.len > 0 && is_reserved_word_as_command(in_vec.items[0])) {
     posish_error_idf(POSERR_UNEXPECTED_TOKEN, in_vec.items[0]);
     if (!state->interactive) {
@@ -783,7 +953,8 @@ int simple_command_execute_parts(struct shell_state *state,
     size_t decl_prefix_len;
     size_t wi;
 
-    decl_prefix_len = declaration_utility_prefix_len(&raw_words, assign_count);
+    decl_prefix_len =
+        declaration_utility_prefix_len(&cmd.raw_words, cmd.assign_count);
     for (wi = 0; wi < in_vec.len; wi++) {
       struct token_vec one_in;
       struct token_vec one_out;
@@ -805,138 +976,96 @@ int simple_command_execute_parts(struct shell_state *state,
         status = 2;
         goto done;
       }
-      if (state->cmdsub_performed) {
-        saw_cmdsub = true;
-        last_cmdsub_status = state->last_cmdsub_status;
-      }
+      prepared_command_note_cmdsub(&cmd, state);
       if (one_out.len > 0) {
-        cmd_expanded.items = arena_xrealloc(
-            cmd_expanded.items,
-            sizeof(*cmd_expanded.items) * (cmd_expanded.len + one_out.len));
+        cmd.cmd_expanded.items = arena_xrealloc(
+            cmd.cmd_expanded.items,
+            sizeof(*cmd.cmd_expanded.items) *
+                (cmd.cmd_expanded.len + one_out.len));
         for (oi = 0; oi < one_out.len; oi++) {
-          cmd_expanded.items[cmd_expanded.len++] = one_out.items[oi];
+          cmd.cmd_expanded.items[cmd.cmd_expanded.len++] = one_out.items[oi];
         }
       }
-      arena_maybe_free(one_out.items);
     }
   }
 
-  special_name = allow_builtin && cmd_expanded.len > 0 &&
-                 cmd_expanded.items[0][0] != '\0' &&
-                 builtin_is_special_name(cmd_expanded.items[0]);
-  assignment_special =
-      special_name && strcmp(cmd_expanded.items[0], "command") != 0;
+  cmd.special_name = allow_builtin && cmd.cmd_expanded.len > 0 &&
+                     cmd.cmd_expanded.items[0][0] != '\0' &&
+                     builtin_is_special_name(cmd.cmd_expanded.items[0]);
+  cmd.assignment_special =
+      cmd.special_name && strcmp(cmd.cmd_expanded.items[0], "command") != 0;
 
-  if (!redirs_only_command) {
+  if (!cmd.redirs_only_command) {
     bool redir_saw_cmdsub;
     int redir_last_cmdsub_status;
 
     redir_saw_cmdsub = false;
     redir_last_cmdsub_status = 0;
-    status = redir_expand_operands(state, &redirs, &redir_saw_cmdsub,
+    status = redir_expand_operands(state, &cmd.redirs, &redir_saw_cmdsub,
                                    &redir_last_cmdsub_status);
     if (redir_saw_cmdsub) {
-      saw_cmdsub = true;
-      last_cmdsub_status = redir_last_cmdsub_status;
+      cmd.saw_cmdsub = true;
+      cmd.last_cmdsub_status = redir_last_cmdsub_status;
     }
     if (status != 0) {
       goto done;
     }
   }
 
-  if (assign_count > 0 && cmd_expanded.len > 0 && !assignment_special) {
-    if (apply_redirections(state, &redirs, true, state->noclobber, false,
+  if (cmd.assign_count > 0 && cmd.cmd_expanded.len > 0 &&
+      !cmd.assignment_special) {
+    if (apply_redirections(state, &cmd.redirs, true, state->noclobber, false,
                            &pre_expand_backups) != 0) {
       status = 1;
       goto done;
     }
-    pre_expand_redirs = true;
+    cmd.pre_expand_redirs = true;
   }
 
-  in_vec.items = raw_words.items;
-  in_vec.len = assign_count;
+  in_vec.items = cmd.raw_words.items;
+  in_vec.len = cmd.assign_count;
   if (in_vec.len > 0) {
-    if (expand_words(&in_vec, &assign_expanded, state, false) != 0) {
+    if (expand_words(&in_vec, &cmd.assign_expanded, state, false) != 0) {
       status = 2;
       goto done;
     }
-    if (state->cmdsub_performed) {
-      saw_cmdsub = true;
-      last_cmdsub_status = state->last_cmdsub_status;
-    }
+    prepared_command_note_cmdsub(&cmd, state);
   }
 
-  if (pre_expand_redirs) {
+  if (cmd.pre_expand_redirs) {
     fd_backup_restore(&pre_expand_backups);
-    pre_expand_redirs = false;
+    cmd.pre_expand_redirs = false;
   }
 
-  state->cmdsub_performed = saw_cmdsub;
-  state->last_cmdsub_status = saw_cmdsub ? last_cmdsub_status : 0;
+  state->cmdsub_performed = cmd.saw_cmdsub;
+  state->last_cmdsub_status = cmd.saw_cmdsub ? cmd.last_cmdsub_status : 0;
 
-  if (redirs.len == 0 && raw_words.len == 1 && assign_count == 1 &&
-      cmd_expanded.len == 0 && assign_expanded.len == 1 &&
-      is_assignment_word(assign_expanded.items[0])) {
+  if (cmd.redirs.len == 0 && cmd.raw_words.len == 1 && cmd.assign_count == 1 &&
+      cmd.cmd_expanded.len == 0 && cmd.assign_expanded.len == 1 &&
+      is_assignment_word(cmd.assign_expanded.items[0])) {
     char *assign_words[1];
 
-    assign_words[0] = assign_expanded.items[0];
+    assign_words[0] = cmd.assign_expanded.items[0];
     trace_simple_words(state, assign_words, 1);
     status = apply_persistent_assignments(state, assign_words, 1);
-    simple_command_word_vec_free(&raw_words);
-    lexer_free_tokens(&assign_expanded);
-    lexer_free_tokens(&cmd_expanded);
-    redir_vec_free(&redirs);
     if (status == 0 && state->cmdsub_performed) {
-      return state->last_cmdsub_status;
+      status = state->last_cmdsub_status;
     }
-    return status;
+    goto done;
   }
 
-  if (assign_expanded.len == 0) {
-    words.items = cmd_expanded.items;
-    words.len = cmd_expanded.len;
-    cmd_expanded.items = NULL;
-    cmd_expanded.len = 0;
-  } else if (cmd_expanded.len == 0) {
-    words.items = assign_expanded.items;
-    words.len = assign_expanded.len;
-    assign_expanded.items = NULL;
-    assign_expanded.len = 0;
-  } else {
-    expanded.len = assign_expanded.len + cmd_expanded.len;
-    expanded.items = arena_xmalloc(sizeof(*expanded.items) * expanded.len);
-    for (i = 0; i < assign_expanded.len; i++) {
-      expanded.items[i] = assign_expanded.items[i];
-    }
-    for (i = 0; i < cmd_expanded.len; i++) {
-      expanded.items[assign_expanded.len + i] = cmd_expanded.items[i];
-    }
-    words.items = expanded.items;
-    words.len = expanded.len;
-    expanded.items = NULL;
-    expanded.len = 0;
-  }
-  arena_maybe_free(assign_expanded.items);
-  assign_expanded.items = NULL;
-  assign_expanded.len = 0;
-  arena_maybe_free(cmd_expanded.items);
-  cmd_expanded.items = NULL;
-  cmd_expanded.len = 0;
+  prepared_command_merge_words(&cmd);
 
-  simple_command_word_vec_free(&raw_words);
-
-  if (words.len == 0) {
-    if (redirs_only_command) {
+  if (cmd.words.len == 0) {
+    if (cmd.redirs_only_command) {
       pid_t pid;
       int wstatus;
 
       pid = fork();
       if (pid < 0) {
         perror("fork");
-        redir_vec_free(&redirs);
-        simple_command_word_vec_free(&words);
-        lexer_free_tokens(&expanded);
-        return 1;
+        status = 1;
+        goto done;
       }
       if (pid == 0) {
         struct shell_state local_state;
@@ -959,7 +1088,7 @@ int simple_command_execute_parts(struct shell_state *state,
         redir_saw_cmdsub = false;
         redir_last_cmdsub_status = 0;
 
-        st = redir_expand_operands(&local_state, &redirs, &redir_saw_cmdsub,
+        st = redir_expand_operands(&local_state, &cmd.redirs, &redir_saw_cmdsub,
                                    &redir_last_cmdsub_status);
         if (st != 0) {
           _exit(st);
@@ -968,7 +1097,7 @@ int simple_command_execute_parts(struct shell_state *state,
           local_state.cmdsub_performed = true;
           local_state.last_cmdsub_status = redir_last_cmdsub_status;
         }
-        if (apply_redirections(&local_state, &redirs, false,
+        if (apply_redirections(&local_state, &cmd.redirs, false,
                                local_state.noclobber, false, NULL) != 0) {
           _exit(1);
         }
@@ -983,130 +1112,88 @@ int simple_command_execute_parts(struct shell_state *state,
             continue;
           }
           perror("waitpid");
-          redir_vec_free(&redirs);
-          simple_command_word_vec_free(&words);
-          lexer_free_tokens(&expanded);
-          return 1;
+          status = 1;
+          goto done;
         }
         break;
       }
 
-      redir_vec_free(&redirs);
-      simple_command_word_vec_free(&words);
-      lexer_free_tokens(&expanded);
       if (WIFEXITED(wstatus)) {
-        return WEXITSTATUS(wstatus);
+        status = WEXITSTATUS(wstatus);
+        goto done;
       }
       if (WIFSIGNALED(wstatus)) {
-        return shell_status_from_wait_status(wstatus);
+        status = shell_status_from_wait_status(wstatus);
+        goto done;
       }
-      return 1;
+      status = 1;
+      goto done;
     }
 
-    if (apply_redirections(state, &redirs, true, state->noclobber, false,
+    if (apply_redirections(state, &cmd.redirs, true, state->noclobber, false,
                            &fd_backups) != 0) {
       fd_backup_restore(&fd_backups);
-      redir_vec_free(&redirs);
-      simple_command_word_vec_free(&words);
-      lexer_free_tokens(&expanded);
-      return 1;
+      status = 1;
+      goto done;
     }
     fflush(NULL);
     fd_backup_restore(&fd_backups);
-    redir_vec_free(&redirs);
-    simple_command_word_vec_free(&words);
-    lexer_free_tokens(&expanded);
     if (state->cmdsub_performed) {
-      return state->last_cmdsub_status;
+      status = state->last_cmdsub_status;
+      goto done;
     }
-    return 0;
+    status = 0;
+    goto done;
   }
 
-  trace_simple_words(state, words.items, words.len);
+  trace_simple_words(state, cmd.words.items, cmd.words.len);
+  prepared_command_classify(state, &cmd, allow_builtin);
 
-  assign_count = 0;
-  while (assign_count < words.len &&
-         is_assignment_word(words.items[assign_count])) {
-    assign_count++;
-  }
-
-  if (assign_count == words.len) {
-    status = apply_persistent_assignments(state, words.items, assign_count);
+  if (cmd.kind == PREPARED_KIND_ASSIGN_ONLY) {
+    status = apply_persistent_assignments(state, cmd.words.items, cmd.assign_count);
+    if (status == 0 && state->cmdsub_performed) {
+      status = state->last_cmdsub_status;
+    }
     if (status == 0) {
-      if (apply_redirections(state, &redirs, true, state->noclobber, false,
+      if (apply_redirections(state, &cmd.redirs, true, state->noclobber, false,
                              &fd_backups) != 0) {
         status = 1;
       }
     }
     fflush(NULL);
     fd_backup_restore(&fd_backups);
-
-    redir_vec_free(&redirs);
-    simple_command_word_vec_free(&words);
-    lexer_free_tokens(&expanded);
-    if (status == 0 && state->cmdsub_performed) {
-      return state->last_cmdsub_status;
-    }
-    return status;
+    goto done;
   }
 
-  argc = words.len - assign_count;
-  argv = arena_xmalloc(sizeof(*argv) * (argc + 1));
-  for (i = 0; i < argc; i++) {
-    argv[i] = words.items[assign_count + i];
-  }
-  argv[argc] = NULL;
-  if (argc == 1 && argv[0][0] == '\0') {
-    status = apply_persistent_assignments(state, words.items, assign_count);
+  if (cmd.argc == 1 && cmd.argv[0][0] == '\0') {
+    status = apply_persistent_assignments(state, cmd.words.items, cmd.assign_count);
     if (status == 0) {
-      if (apply_redirections(state, &redirs, true, state->noclobber, false,
+      if (apply_redirections(state, &cmd.redirs, true, state->noclobber, false,
                              &fd_backups) != 0) {
         status = 1;
       }
     }
     fflush(NULL);
     fd_backup_restore(&fd_backups);
-    arena_maybe_free(argv);
-    redir_vec_free(&redirs);
-    simple_command_word_vec_free(&words);
-    lexer_free_tokens(&expanded);
-    if (status == 0 && state->cmdsub_performed) {
-      return state->last_cmdsub_status;
-    }
-    return status;
+    goto done;
   }
 
-  special_name = allow_builtin && builtin_is_special_name(argv[0]);
-  function_def =
-      allow_builtin && !special_name ? functions_get(state, argv[0]) : NULL;
-  assignment_special = special_name && strcmp(argv[0], "command") != 0;
-  persist_builtin_redirs =
-      (special_name && is_exec_without_command(argv)) ||
-      (allow_builtin && is_command_exec_without_command(argv));
-
-  if (allow_builtin && assign_count == 0 && redirs.len == 0 &&
-      function_def == NULL) {
-    bool builtin_available;
-
-    builtin_available = builtin_is_name(argv[0]) &&
-                        (!builtin_is_substitutive_name(argv[0]) ||
-                         path_resolves_command(state, argv[0], false));
-    if (builtin_available) {
-      status = builtin_dispatch(state, argv, &handled);
+  if (allow_builtin && cmd.assign_count == 0 && cmd.redirs.len == 0 &&
+      cmd.function_def == NULL && cmd.builtin_available) {
+      status = builtin_dispatch(state, cmd.argv, &handled);
       if (handled) {
         goto done;
       }
-    }
   }
 
-  if (assign_count > 0) {
-    if (assignment_special) {
-      status = apply_persistent_assignments(state, words.items, assign_count);
+  if (cmd.assign_count > 0) {
+    if (cmd.assignment_special) {
+      status = apply_persistent_assignments(state, cmd.words.items, cmd.assign_count);
       if (status != 0) {
         goto done;
       }
     } else {
-      if (apply_temporary_assignments(state, words.items, assign_count,
+      if (apply_temporary_assignments(state, cmd.words.items, cmd.assign_count,
                                       &temp_env) != 0) {
         status = 1;
         goto done;
@@ -1115,34 +1202,33 @@ int simple_command_execute_parts(struct shell_state *state,
     }
   }
 
+  if (cmd.kind != PREPARED_KIND_ASSIGN_ONLY && cmd.argv != NULL) {
+    prepared_command_refresh_dispatch(state, &cmd, allow_builtin);
+  }
+
   if (allow_builtin) {
     bool run_in_shell;
-    bool builtin_available;
-
-    builtin_available = builtin_is_name(argv[0]) &&
-                        (!builtin_is_substitutive_name(argv[0]) ||
-                         path_resolves_command(state, argv[0], false));
-    run_in_shell = function_def != NULL || builtin_available;
-    if (persist_builtin_redirs) {
-      if (apply_redirections(state, &redirs, false, state->noclobber, false,
+    run_in_shell = cmd.function_def != NULL || cmd.builtin_available;
+    if (cmd.persist_builtin_redirs) {
+      if (apply_redirections(state, &cmd.redirs, false, state->noclobber, false,
                              NULL) != 0) {
         status = 1;
-        if (special_name && !state->interactive) {
+        if (cmd.special_name && !state->interactive) {
           state->should_exit = true;
           state->exit_status = status;
         }
         goto done;
       }
 
-      status = builtin_dispatch(state, argv, &handled);
+      status = builtin_dispatch(state, cmd.argv, &handled);
       if (!handled) {
-        status = spawn_run_external_argv(state, argv, &redirs);
+        status = spawn_run_external_argv(state, cmd.argv, &cmd.redirs);
       }
     } else if (run_in_shell) {
-      if (apply_redirections(state, &redirs, true, state->noclobber, false,
+      if (apply_redirections(state, &cmd.redirs, true, state->noclobber, false,
                              &fd_backups) != 0) {
         status = 1;
-        if (special_name && !state->interactive) {
+        if (cmd.special_name && !state->interactive) {
           state->should_exit = true;
           state->exit_status = status;
         }
@@ -1150,20 +1236,20 @@ int simple_command_execute_parts(struct shell_state *state,
         goto done;
       }
 
-      if (function_def != NULL) {
+      if (cmd.function_def != NULL) {
         struct fd_backup_vec function_backups;
         struct redir_vec function_redirs;
         bool function_redirs_applied;
 
-        positional_push(state, argv, argc, &positional_backup);
+        positional_push(state, cmd.argv, cmd.argc, &positional_backup);
         state->function_depth++;
         function_backups.items = NULL;
         function_backups.len = 0;
         function_redirs.items = NULL;
         function_redirs.len = 0;
         function_redirs_applied = false;
-        if (function_def->redirs.len > 0) {
-          if (prepare_runtime_redirections(state, &function_def->redirs,
+        if (cmd.function_def->redirs.len > 0) {
+          if (prepare_runtime_redirections(state, &cmd.function_def->redirs,
                                            &function_redirs) != 0 ||
               apply_redirections(state, &function_redirs, true,
                                  state->noclobber, false,
@@ -1174,7 +1260,7 @@ int simple_command_execute_parts(struct shell_state *state,
           }
         }
         if (status == 0) {
-          status = run_body(state, function_def->body);
+          status = run_body(state, cmd.function_def->body);
         }
         if (function_redirs_applied) {
           fd_backup_restore(&function_backups);
@@ -1188,23 +1274,23 @@ int simple_command_execute_parts(struct shell_state *state,
         }
         handled = true;
       } else {
-        status = builtin_dispatch(state, argv, &handled);
+        status = builtin_dispatch(state, cmd.argv, &handled);
       }
       fflush(NULL);
       fd_backup_restore(&fd_backups);
 
       if (!handled) {
-        status = spawn_run_external_argv(state, argv, &redirs);
+        status = spawn_run_external_argv(state, cmd.argv, &cmd.redirs);
       }
     } else {
-      status = spawn_run_external_argv(state, argv, &redirs);
+      status = spawn_run_external_argv(state, cmd.argv, &cmd.redirs);
     }
   } else {
-    status = spawn_run_external_argv(state, argv, &redirs);
+    status = spawn_run_external_argv(state, cmd.argv, &cmd.redirs);
   }
 
 done:
-  if (pre_expand_redirs) {
+  if (cmd.pre_expand_redirs) {
     fd_backup_restore(&pre_expand_backups);
   }
   if (have_temp_env) {
@@ -1212,18 +1298,15 @@ done:
     env_restore_vec_free(&temp_env);
   }
 
-  if (status == 0 && state->cmdsub_performed && argc == 1 &&
-      argv != NULL && argv[0][0] == '\0') {
+  if (status == 0 && state->cmdsub_performed && cmd.argc == 1 &&
+      cmd.argv != NULL && cmd.argv[0][0] == '\0') {
     status = state->last_cmdsub_status;
   }
 
-  arena_maybe_free(argv);
-  redir_vec_free(&redirs);
-  simple_command_word_vec_free(&words);
-  simple_command_word_vec_free(&raw_words);
-  lexer_free_tokens(&expanded);
-  lexer_free_tokens(&assign_expanded);
-  lexer_free_tokens(&cmd_expanded);
+  prepared_command_free(&cmd);
+  if (command_marked) {
+    arena_mark_rewind(&state->arena_cmd, &command_mark);
+  }
   return status;
 }
 

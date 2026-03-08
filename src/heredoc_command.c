@@ -133,7 +133,7 @@ static int quote_remove_word(const char *word, char **out_word) {
     }
 
     if (quote != '\0') {
-        posish_errorf("unterminated heredoc delimiter quote");
+        posish_error_idf(POSERR_UNTERMINATED_HEREDOC_DELIMITER_QUOTE);
         arena_maybe_free(buf);
         return -1;
     }
@@ -274,7 +274,7 @@ static int parse_command_heredocs(const char *command, char **base_command_out,
                         i++;
                     }
                     if (command[i] == '\0' || command[i] == '\n') {
-                        posish_errorf("missing heredoc delimiter");
+                        posish_error_idf(POSERR_MISSING_HEREDOC_DELIMITER);
                         arena_maybe_free(base_command);
                         heredoc_specs_free(specs, spec_count, true);
                         return -1;
@@ -318,7 +318,7 @@ static int parse_command_heredocs(const char *command, char **base_command_out,
                         i++;
                     }
                     if (delim_quote != '\0') {
-                        posish_errorf("unterminated heredoc delimiter quote");
+                        posish_error_idf(POSERR_UNTERMINATED_HEREDOC_DELIMITER_QUOTE);
                         arena_maybe_free(base_command);
                         heredoc_specs_free(specs, spec_count, true);
                         return -1;
@@ -326,7 +326,7 @@ static int parse_command_heredocs(const char *command, char **base_command_out,
 
                     word_end = i;
                     if (word_end == word_start) {
-                        posish_errorf("missing heredoc delimiter");
+                        posish_error_idf(POSERR_MISSING_HEREDOC_DELIMITER);
                         arena_maybe_free(base_command);
                         heredoc_specs_free(specs, spec_count, true);
                         return -1;

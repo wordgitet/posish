@@ -346,7 +346,6 @@ static bool try_tilde_expansion(const char *in, size_t *i,
     memcpy(name, in + name_start, name_end - name_start);
     name[name_end - name_start] = '\0';
     pw = getpwnam(name);
-    arena_maybe_free(name);
     if (pw == NULL || pw->pw_dir == NULL) {
       return false;
     }
@@ -543,14 +542,12 @@ static int run_arithmetic_expansion(const char *expr, char **out_value,
   }
 
   if (arith_eval(expanded_expr, state, &value) != 0) {
-    arena_maybe_free(expanded_expr);
     return -1;
   }
 
   snprintf(text, sizeof(text), "%ld", value);
   *out_value = arena_xstrdup(text);
   *status_out = state->cmdsub_performed ? state->last_cmdsub_status : 0;
-  arena_maybe_free(expanded_expr);
   return 0;
 }
 
@@ -602,7 +599,6 @@ static int append_parameter(const char *name, size_t nlen,
         } else {
           append_str(buf, len, cap, num);
         }
-        arena_maybe_free(tmp);
         return 0;
     }
 
@@ -614,7 +610,6 @@ static int append_parameter(const char *name, size_t nlen,
         } else {
           append_str(buf, len, cap, num);
         }
-        arena_maybe_free(tmp);
         return 0;
     }
 
@@ -629,7 +624,6 @@ static int append_parameter(const char *name, size_t nlen,
               append_str(buf, len, cap, num);
             }
         }
-        arena_maybe_free(tmp);
         return 0;
     }
 
@@ -671,7 +665,6 @@ static int append_parameter(const char *name, size_t nlen,
                 }
                 append_str(buf, len, cap, state->positional_params[i]);
             }
-            arena_maybe_free(tmp);
             return 0;
         }
 
@@ -699,7 +692,6 @@ static int append_parameter(const char *name, size_t nlen,
               append_str(buf, len, cap, state->positional_params[i]);
             }
         }
-        arena_maybe_free(tmp);
         return 0;
     }
 
@@ -716,7 +708,6 @@ static int append_parameter(const char *name, size_t nlen,
                 append_str(buf, len, cap, state->positional_params[i]);
             }
         }
-        arena_maybe_free(tmp);
         return 0;
     }
 
@@ -729,7 +720,6 @@ static int append_parameter(const char *name, size_t nlen,
               append_str(buf, len, cap, val);
             }
         }
-        arena_maybe_free(tmp);
         return 0;
     }
 
@@ -763,7 +753,6 @@ static int append_parameter(const char *name, size_t nlen,
         return -1;
     }
 
-    arena_maybe_free(tmp);
     return 0;
 }
 
@@ -809,7 +798,6 @@ static char *maybe_tilde_expand_fragment(char *expanded,
   out = arena_xmalloc(hlen + slen);
   memcpy(out, home, hlen);
   memcpy(out + hlen, expanded + 1, slen);
-  arena_maybe_free(expanded);
   return out;
 }
 
@@ -829,7 +817,6 @@ static int append_expanded_fragment(const char *expr, size_t start, size_t elen,
 
   rc = expand_token(word, state, &expanded_word, in_double_quotes, false);
   if (rc != 0) {
-    arena_maybe_free(word);
     return -1;
   }
 
@@ -840,8 +827,6 @@ static int append_expanded_fragment(const char *expr, size_t start, size_t elen,
    * would leak marker bytes for nested braced expansions.
    */
   append_str(buf, len, cap, expanded_word);
-  arena_maybe_free(expanded_word);
-  arena_maybe_free(word);
   return 0;
 }
 
@@ -859,7 +844,6 @@ static int expand_fragment_to_string(const char *expr, size_t start, size_t elen
   word[wlen] = '\0';
 
   rc = expand_token(word, state, &expanded, in_double_quotes, false);
-  arena_maybe_free(word);
   if (rc != 0) {
     return rc;
   }
@@ -1808,11 +1792,9 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
                                                   &expr_len);
           if (append_braced_parameter(expr, expr_len, state, &buf, &len, &cap,
                                       dquote_mode || quote == '"') != 0) {
-            arena_maybe_free(expr);
-            arena_maybe_free(buf);
-            return -1;
-          }
-          arena_maybe_free(expr);
+          arena_maybe_free(buf);
+          return -1;
+        }
         }
         i = j + 1;
         continue;
@@ -1861,7 +1843,6 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
           expr[j - (next + 2)] = '\0';
 
           if (run_arithmetic_expansion(expr, &value, &cmd_status, state) != 0) {
-            arena_maybe_free(expr);
             arena_maybe_free(buf);
             return -1;
           }
@@ -1869,8 +1850,6 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
                                 dquote_mode || quote == '"');
           state->last_cmdsub_status = cmd_status;
           state->cmdsub_performed = true;
-          arena_maybe_free(value);
-          arena_maybe_free(expr);
           i = j + 2;
           continue;
         }
@@ -1891,7 +1870,6 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
         cmd[j - (next + 1)] = '\0';
 
           if (command_subst_run(state, cmd, &value, &cmd_status) != 0) {
-            arena_maybe_free(cmd);
             arena_maybe_free(buf);
             return -1;
           }
@@ -1900,8 +1878,6 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
                                 dquote_mode || quote == '"');
           state->last_cmdsub_status = cmd_status;
           state->cmdsub_performed = true;
-          arena_maybe_free(value);
-        arena_maybe_free(cmd);
         i = j + 1;
         continue;
       }
@@ -1968,11 +1944,9 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
       memcpy(cmd, in + i + 1, j - (i + 1));
       cmd[j - (i + 1)] = '\0';
       normalized_cmd = command_subst_normalize_backquote(cmd);
-      arena_maybe_free(cmd);
       cmd = normalized_cmd;
 
       if (command_subst_run(state, cmd, &value, &cmd_status) != 0) {
-        arena_maybe_free(cmd);
         arena_maybe_free(buf);
         return -1;
       }
@@ -1981,8 +1955,6 @@ static int expand_token(const char *in, struct shell_state *state, char **out,
                             dquote_mode || quote == '"');
       state->last_cmdsub_status = cmd_status;
       state->cmdsub_performed = true;
-      arena_maybe_free(value);
-      arena_maybe_free(cmd);
       i = j + 1;
       continue;
     }
@@ -2110,11 +2082,9 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
                                                   &expr_len);
           if (append_braced_parameter(expr, expr_len, state, &buf, &len, &cap,
                                       true) != 0) {
-            arena_maybe_free(expr);
-            arena_maybe_free(buf);
-            return -1;
-          }
-          arena_maybe_free(expr);
+          arena_maybe_free(buf);
+          return -1;
+        }
         }
         i = j + 1;
         continue;
@@ -2163,15 +2133,12 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
           expr[j - (i + 3)] = '\0';
 
           if (run_arithmetic_expansion(expr, &value, &cmd_status, state) != 0) {
-            arena_maybe_free(expr);
             arena_maybe_free(buf);
             return -1;
           }
           append_str(&buf, &len, &cap, value);
           state->last_cmdsub_status = cmd_status;
           state->cmdsub_performed = true;
-          arena_maybe_free(value);
-          arena_maybe_free(expr);
           i = j + 2;
           continue;
         }
@@ -2192,7 +2159,6 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
         cmd[j - (i + 2)] = '\0';
 
         if (command_subst_run(state, cmd, &value, &cmd_status) != 0) {
-          arena_maybe_free(cmd);
           arena_maybe_free(buf);
           return -1;
         }
@@ -2200,8 +2166,6 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
         append_str(&buf, &len, &cap, value);
         state->last_cmdsub_status = cmd_status;
         state->cmdsub_performed = true;
-        arena_maybe_free(value);
-        arena_maybe_free(cmd);
         i = j + 1;
         continue;
       }
@@ -2268,11 +2232,9 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
       memcpy(cmd, in + i + 1, j - (i + 1));
       cmd[j - (i + 1)] = '\0';
       normalized_cmd = command_subst_normalize_backquote(cmd);
-      arena_maybe_free(cmd);
       cmd = normalized_cmd;
 
       if (command_subst_run(state, cmd, &value, &cmd_status) != 0) {
-        arena_maybe_free(cmd);
         arena_maybe_free(buf);
         return -1;
       }
@@ -2280,8 +2242,6 @@ int expand_heredoc_text(const char *in, struct shell_state *state, char **out) {
       append_str(&buf, &len, &cap, value);
       state->last_cmdsub_status = cmd_status;
       state->cmdsub_performed = true;
-      arena_maybe_free(value);
-      arena_maybe_free(cmd);
       i = j + 1;
       continue;
     }

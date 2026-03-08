@@ -32,7 +32,7 @@ static void symbol_table_rehash(struct symbol_table *table, size_t bucket_count)
     struct symbol_node **buckets;
     struct symbol_node *node;
 
-    buckets = arena_alloc_in(NULL, sizeof(*buckets) * bucket_count);
+    buckets = heap_xmalloc(sizeof(*buckets) * bucket_count);
     memset(buckets, 0, sizeof(*buckets) * bucket_count);
 
     for (node = table->iter_head; node != NULL; node = node->iter_next) {
@@ -43,7 +43,7 @@ static void symbol_table_rehash(struct symbol_table *table, size_t bucket_count)
         buckets[bucket] = node;
     }
 
-    free(table->buckets);
+    heap_free(table->buckets);
     table->buckets = buckets;
     table->bucket_count = bucket_count;
 }
@@ -68,7 +68,7 @@ void symbol_table_destroy(struct symbol_table *table,
         node = next;
     }
 
-    free(table->buckets);
+    heap_free(table->buckets);
     table->buckets = NULL;
     table->bucket_count = 0;
     table->count = 0;

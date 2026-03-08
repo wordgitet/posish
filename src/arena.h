@@ -34,6 +34,11 @@ char *arena_strdup_in(struct arena *arena, const char *s);
 bool arena_owns_pointer(const void *ptr);
 void arena_maybe_free(void *ptr);
 
+void *heap_xmalloc(size_t size);
+void *heap_xrealloc(void *ptr, size_t size);
+char *heap_xstrdup(const char *s);
+void heap_free(void *ptr);
+
 void *arena_xmalloc(size_t size);
 void *arena_xrealloc(void *ptr, size_t size);
 char *arena_xstrdup(const char *s);
