@@ -21,6 +21,7 @@
 #include "redir.h"
 #include "signals.h"
 #include "simple_command.h"
+#include "spawn.h"
 #include "trace.h"
 #include "vars.h"
 
@@ -35,9 +36,6 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
-typedef int (*child_body_runner)(struct shell_state *state,
-                                 const void *payload);
 
 static int execute_program_text(struct shell_state *state, const char *source);
 static int execute_program_text_internal(struct shell_state *state,
@@ -56,6 +54,8 @@ static int run_simple_ast(struct shell_state *state,
 static void maybe_trigger_errexit(struct shell_state *state, int status);
 static int execute_command_atom(struct shell_state *state, const char *source,
                                 bool allow_builtin);
+static int run_program_text_child_body(struct shell_state *state,
+                                       const void *payload);
 static bool parse_function_definition(const char *source, char **name_out,
                                       char **body_out);
 static bool keyword_boundary(char ch);
@@ -69,21 +69,9 @@ static bool ast_node_is_ast_owned(const struct ast_node *node);
 static bool try_run_ast_compound_command(struct shell_state *state,
                                          const char *source, bool allow_builtin,
                                          int *status_out);
-static void exec_child_payload(struct shell_state *parent_state,
-                               child_body_runner run_body, const void *payload);
 static void exec_child_command(struct shell_state *parent_state,
                                const char *source);
 static const struct program_text_hooks *get_program_text_hooks(void);
-
-static void exit_shell_child_status(int status) {
-  int signo;
-
-  if (shell_status_should_relay_signal(status, &signo)) {
-    signal(signo, SIG_DFL);
-    raise(signo);
-  }
-  _exit(status);
-}
 
 static char *dup_trimmed_slice(const char *src, size_t start, size_t end) {
   char *out;
@@ -551,87 +539,8 @@ static bool unwrap_brace_group(const char *source, char **inner_out,
 
 static int run_subshell_command(struct shell_state *parent_state,
                                 const char *source) {
-  pid_t pid;
-  int status;
-
-  trace_log(POSISH_TRACE_SIGNALS, "spawn subshell");
-  pid = fork();
-  if (pid < 0) {
-    perror("fork");
-    return 1;
-  }
-
-  if (pid == 0) {
-    struct shell_state local_state;
-    int st;
-
-    if (parent_state->monitor_mode) {
-      (void)setpgid(0, 0);
-    }
-
-    local_state = *parent_state;
-    arena_init(&local_state.arena_perm,
-               parent_state->arena_perm.default_block_size);
-    arena_init(&local_state.arena_script,
-               parent_state->arena_script.default_block_size);
-    arena_init(&local_state.arena_cmd,
-               parent_state->arena_cmd.default_block_size);
-    arena_set_current(&local_state.arena_perm);
-    local_state.should_exit = false;
-    local_state.exit_status = 0;
-    local_state.running_signal_trap = false;
-    local_state.running_exit_trap = false;
-    local_state.main_context = false;
-    signals_reset_traps_for_child(&local_state);
-    signals_reset_exit_trap_for_child(&local_state);
-
-    st = execute_program_text(&local_state, source);
-    shell_run_pending_traps(&local_state);
-    shell_run_exit_trap(&local_state);
-    if (local_state.should_exit) {
-      st = local_state.exit_status;
-    }
-    fflush(NULL);
-    exit_shell_child_status(st);
-  }
-
-  if (parent_state->monitor_mode) {
-    (void)setpgid(pid, pid);
-  }
-
-  for (;;) {
-    if (waitpid(pid, &status, WUNTRACED) < 0) {
-      if (errno == EINTR) {
-        /*
-         * Defer trap execution until the foreground subshell finishes.
-         * This keeps trap side effects ordered after child output.
-         */
-        continue;
-      }
-      perror("waitpid");
-      return 1;
-    }
-    break;
-  }
-
-  if (WIFEXITED(status)) {
-    trace_log(POSISH_TRACE_SIGNALS, "subshell pid=%ld exited=%d", (long)pid,
-              WEXITSTATUS(status));
-    return WEXITSTATUS(status);
-  }
-  if (WIFSTOPPED(status)) {
-    jobs_track_job(pid, &pid, 1, pid, source, true);
-    jobs_note_process_status(pid, status);
-    trace_log(POSISH_TRACE_SIGNALS, "subshell pid=%ld stopped sig=%d",
-              (long)pid, WSTOPSIG(status));
-    return shell_status_from_wait_status(status);
-  }
-  if (WIFSIGNALED(status)) {
-    trace_log(POSISH_TRACE_SIGNALS, "subshell pid=%ld signaled sig=%d",
-              (long)pid, WTERMSIG(status));
-    return shell_status_from_wait_status(status);
-  }
-  return 1;
+  return spawn_run_subshell_payload(parent_state, source, source,
+                                    run_program_text_child_body);
 }
 
 static int run_group_with_redirection_source(struct shell_state *state,
@@ -659,94 +568,8 @@ static int run_group_with_redirection_source(struct shell_state *state,
 }
 
 static int run_async_list(struct shell_state *state, const char *source) {
-  pid_t pid;
-
-  trace_log(POSISH_TRACE_SIGNALS, "spawn async list source=%s", source);
-  pid = fork();
-  if (pid < 0) {
-    perror("fork");
-    return 1;
-  }
-
-  if (pid == 0) {
-    struct shell_state local_state;
-    int st;
-    int nullfd;
-
-    if (state->monitor_mode) {
-      (void)setpgid(0, 0);
-    }
-
-    local_state = *state;
-    arena_init(&local_state.arena_perm, state->arena_perm.default_block_size);
-    arena_init(&local_state.arena_script,
-               state->arena_script.default_block_size);
-    arena_init(&local_state.arena_cmd, state->arena_cmd.default_block_size);
-    arena_set_current(&local_state.arena_perm);
-    local_state.should_exit = false;
-    local_state.exit_status = 0;
-    local_state.running_signal_trap = false;
-    local_state.running_exit_trap = false;
-    local_state.in_async_context = true;
-    local_state.main_context = false;
-    signals_reset_traps_for_child(&local_state);
-    signals_reset_exit_trap_for_child(&local_state);
-
-    /*
-     * With job control disabled (+m), asynchronous lists run with INT/QUIT
-     * ignored until explicitly changed by a trap inside that async context.
-     */
-#ifdef SIGINT
-    if (!state->monitor_mode) {
-      (void)signals_set_ignored(SIGINT);
-      local_state.signal_cleared[SIGINT] = false;
-    }
-#endif
-#ifdef SIGQUIT
-    if (!state->monitor_mode) {
-      (void)signals_set_ignored(SIGQUIT);
-      local_state.signal_cleared[SIGQUIT] = false;
-    }
-#endif
-    /*
-     * In non-monitor mode (+m), asynchronous lists read from /dev/null.
-     * This intentionally overrides inherited stdin redirections.
-     */
-    if (!state->monitor_mode) {
-      nullfd = open("/dev/null", O_RDONLY);
-      if (nullfd >= 0) {
-        if (dup2(nullfd, STDIN_FILENO) < 0) {
-          perror("dup2");
-          _exit(1);
-        }
-        if (nullfd != STDIN_FILENO) {
-          close(nullfd);
-        }
-      }
-    }
-
-    /*
-     * Async control operator applies to a full command list, not just a
-     * single and-or segment.
-     */
-    st = execute_program_text(&local_state, source);
-    shell_run_pending_traps(&local_state);
-    shell_run_exit_trap(&local_state);
-    if (local_state.should_exit) {
-      st = local_state.exit_status;
-    }
-    fflush(NULL);
-    exit_shell_child_status(st);
-  }
-
-  if (state->monitor_mode) {
-    (void)setpgid(pid, pid);
-  }
-
-  state->last_async_pid = pid;
-  jobs_track_async(pid, pid, source);
-  trace_log(POSISH_TRACE_SIGNALS, "async list pid=%ld", (long)pid);
-  return 0;
+  return spawn_run_async_payload(state, source, source,
+                                 run_program_text_child_body);
 }
 
 static int run_for_ast(struct shell_state *state, const struct ast_node *node) {
@@ -1188,6 +1011,14 @@ static int run_command_child_body(struct shell_state *state,
   return execute_command_atom(state, source, true);
 }
 
+static int run_program_text_child_body(struct shell_state *state,
+                                       const void *payload) {
+  const char *source;
+
+  source = payload;
+  return execute_program_text(state, source);
+}
+
 static int run_ast_child_body(struct shell_state *state, const void *payload) {
   const struct ast_node *node;
 
@@ -1195,40 +1026,9 @@ static int run_ast_child_body(struct shell_state *state, const void *payload) {
   return execute_ast_node(state, node, true);
 }
 
-static void exec_child_payload(struct shell_state *parent_state,
-                               child_body_runner run_body,
-                               const void *payload) {
-  struct shell_state local_state;
-  struct arena_mark child_mark;
-  int status;
-
-  local_state = *parent_state;
-  arena_init(&local_state.arena_perm,
-             parent_state->arena_perm.default_block_size);
-  arena_init(&local_state.arena_script,
-             parent_state->arena_script.default_block_size);
-  arena_init(&local_state.arena_cmd,
-             parent_state->arena_cmd.default_block_size);
-  arena_set_current(&local_state.arena_cmd);
-  arena_mark_take(&local_state.arena_cmd, &child_mark);
-  local_state.should_exit = false;
-  local_state.exit_status = 0;
-  local_state.running_signal_trap = false;
-  local_state.running_exit_trap = false;
-  local_state.main_context = false;
-
-  status = run_body(&local_state, payload);
-  arena_mark_rewind(&local_state.arena_cmd, &child_mark);
-  if (local_state.should_exit) {
-    status = local_state.exit_status;
-  }
-  fflush(NULL);
-  _exit(status);
-}
-
 static void exec_child_command(struct shell_state *parent_state,
                                const char *source) {
-  exec_child_payload(parent_state, run_command_child_body, source);
+  spawn_exec_child_payload(parent_state, run_command_child_body, source);
 }
 
 static const struct program_text_hooks *get_program_text_hooks(void) {
@@ -1245,86 +1045,12 @@ static const struct program_text_hooks *get_program_text_hooks(void) {
 
 static void exec_child_ast_node(struct shell_state *parent_state,
                                 const struct ast_node *node) {
-  exec_child_payload(parent_state, run_ast_child_body, node);
+  spawn_exec_child_payload(parent_state, run_ast_child_body, node);
 }
 
 static int run_async_ast_node(struct shell_state *state,
                               const struct ast_node *node) {
-  pid_t pid;
-
-  trace_log(POSISH_TRACE_SIGNALS, "spawn async ast source=%s", node->source);
-  pid = fork();
-  if (pid < 0) {
-    perror("fork");
-    return 1;
-  }
-
-  if (pid == 0) {
-    struct shell_state local_state;
-    int st;
-    int nullfd;
-
-    if (state->monitor_mode) {
-      (void)setpgid(0, 0);
-    }
-
-    local_state = *state;
-    arena_init(&local_state.arena_perm, state->arena_perm.default_block_size);
-    arena_init(&local_state.arena_script,
-               state->arena_script.default_block_size);
-    arena_init(&local_state.arena_cmd, state->arena_cmd.default_block_size);
-    arena_set_current(&local_state.arena_perm);
-    local_state.should_exit = false;
-    local_state.exit_status = 0;
-    local_state.running_signal_trap = false;
-    local_state.running_exit_trap = false;
-    local_state.in_async_context = true;
-    local_state.main_context = false;
-    signals_reset_traps_for_child(&local_state);
-    signals_reset_exit_trap_for_child(&local_state);
-#ifdef SIGINT
-    if (!state->monitor_mode) {
-      (void)signals_set_ignored(SIGINT);
-      local_state.signal_cleared[SIGINT] = false;
-    }
-#endif
-#ifdef SIGQUIT
-    if (!state->monitor_mode) {
-      (void)signals_set_ignored(SIGQUIT);
-      local_state.signal_cleared[SIGQUIT] = false;
-    }
-#endif
-    if (!state->monitor_mode) {
-      nullfd = open("/dev/null", O_RDONLY);
-      if (nullfd >= 0) {
-        if (dup2(nullfd, STDIN_FILENO) < 0) {
-          perror("dup2");
-          _exit(1);
-        }
-        if (nullfd != STDIN_FILENO) {
-          close(nullfd);
-        }
-      }
-    }
-
-    st = execute_ast_node(&local_state, node, true);
-    shell_run_pending_traps(&local_state);
-    shell_run_exit_trap(&local_state);
-    if (local_state.should_exit) {
-      st = local_state.exit_status;
-    }
-    fflush(NULL);
-    exit_shell_child_status(st);
-  }
-
-  if (state->monitor_mode) {
-    (void)setpgid(pid, pid);
-  }
-
-  state->last_async_pid = pid;
-  jobs_track_async(pid, pid, node->source);
-  trace_log(POSISH_TRACE_SIGNALS, "async ast pid=%ld", (long)pid);
-  return 0;
+  return spawn_run_async_payload(state, node, node->source, run_ast_child_body);
 }
 
 static int execute_ast_pipeline(struct shell_state *state,
