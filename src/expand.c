@@ -458,8 +458,27 @@ static bool token_has_glob_meta(const char *token) {
       i += 2;
       continue;
     }
-    if (token[i] == '*' || token[i] == '?' || token[i] == '[') {
+    if (token[i] == '*' || token[i] == '?') {
       return true;
+    }
+    if (token[i] == '[') {
+      size_t j;
+
+      j = i + 1;
+      while (token[j] != '\0') {
+        if (token[j] == QUOTED_LITERAL_PREFIX && token[j + 1] != '\0') {
+          j += 2;
+          continue;
+        }
+        if (token[j] == '\\' && token[j + 1] != '\0') {
+          j += 2;
+          continue;
+        }
+        if (token[j] == ']') {
+          return true;
+        }
+        j++;
+      }
     }
     i++;
   }
