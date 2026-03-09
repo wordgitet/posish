@@ -98,8 +98,6 @@ test: check-yash-runner tester $(TEST_RESULTS)
 			exit 1; \
 		fi)
 
-test-posix: test
-
 test-posix-nosignal: check-yash-runner tester
 	@$(MAKE) test \
 		TEST_SOURCES="$(POSIX_NOSIGNAL_TEST_SOURCES)" \
@@ -146,18 +144,6 @@ test-signal-contained: check-yash-runner tester
 		--kill-after "$(SIGNAL_FILE_TIMEOUT_KILL)" \
 		--summary "$(SIGNAL_SUMMARY)"
 
-test-posix-contained: check-yash-runner tester
-	@$(SHELL) ../../scripts/run-posix-fulltruth-contained.sh \
-		--tests-dir . \
-		--testee "$(TESTEE)" \
-		--yash-runner "$(YASH_RUNNER)" \
-		--test-sources "$(POSIX_TEST_SOURCES)" \
-		--testcase-timeout "$(TESTCASE_TIMEOUT)" \
-		--file-timeout "$(FILE_TIMEOUT)" \
-		--kill-after "$(KILL_AFTER)" \
-		--summary "$(FULLTRUTH_SUMMARY)" \
-		--classification-csv "$(FULLTRUTH_CLASSIFICATION_CSV)"
-
 test-regressions: check-yash-runner tester
 	@$(MAKE) -B test \
 		TEST_SOURCES="$(REGRESSION_TEST_SOURCES)" \
@@ -195,4 +181,4 @@ clean:
 	rm -fr $(BYPRODUCTS)
 
 .IGNORE: ptwrap
-.PHONY: check-yash-runner test test-posix test-posix-nosignal test-smoke test-one test-stop test-signal test-signal-contained test-posix-contained test-regressions tester clean
+.PHONY: check-yash-runner test test-posix-nosignal test-smoke test-one test-stop test-signal test-signal-contained test-regressions tester clean

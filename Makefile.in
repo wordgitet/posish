@@ -118,7 +118,7 @@ $(TARGET): $(OBJ)
 
 test-posix: $(TARGET)
 	@if [ -n "$(TESTEE)" ]; then testee="$(TESTEE)"; else testee="`pwd`/$(TARGET)"; fi; \
-	$(MAKE) -C tests/posix test-posix \
+	$(MAKE) -C tests/posix test \
 		YASH_RUNNER="$(YASH_RUNNER)" \
 		TESTEE="$$testee" \
 		TESTCASE_TIMEOUT="$(TESTCASE_TIMEOUT)"

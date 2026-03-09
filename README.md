@@ -2,48 +2,95 @@
 
 `posish` is a work-in-progress POSIX shell implementation in C11.
 
-Reference manual:
+For the command reference, read:
 
 ```sh
 man ./posish.1
 ```
 
-Current state:
-- Compilable shell core with iterative POSIX parser/executor implementation.
-- POSIX test harness vendored from yash (`*-p.tst` only).
-- Autoconf-based build configuration with portable makefiles.
+## Build
 
-## Configure and Build
+Typical local build:
 
 ```sh
 autoreconf -fi
 ./configure
-make
+make -j"$(nproc)"
 ```
 
-If the generated configure cache points at a stale or host-inappropriate
-compiler, override `CC` explicitly for local builds:
+If you want tracing support:
+
+```sh
+./configure --enable-trace
+make -j"$(nproc)"
+```
+
+If Autoconf cached the wrong compiler, rebuild with an explicit `CC`:
 
 ```sh
 make -B all CC=cc
 ```
 
-Enable tracing hooks at configure time (disabled by default):
-
-```sh
-./configure --enable-trace
-```
-
-Binary:
+The shell binary is:
 
 ```sh
 ./build/posish
 ```
 
-## Android (Termux)
+## Test
 
-`posish` can be built on Termux using `gcc` without committing Android-specific
-paths into generated files.
+The imported POSIX harness runs through `yash`. If `yash` was not found during
+configure, pass `YASH_RUNNER` explicitly.
+
+Common targets:
+
+```sh
+make test-smoke YASH_RUNNER=/absolute/path/to/yash
+make test-regressions YASH_RUNNER=/absolute/path/to/yash
+make test-posix-nosignal YASH_RUNNER=/absolute/path/to/yash
+make test-stop YASH_RUNNER=/absolute/path/to/yash
+make test-signal YASH_RUNNER=/absolute/path/to/yash
+make test-posix YASH_RUNNER=/absolute/path/to/yash
+```
+
+You can also point the harness at another shell binary:
+
+```sh
+make test-posix TESTEE=/absolute/path/to/shell YASH_RUNNER=/absolute/path/to/yash
+```
+
+Useful notes:
+
+- `test-signal` and `test-stop` default to truth-mode timing for better signal semantics.
+- `test-signal-contained` adds an outer timeout and reports per-file `PASS`, `PARTIAL_FAIL`, `FULL_FAIL`, `TIMEOUT`, or `MISSING`.
+- `make metrics` appends pass-rate data to `tmp/metrics/posix.csv`.
+
+## Runtime Notes
+
+Current startup-file behavior is user-scoped only:
+
+- interactive shell: `ENV`, then `~/.posishrc`
+- login shell: `~/.posish_profile`
+- interactive login shell: `~/.posish_profile`, then `ENV`, then `~/.posishrc`
+- non-interactive `-c` and script execution: no startup files
+- non-interactive login shell: `~/.posish_profile`
+
+`posish` does not currently load system-wide startup files such as `/etc/profile`.
+
+Interactive defaults:
+
+- `PS1='\w \$ '`
+- `PS2='> '`
+
+When tracing is enabled at configure time, runtime tracing is controlled with:
+
+```sh
+POSISH_TRACE=signals,jobs,traps
+```
+
+## Termux
+
+`posish` builds on Termux with:
 
 ```sh
 pkg install build-essential autoconf automake
@@ -53,126 +100,7 @@ make -j"$(nproc)"
 make install
 ```
 
-## Run Tests
-
-If `yash` is not discoverable at configure time, pass `YASH_RUNNER` explicitly:
-
-```sh
-make test-smoke CC=cc YASH_RUNNER=/absolute/path/to/yash
-make test-posix CC=cc YASH_RUNNER=/absolute/path/to/yash
-make test-stop CC=cc YASH_RUNNER=/absolute/path/to/yash
-make test-signal CC=cc YASH_RUNNER=/absolute/path/to/yash
-make test-regressions CC=cc YASH_RUNNER=/absolute/path/to/yash
-```
-
-Signal-specific notes:
-- `test-signal` uses `TESTCASE_TIMEOUT_SIGNAL=0` by default to avoid
-  per-testcase timeout distortion of signal semantics.
-- `test-signal-contained` adds an outer file timeout and always reports
-  `PASS/FAIL/TIMEOUT` per signal test file.
-
-```sh
-make test-signal-contained
-```
-- `PARTIAL_FAIL`: both `OK>0` and `ERROR>0`.
-- `FULL_FAIL`: no passing assertions for that file or non-zero command with parsed failures.
-- `TIMEOUT`: outer file-level timeout reached.
-- `MISSING`: result file was not produced.
-
-Or explicitly set a testee path:
-
-```sh
-make test-posix TESTEE=/absolute/path/to/shell
-```
-
-`test-posix` requires system `yash` as the runner for `run-test.sh`.
-If missing, install the latest yash (recommended: build from source) or set:
-
-```sh
-make test-posix CC=cc YASH_RUNNER=/absolute/path/to/yash
-```
-
-Append pass-rate metrics to `tmp/metrics/posix.csv`:
-
-```sh
-make metrics
-```
-
-## Local Notes
-
-Some local runs can leave behind permissioned `tests/posix/tmp.*` artifacts.
-If `make clean` fails because of those directories, prefer forcing a rebuild:
-
-```sh
-make -B all CC=cc
-```
-
-## Startup Behavior
-
-For the full invocation and shell-behavior reference, see `posish.1`.
-
-`posish` currently uses user-scoped startup files only.
-No system-wide startup files such as `/etc/profile` are loaded yet.
-
-Startup policy:
-
-- interactive shell:
-  - loads `ENV` if set
-  - then loads `~/.posishrc` if `HOME` is set
-- login shell:
-  - loads `~/.posish_profile` if `HOME` is set
-- interactive login shell:
-  - loads `~/.posish_profile`
-  - then `ENV`
-  - then `~/.posishrc`
-- non-interactive `-c` and script execution:
-  - load no startup files
-- non-interactive login shell:
-  - loads `~/.posish_profile` only
-
-Login shell detection follows the usual `argv[0][0] == '-'` convention.
-
-Prompt defaults remain interactive-only:
-
-- `PS1='\w \$ '` when unset
-- `PS2='> '` when unset
-
-Shell-owned variable baseline:
-
-- `IFS` is initialized to the default `<space><tab><newline>` baseline.
-- `OPTIND` starts at `1` and `OPTARG` starts unset.
-- `PATH`, `HOME`, `PWD`, `OLDPWD`, and `ENV` are preserved from the parent
-  environment unless normal shell execution updates them.
-
-## Allocator Policy
-
-`posish` uses a real arena allocator for runtime ownership control:
-- `arena_perm`: process lifetime
-- `arena_script`: per top-level script/program
-- `arena_cmd`: per command/snippet
-
-Runtime code should allocate through allocator wrappers instead of direct
-`malloc`/`realloc`/`free`:
-- `arena_xmalloc`, `arena_xrealloc`, `arena_xstrdup`
-- `arena_alloc_in`, `arena_realloc_in`, `arena_maybe_free`
-
-Hybrid behavior is intentional:
-- `arena == NULL` in `arena_alloc_in`/`arena_realloc_in` means plain heap
-  semantics via wrappers.
-- `arena_maybe_free` frees only non-arena pointers and no-ops for arena-owned
-  pointers.
-
-Direct raw allocation calls are intentionally limited to:
-- `src/arena.c` allocator internals
-
-When built with `--enable-trace`, runtime tracing is controlled by:
-
-```sh
-POSISH_TRACE=signals,jobs,traps
-```
-
 ## License
 
-- Shell implementation in this repository: 0BSD (`LICENSE`).
-- Vendored third-party test files under `tests/posix/` keep their original
-  upstream licenses. See `THIRD_PARTY_NOTICES.md`.
+- Shell implementation in this repository: 0BSD (`LICENSE`)
+- Vendored third-party tests under `tests/posix/`: see `THIRD_PARTY_NOTICES.md`
