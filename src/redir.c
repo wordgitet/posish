@@ -80,7 +80,7 @@ int fd_backup_save(struct fd_backup_vec *backups, int fd) {
     b.saved_fd = fcntl(fd, F_DUPFD, 10);
     if (b.saved_fd < 0) {
         if (errno != EBADF) {
-            perror("dup");
+            posish_error_errno("dup");
             return -1;
         }
         b.was_open = false;
@@ -104,7 +104,7 @@ void fd_backup_restore(struct fd_backup_vec *backups) {
         b = &backups->items[i - 1];
         if (b->was_open) {
             if (dup2(b->saved_fd, b->fd) < 0) {
-                perror("dup2");
+                posish_error_errno("dup2");
             }
             close(b->saved_fd);
         } else {
@@ -151,13 +151,13 @@ static int expand_heredoc_text_isolated(const char *input,
     int status;
 
     if (pipe(pipefd) != 0) {
-        perror("pipe");
+        posish_error_errno("pipe");
         return -1;
     }
 
     pid = fork();
     if (pid < 0) {
-        perror("fork");
+        posish_error_errno("fork");
         close(pipefd[0]);
         close(pipefd[1]);
         return -1;
@@ -201,7 +201,7 @@ static int expand_heredoc_text_isolated(const char *input,
             if (errno == EINTR) {
                 continue;
             }
-            perror("read");
+            posish_error_errno("read");
             close(pipefd[0]);
             return -1;
         }
@@ -218,7 +218,7 @@ static int expand_heredoc_text_isolated(const char *input,
             if (errno == EINTR) {
                 continue;
             }
-            perror("waitpid");
+            posish_error_errno("waitpid");
             return -1;
         }
         break;
@@ -277,11 +277,11 @@ static int materialize_heredoc_fd(struct shell_state *state,
     }
     fd = create_heredoc_fd();
     if (fd < 0) {
-        perror("heredoc fd");
+        posish_error_errno("heredoc fd");
         return -1;
     }
     if (write_all(fd, text, strlen(text)) != 0 || lseek(fd, 0, SEEK_SET) < 0) {
-        perror("heredoc");
+        posish_error_errno("heredoc");
         close(fd);
         return -1;
     }
@@ -455,7 +455,7 @@ int apply_one_redirection(struct shell_state *state,
     if (opened_fd >= 0) {
         if (opened_fd != redir->target_fd) {
             if (dup2(opened_fd, redir->target_fd) < 0) {
-                perror("dup2");
+                posish_error_errno("dup2");
                 close(opened_fd);
                 return 1;
             }
@@ -466,12 +466,12 @@ int apply_one_redirection(struct shell_state *state,
 
     if (redir->kind == REDIR_OPEN_READ || redir->kind == REDIR_OPEN_RDWR ||
         redir->kind == REDIR_OPEN_WRITE || redir->kind == REDIR_OPEN_APPEND) {
-        perror(redir->path);
+        posish_error_errno(redir->path);
         return 1;
     }
 
     if (redir->kind == REDIR_HEREDOC) {
-        perror("heredoc");
+        posish_error_errno("heredoc");
         return 1;
     }
 
@@ -480,28 +480,28 @@ int apply_one_redirection(struct shell_state *state,
 
         flags = fcntl(redir->source_fd, F_GETFL);
         if (flags < 0) {
-            perror("fcntl");
+            posish_error_errno("fcntl");
             return 1;
         }
         if (redir->kind == REDIR_DUP_IN && (flags & O_ACCMODE) == O_WRONLY) {
             errno = EBADF;
-            perror("dup2");
+            posish_error_errno("dup2");
             return 1;
         }
         if (redir->kind == REDIR_DUP_OUT && (flags & O_ACCMODE) == O_RDONLY) {
             errno = EBADF;
-            perror("dup2");
+            posish_error_errno("dup2");
             return 1;
         }
         if (dup2(redir->source_fd, redir->target_fd) < 0) {
-            perror("dup2");
+            posish_error_errno("dup2");
             return 1;
         }
         return 0;
     }
 
     if (close(redir->target_fd) != 0 && errno != EBADF) {
-        perror("close");
+        posish_error_errno("close");
         return 1;
     }
     return 0;

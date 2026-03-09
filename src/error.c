@@ -4,6 +4,7 @@
 
 #include "error.h"
 
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 
@@ -11,6 +12,15 @@ static void posish_verrorf(const char *fmt, va_list ap) {
   fputs("posish: ", stderr);
   vfprintf(stderr, fmt, ap);
   fputc('\n', stderr);
+}
+
+void posish_error_errno(const char *context) {
+  int saved_errno;
+
+  saved_errno = errno;
+  fputs("posish: ", stderr);
+  errno = saved_errno;
+  perror(context);
 }
 
 static void posish_verror_at(const char *source, size_t line, size_t col,

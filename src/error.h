@@ -10,6 +10,7 @@
 #include <stddef.h>
 
 void posish_errorf(const char *fmt, ...);
+void posish_error_errno(const char *context);
 void posish_error_at(const char *source, size_t line, size_t col, const char *klass,
                      const char *fmt, ...);
 void posish_error_idf(enum posish_error_id id, ...);

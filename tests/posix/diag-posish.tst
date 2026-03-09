@@ -41,4 +41,16 @@ __OUT__
 posish: invalid file descriptor redirection: foo
 __ERR__
 
+test_oE -e 0 'system errno diagnostics keep the posish prefix' \
+    -c '
+        err=$("$TESTEE" -c "echo hi >./_no_such_dir_/file" 2>&1 >/dev/null || :)
+        case $err in
+            "posish: ./_no_such_dir_/file: "*) printf "%s\n" ok ;;
+            *) printf "%s\n" "$err"; exit 1 ;;
+        esac
+    '
+__IN__
+ok
+__OUT__
+
 # vim: set ft=sh ts=8 sts=4 sw=4 et:
