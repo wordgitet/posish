@@ -29,6 +29,7 @@ SRC = \
 	src/heredoc_command.c \
 	src/command_subst.c \
 	src/field_split.c \
+	src/text_helpers.c \
 	src/program_text.c \
 	src/simple_command.c \
 	src/spawn.c \
@@ -65,6 +66,7 @@ OBJ = \
 	src/heredoc_command.o \
 	src/command_subst.o \
 	src/field_split.o \
+	src/text_helpers.o \
 	src/program_text.o \
 	src/simple_command.o \
 	src/spawn.o \

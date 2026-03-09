@@ -9,6 +9,7 @@
 #include "compound_parse.h"
 #include "exec.h"
 #include "jobs.h"
+#include "text_helpers.h"
 #include "vars.h"
 
 #include <ctype.h>
@@ -29,39 +30,6 @@ struct strip_heredoc_marker {
 
 static void *xrealloc(void *ptr, size_t size) {
   return arena_xrealloc(ptr, size);
-}
-
-static char *dup_trimmed_slice(const char *src, size_t start, size_t end) {
-  char *out;
-  size_t len;
-
-  while (start < end && isspace((unsigned char)src[start])) {
-    start++;
-  }
-  while (end > start && isspace((unsigned char)src[end - 1])) {
-    end--;
-  }
-
-  len = end - start;
-  out = arena_xmalloc(len + 1);
-  if (len > 0) {
-    memcpy(out, src + start, len);
-  }
-  out[len] = '\0';
-  return out;
-}
-
-static char *dup_slice(const char *src, size_t start, size_t end) {
-  char *out;
-  size_t len;
-
-  len = end - start;
-  out = arena_xmalloc(len + 1);
-  if (len > 0) {
-    memcpy(out, src + start, len);
-  }
-  out[len] = '\0';
-  return out;
 }
 
 char *program_text_collapse_line_continuations(const char *source) {
@@ -478,69 +446,6 @@ static char *strip_comments(const char *src) {
   return out;
 }
 
-static bool is_name_start_char(char ch) {
-  return isalpha((unsigned char)ch) || ch == '_';
-}
-
-static bool is_name_char(char ch) {
-  return isalnum((unsigned char)ch) || ch == '_';
-}
-
-static bool keyword_boundary(char ch) {
-  return ch == '\0' || isspace((unsigned char)ch) || ch == ';' || ch == '&' ||
-         ch == '|' || ch == '(' || ch == ')' || ch == '{' || ch == '}';
-}
-
-static bool word_starts_command_position(const char *source, size_t pos) {
-  size_t i;
-
-  if (pos == 0) {
-    return true;
-  }
-
-  i = pos;
-  while (i > 0) {
-    char ch;
-
-    ch = source[i - 1];
-    if (ch == ' ' || ch == '\t') {
-      i--;
-      continue;
-    }
-    if (ch == '\n' || ch == ';' || ch == '&' || ch == '|' || ch == '(' ||
-        ch == ')' || ch == '{' || ch == '}') {
-      return true;
-    }
-    break;
-  }
-
-  if (i == 0) {
-    return true;
-  }
-
-  if (isalnum((unsigned char)source[i - 1]) || source[i - 1] == '_') {
-    size_t start;
-    size_t len;
-
-    start = i - 1;
-    while (start > 0 && (isalnum((unsigned char)source[start - 1]) ||
-                         source[start - 1] == '_')) {
-      start--;
-    }
-    len = i - start;
-    if ((len == 4 && strncmp(source + start, "then", 4) == 0) ||
-        (len == 2 && strncmp(source + start, "do", 2) == 0) ||
-        (len == 4 && strncmp(source + start, "else", 4) == 0) ||
-        (len == 4 && strncmp(source + start, "elif", 4) == 0) ||
-        (len == 2 && strncmp(source + start, "if", 2) == 0) ||
-        (len == 2 && strncmp(source + start, "fi", 2) == 0)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
 static bool keyword_preceded_by_list_separator(const char *source, size_t pos) {
   size_t i;
   char ch;
@@ -634,13 +539,6 @@ static bool command_requires_program_runner(const char *source) {
   return false;
 }
 
-static size_t skip_continuations_forward(const char *source, size_t pos) {
-  while (source[pos] == '\\' && source[pos + 1] == '\n') {
-    pos += 2;
-  }
-  return pos;
-}
-
 static long previous_logical_index(const char *source, size_t pos) {
   long i;
 
@@ -659,7 +557,7 @@ static bool is_async_separator_amp(const char *source, size_t pos) {
     return false;
   }
 
-  next = skip_continuations_forward(source, pos + 1);
+  next = text_skip_continuations_forward(source, pos + 1);
   if (source[next] == '&') {
     return false;
   }
@@ -761,12 +659,12 @@ static bool looks_like_function_header_only(const char *source) {
   while (isspace((unsigned char)cleaned[i])) {
     i++;
   }
-  if (!is_name_start_char(cleaned[i])) {
+  if (!text_is_name_start_char(cleaned[i])) {
     arena_maybe_free(cleaned);
     return false;
   }
   i++;
-  while (is_name_char(cleaned[i])) {
+  while (text_is_name_char(cleaned[i])) {
     i++;
   }
   while (isspace((unsigned char)cleaned[i])) {
@@ -820,7 +718,7 @@ static int execute_pipeline(struct shell_state *state, const char *source,
   int in_fd;
 
   normalized = program_text_collapse_line_continuations(source);
-  work = dup_trimmed_slice(normalized, 0, strlen(normalized));
+  work = text_dup_trimmed_slice(normalized, 0, strlen(normalized));
   arena_maybe_free(normalized);
   cursor = work;
   negate = false;
@@ -868,7 +766,7 @@ static int execute_pipeline(struct shell_state *state, const char *source,
       }
       if (paren_depth == 0 && brace_depth == 0 &&
           (isalpha((unsigned char)ch) || ch == '_') &&
-          word_starts_command_position(cursor, i)) {
+          text_word_starts_command_position(cursor, i)) {
         size_t j;
         size_t boundary;
         char keyword[16];
@@ -890,8 +788,9 @@ static int execute_pipeline(struct shell_state *state, const char *source,
           kwlen++;
           j++;
         }
-        boundary = skip_continuations_forward(cursor, j);
-        if (keyword_boundary(cursor[boundary]) && cursor[boundary] != ')') {
+        boundary = text_skip_continuations_forward(cursor, j);
+        if (text_keyword_boundary(cursor[boundary]) &&
+            cursor[boundary] != ')') {
           if (kwlen == 2 && strncmp(keyword, "if", 2) == 0) {
             if_depth++;
           } else if (kwlen == 2 && strncmp(keyword, "fi", 2) == 0 &&
@@ -948,7 +847,7 @@ static int execute_pipeline(struct shell_state *state, const char *source,
     if (delim) {
       char *part;
 
-      part = dup_trimmed_slice(cursor, start, i);
+      part = text_dup_trimmed_slice(cursor, start, i);
       if (part[0] != '\0') {
         commands = xrealloc(commands, sizeof(*commands) * (cmd_len + 1));
         commands[cmd_len++] = part;
@@ -1254,7 +1153,7 @@ static int execute_andor(struct shell_state *state, const char *source,
       }
       if (paren_depth == 0 && brace_depth == 0 &&
           (isalpha((unsigned char)ch) || ch == '_') &&
-          word_starts_command_position(source, i)) {
+          text_word_starts_command_position(source, i)) {
         size_t j;
         size_t boundary;
         char keyword[16];
@@ -1276,8 +1175,9 @@ static int execute_andor(struct shell_state *state, const char *source,
           kwlen++;
           j++;
         }
-        boundary = skip_continuations_forward(source, j);
-        if (keyword_boundary(source[boundary]) && source[boundary] != ')') {
+        boundary = text_skip_continuations_forward(source, j);
+        if (text_keyword_boundary(source[boundary]) &&
+            source[boundary] != ')') {
           if (kwlen == 2 && strncmp(keyword, "if", 2) == 0) {
             if_depth++;
           } else if (kwlen == 2 && strncmp(keyword, "fi", 2) == 0 &&
@@ -1345,7 +1245,7 @@ static int execute_andor(struct shell_state *state, const char *source,
     if (delim) {
       char *part;
 
-      part = dup_trimmed_slice(source, start, i);
+      part = text_dup_trimmed_slice(source, start, i);
       if (part[0] != '\0') {
         parts = xrealloc(parts, sizeof(*parts) * (part_len + 1));
         parts[part_len++] = part;
@@ -1434,7 +1334,7 @@ char *exec_alias_expand_preview(struct shell_state *state, const char *source) {
   }
 
   logical = program_text_collapse_line_continuations(source);
-  part = dup_trimmed_slice(logical, 0, strlen(logical));
+  part = text_dup_trimmed_slice(logical, 0, strlen(logical));
   arena_maybe_free(logical);
   if (part[0] == '\0') {
     arena_maybe_free(part);
@@ -1580,7 +1480,7 @@ int program_text_execute_internal(struct shell_state *state,
         quote = ch;
       } else if (paren_depth == 0 && brace_depth == 0 &&
                  (isalpha((unsigned char)ch) || ch == '_') &&
-                 word_starts_command_position(source, i)) {
+                 text_word_starts_command_position(source, i)) {
         size_t j;
         size_t boundary;
         char keyword[16];
@@ -1602,8 +1502,9 @@ int program_text_execute_internal(struct shell_state *state,
           kwlen++;
           j++;
         }
-        boundary = skip_continuations_forward(source, j);
-        if (keyword_boundary(source[boundary]) && source[boundary] != ')') {
+        boundary = text_skip_continuations_forward(source, j);
+        if (text_keyword_boundary(source[boundary]) &&
+            source[boundary] != ')') {
           if (kwlen == 2 && strncmp(keyword, "if", 2) == 0) {
             if_depth++;
           } else if (kwlen == 2 && strncmp(keyword, "fi", 2) == 0 &&
@@ -1675,7 +1576,7 @@ int program_text_execute_internal(struct shell_state *state,
       size_t command_start;
       bool heredoc_chunk;
 
-      chunk_raw = dup_slice(source, start, i);
+      chunk_raw = text_dup_slice(source, start, i);
       if (pending_raw != NULL) {
         size_t pending_len;
         size_t chunk_len;
@@ -1699,7 +1600,7 @@ int program_text_execute_internal(struct shell_state *state,
         char *comment_stripped_part;
 
         comment_stripped_part = strip_comments(logical_part);
-        part = dup_trimmed_slice(comment_stripped_part, 0,
+        part = text_dup_trimmed_slice(comment_stripped_part, 0,
                                  strlen(comment_stripped_part));
         arena_maybe_free(comment_stripped_part);
       }

@@ -22,6 +22,7 @@
 #include "signals.h"
 #include "simple_command.h"
 #include "spawn.h"
+#include "text_helpers.h"
 #include "trace.h"
 #include "vars.h"
 
@@ -58,7 +59,6 @@ static int run_program_text_child_body(struct shell_state *state,
                                        const void *payload);
 static bool parse_function_definition(const char *source, char **name_out,
                                       char **body_out);
-static bool keyword_boundary(char ch);
 static bool unwrap_subshell_group(const char *source, char **inner_out,
                                   char **redir_suffix_out);
 static bool unwrap_brace_group(const char *source, char **inner_out,
@@ -72,39 +72,6 @@ static bool try_run_ast_compound_command(struct shell_state *state,
 static void exec_child_command(struct shell_state *parent_state,
                                const char *source);
 static const struct program_text_hooks *get_program_text_hooks(void);
-
-static char *dup_trimmed_slice(const char *src, size_t start, size_t end) {
-  char *out;
-  size_t len;
-
-  while (start < end && isspace((unsigned char)src[start])) {
-    start++;
-  }
-  while (end > start && isspace((unsigned char)src[end - 1])) {
-    end--;
-  }
-
-  len = end - start;
-  out = arena_xmalloc(len + 1);
-  if (len > 0) {
-    memcpy(out, src + start, len);
-  }
-  out[len] = '\0';
-  return out;
-}
-
-static char *dup_slice(const char *src, size_t start, size_t end) {
-  char *out;
-  size_t len;
-
-  len = end - start;
-  out = arena_xmalloc(len + 1);
-  if (len > 0) {
-    memcpy(out, src + start, len);
-  }
-  out[len] = '\0';
-  return out;
-}
 
 static void set_lineno_for_ast_node(struct shell_state *state,
                                     const struct ast_node *node) {
@@ -202,76 +169,6 @@ bool exec_noexec_allows_set_toggle(const char *source) {
   return allowed;
 }
 
-static bool is_name_start_char(char ch) {
-  return isalpha((unsigned char)ch) || ch == '_';
-}
-
-static bool is_name_char(char ch) {
-  return isalnum((unsigned char)ch) || ch == '_';
-}
-
-
-static bool keyword_boundary(char ch) {
-  return ch == '\0' || isspace((unsigned char)ch) || ch == ';' || ch == '&' ||
-         ch == '|' || ch == '(' || ch == ')' || ch == '{' || ch == '}';
-}
-
-static bool word_starts_command_position(const char *source, size_t pos) {
-  size_t i;
-
-  if (pos == 0) {
-    return true;
-  }
-
-  i = pos;
-  while (i > 0) {
-    char ch;
-
-    ch = source[i - 1];
-    if (ch == ' ' || ch == '\t') {
-      i--;
-      continue;
-    }
-    if (ch == '\n' || ch == ';' || ch == '&' || ch == '|' || ch == '(' ||
-        ch == ')' || ch == '{' || ch == '}') {
-      return true;
-    }
-    break;
-  }
-
-  if (i == 0) {
-    return true;
-  }
-
-  if (isalnum((unsigned char)source[i - 1]) || source[i - 1] == '_') {
-    size_t start;
-    size_t len;
-
-    start = i - 1;
-    while (start > 0 && (isalnum((unsigned char)source[start - 1]) ||
-                         source[start - 1] == '_')) {
-      start--;
-    }
-    len = i - start;
-    if ((len == 4 && strncmp(source + start, "then", 4) == 0) ||
-        (len == 2 && strncmp(source + start, "do", 2) == 0) ||
-        (len == 4 && strncmp(source + start, "else", 4) == 0) ||
-        (len == 4 && strncmp(source + start, "elif", 4) == 0) ||
-        (len == 2 && strncmp(source + start, "if", 2) == 0) ||
-        (len == 2 && strncmp(source + start, "fi", 2) == 0)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-static size_t skip_continuations_forward(const char *source, size_t pos) {
-  while (source[pos] == '\\' && source[pos + 1] == '\n') {
-    pos += 2;
-  }
-  return pos;
-}
 
 static bool parse_alt_parameter_command(const char *source, char **name_out,
                                         char **word_out) {
@@ -304,18 +201,18 @@ static bool parse_alt_parameter_command(const char *source, char **name_out,
   if (name_len == 0) {
     return false;
   }
-  if (!is_name_start_char(source[2])) {
+  if (!text_is_name_start_char(source[2])) {
     return false;
   }
   for (i = 3; i < 2 + name_len; i++) {
-    if (!is_name_char(source[i])) {
+    if (!text_is_name_char(source[i])) {
       return false;
     }
   }
 
   word_start = 2 + name_len + 2;
-  *name_out = dup_trimmed_slice(source, 2, 2 + name_len);
-  *word_out = dup_trimmed_slice(source, word_start, len - 1);
+  *name_out = text_dup_trimmed_slice(source, 2, 2 + name_len);
+  *word_out = text_dup_trimmed_slice(source, word_start, len - 1);
   return true;
 }
 
@@ -355,11 +252,11 @@ static bool parse_function_definition(const char *source, char **name_out,
     i++;
   }
   name_start = i;
-  if (!is_name_start_char(source[i])) {
+  if (!text_is_name_start_char(source[i])) {
     return false;
   }
   i++;
-  while (is_name_char(source[i])) {
+  while (text_is_name_char(source[i])) {
     i++;
   }
   name_end = i;
@@ -399,8 +296,8 @@ static bool parse_function_definition(const char *source, char **name_out,
     return false;
   }
 
-  *name_out = dup_trimmed_slice(source, name_start, name_end);
-  *body_out = dup_trimmed_slice(source, body_start, body_end);
+  *name_out = text_dup_trimmed_slice(source, name_start, name_end);
+  *body_out = text_dup_trimmed_slice(source, body_start, body_end);
   return true;
 }
 
@@ -468,8 +365,8 @@ static bool unwrap_subshell_group(const char *source, char **inner_out,
     return false;
   }
 
-  *inner_out = dup_trimmed_slice(source, 1, close_pos);
-  *redir_suffix_out = dup_trimmed_slice(source, close_pos + 1, len);
+  *inner_out = text_dup_trimmed_slice(source, 1, close_pos);
+  *redir_suffix_out = text_dup_trimmed_slice(source, close_pos + 1, len);
   return true;
 }
 
@@ -532,8 +429,8 @@ static bool unwrap_brace_group(const char *source, char **inner_out,
     return false;
   }
 
-  *inner_out = dup_trimmed_slice(source, 1, close_pos);
-  *redir_suffix_out = dup_trimmed_slice(source, close_pos + 1, len);
+  *inner_out = text_dup_trimmed_slice(source, 1, close_pos);
+  *redir_suffix_out = text_dup_trimmed_slice(source, close_pos + 1, len);
   return true;
 }
 
@@ -753,7 +650,8 @@ static bool split_case_redirection_suffix(const char *source, char **core_out,
   while (isspace((unsigned char)source[i])) {
     i++;
   }
-  if (strncmp(source + i, "case", 4) != 0 || !keyword_boundary(source[i + 4])) {
+  if (strncmp(source + i, "case", 4) != 0 ||
+      !text_keyword_boundary(source[i + 4])) {
     return false;
   }
 
@@ -778,7 +676,7 @@ static bool split_case_redirection_suffix(const char *source, char **core_out,
       }
       if (paren_depth == 0 && brace_depth == 0 &&
           (isalpha((unsigned char)ch) || ch == '_') &&
-          word_starts_command_position(source, i)) {
+          text_word_starts_command_position(source, i)) {
         size_t j;
         size_t boundary;
         char keyword[16];
@@ -800,8 +698,9 @@ static bool split_case_redirection_suffix(const char *source, char **core_out,
           kwlen++;
           j++;
         }
-        boundary = skip_continuations_forward(source, j);
-        if (keyword_boundary(source[boundary]) && source[boundary] != ')') {
+        boundary = text_skip_continuations_forward(source, j);
+        if (text_keyword_boundary(source[boundary]) &&
+            source[boundary] != ')') {
           if (kwlen == 4 && strncmp(keyword, "case", 4) == 0) {
             case_depth++;
           } else if (kwlen == 4 && strncmp(keyword, "esac", 4) == 0 &&
@@ -849,8 +748,8 @@ static bool split_case_redirection_suffix(const char *source, char **core_out,
     return false;
   }
 
-  *core_out = dup_trimmed_slice(source, 0, end_pos);
-  *suffix_out = dup_trimmed_slice(source, end_pos, strlen(source));
+  *core_out = text_dup_trimmed_slice(source, 0, end_pos);
+  *suffix_out = text_dup_trimmed_slice(source, end_pos, strlen(source));
   if ((*suffix_out)[0] == '\0') {
     arena_maybe_free(*core_out);
     arena_maybe_free(*suffix_out);
@@ -976,10 +875,10 @@ static int execute_command_atom(struct shell_state *state, const char *source,
   char *trimmed;
   int status;
 
-  trimmed = dup_slice(source, 0, strlen(source));
+  trimmed = text_dup_slice(source, 0, strlen(source));
   collapsed = program_text_collapse_line_continuations(trimmed);
   arena_maybe_free(trimmed);
-  trimmed = dup_trimmed_slice(collapsed, 0, strlen(collapsed));
+  trimmed = text_dup_trimmed_slice(collapsed, 0, strlen(collapsed));
   arena_maybe_free(collapsed);
   if (trimmed[0] == '\0') {
     arena_maybe_free(trimmed);
